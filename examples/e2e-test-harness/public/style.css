@@ -1,0 +1,76 @@
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+  font-size: 14px;
+  margin: 0;
+  color: #1a1a1a;
+  background: #f6f6f8;
+}
+header {
+  background: #1a1a2e;
+  color: #fff;
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+header a { color: #cfd8ff; text-decoration: none; font-size: 13px; }
+header a:hover { text-decoration: underline; }
+header .brand { font-weight: 700; color: #fff; margin-right: 8px; }
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 0;
+  align-items: start;
+}
+main {
+  padding: 20px 28px;
+  max-width: 900px;
+}
+aside {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  background: #111124;
+  color: #d7d7e0;
+  padding: 14px;
+  border-left: 1px solid #2a2a44;
+}
+aside h3 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa0d8; }
+.activity-item { padding: 6px 8px; margin-bottom: 6px; border-radius: 4px; background: #1c1c36; font-size: 12px; }
+.activity-item .kind { display: inline-block; font-weight: 700; padding: 1px 6px; border-radius: 3px; font-size: 10px; margin-right: 6px; }
+.activity-item .kind.hook { background: #2d5a2d; color: #baffba; }
+.activity-item .kind.webhook { background: #5a3d2d; color: #ffd8ba; }
+.activity-item .kind.error { background: #5a2d2d; color: #ffbaba; }
+.activity-item .label { font-weight: 600; }
+.activity-item .at { color: #8888a8; font-size: 10px; }
+.activity-item pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-all; color: #b8b8d0; }
+
+h1 { font-size: 20px; margin-top: 0; }
+h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+.card { background: #fff; border: 1px solid #e0e0e6; border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+.flag { background: #fff8e1; border: 1px solid #f0d878; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
+.flag.blocked { background: #fdeaea; border-color: #e79a9a; }
+label { display: block; font-weight: 600; margin: 10px 0 4px; font-size: 13px; }
+input, select { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+button {
+  background: #3a3af4; color: #fff; border: none; padding: 7px 14px; border-radius: 4px;
+  cursor: pointer; font-size: 13px; margin: 8px 6px 0 0;
+}
+button:hover { background: #2d2dd0; }
+button.secondary { background: #666; }
+button.danger { background: #c0392b; }
+pre.result { background: #0d0d1a; color: #9effa0; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+pre.result.err { color: #ff9e9e; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eee; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
+.badge.ok { background: #d4f5d4; color: #1a6b1a; }
+.badge.bad { background: #f5d4d4; color: #8b1a1a; }
+.step { color: #666; font-size: 12px; margin-bottom: 4px; }
+.checklist { list-style: none; padding: 0; }
+.checklist li { padding: 8px 0; border-bottom: 1px solid #eee; }
+.checklist a { font-weight: 600; }
+code { background: #eee; padding: 1px 5px; border-radius: 3px; }

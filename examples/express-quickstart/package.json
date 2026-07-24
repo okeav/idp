@@ -1,0 +1,14 @@
+{
+  "name": "idp-core-express-quickstart",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  },
+  "dependencies": {
+    "@okeav/idp-core": "file:../..",
+    "express": "^5.2.1",
+    "cookie-parser": "^1.4.7"
+  }
+}

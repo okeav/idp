@@ -1,0 +1,16 @@
+{
+  "name": "idp-core-e2e-test-harness",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Manual click-through test harness for every @okeav/idp-core feature — see README.md.",
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  },
+  "dependencies": {
+    "@okeav/idp-core": "file:../..",
+    "express": "^5.2.1",
+    "cookie-parser": "^1.4.7",
+    "otplib": "^13.4.1"
+  }
+}

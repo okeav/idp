@@ -1,0 +1,71 @@
+version: "3.9"
+
+# Local dev stack for @okeav/idp-core.
+#
+#   docker compose up
+#
+# ...and nothing else — mongo starts as a single-node replica set, and the
+# one-shot `mongo-init` service waits for it to be healthy and runs
+# rs.initiate() automatically. Re-running `docker compose up` against an
+# already-initiated data volume is safe: mongo-init detects the existing
+# replica set and does nothing.
+#
+# A replica set (even a single-node one) is required for this package's
+# Mongo transactions to work — see README.md and
+# src/storage/mongo/assert-transactions.js for why. This compose file is
+# also the fix path assert-transactions.js's startup error points people at.
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: idp-mongo
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - idp-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  mongo-init:
+    image: mongo:7
+    container_name: idp-mongo-init
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - mongosh
+      - --host=mongo:27017
+      - --quiet
+      - --eval
+      - |
+        try {
+          rs.status();
+          print('[mongo-init] replica set already initiated — nothing to do');
+        } catch (e) {
+          print('[mongo-init] initiating single-node replica set rs0...');
+          rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] });
+        }
+
+  redis:
+    image: redis:7-alpine
+    container_name: idp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - idp-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  idp-mongo-data:
+  idp-redis-data:
