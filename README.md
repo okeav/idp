@@ -81,6 +81,8 @@ Everything else has a sensible default. RBAC-shaped config (roles, scopes, capab
 
 For login flows that mint a session on your behalf (password login, MFA-verify, SSO callback), configure `hooks.resolveAuthContext(user, ctx)` to build that `claims` object — it's called synchronously right before the token is issued and defaults to `() => ({})` if you don't supply one.
 
+`POST /refresh` does **not** call `resolveAuthContext` again by default — the refreshed access token carries forward the `claims` snapshot taken at login, for the life of that refresh-token session. That means a capability/role change you make mid-session (e.g. an admin revokes a permission) only takes effect once the user's refresh token itself is replaced by a fresh login, not at the next access-token rotation. Set `config.session.reresolveClaimsOnRefresh: true` to have `/refresh` re-invoke `resolveAuthContext(user, { isNewUser: false, method: 'refresh' })` on every call instead, so changes take effect within one access-token TTL — at the cost of one extra call to your hook (and whatever it looks up) on every refresh.
+
 ### Event hooks
 
 All hooks are optional, default to no-ops, and are awaited-but-never-thrown — a hook that throws is logged and swallowed, never breaks the request it's attached to.
@@ -94,7 +96,7 @@ All hooks are optional, default to no-ops, and are awaited-but-never-thrown — 
 | `onSuspiciousActivityDetected` | Account locked after too many failed logins. |
 | `onNewDeviceLogin` | Login from a browser/OS combination not seen before for this user. |
 | `onMagicLinkRequested` | Magic-link login requested — carries the raw token to embed in the emailed link. |
-| `resolveAuthContext(user, ctx)` | Password login, MFA-verify, SSO callback, magic-link verify, WebAuthn login — builds the access token's `claims`. |
+| `resolveAuthContext(user, ctx)` | Password login, MFA-verify, SSO callback, magic-link verify, WebAuthn login — builds the access token's `claims`. Also called on `/refresh` if `config.session.reresolveClaimsOnRefresh: true` (default false). |
 
 This package never talks to a message bus, SMTP server, or push provider directly — wire your own inside these hooks.
 

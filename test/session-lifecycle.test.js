@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTestApp, uniqueEmail } from './helpers/build-test-app.js';
+import { buildTestApp, withTemporaryApp, uniqueEmail } from './helpers/build-test-app.js';
+import { verifyAccessToken } from '../src/index.js';
 
 let app;
 
@@ -13,10 +14,14 @@ after(async () => {
 });
 
 async function registerVerifyLogin(email, password) {
-    await fetch(`${app.baseUrl}/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
-    const code = app.hookCalls.onVerificationEmailRequested.find((c) => c.email === email).verificationCode;
-    await fetch(`${app.baseUrl}/register/verify-email`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code }) });
-    const res = await fetch(`${app.baseUrl}/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+    return registerVerifyLoginOn(app, email, password);
+}
+
+async function registerVerifyLoginOn(targetApp, email, password) {
+    await fetch(`${targetApp.baseUrl}/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+    const code = targetApp.hookCalls.onVerificationEmailRequested.find((c) => c.email === email).verificationCode;
+    await fetch(`${targetApp.baseUrl}/register/verify-email`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code }) });
+    const res = await fetch(`${targetApp.baseUrl}/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
     return res.json();
 }
 
@@ -86,4 +91,37 @@ test('logout/all revokes every session for the user', async () => {
         const res = await fetch(`${app.baseUrl}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken: rt }) });
         assert.equal(res.status, 401, 'every session should be revoked after logout/all');
     }
+});
+
+test('by default, /refresh carries forward the login-time claims verbatim — a resolveAuthContext change mid-session has no effect yet', async () => {
+    let role = 'member';
+    await withTemporaryApp({ hooks: { resolveAuthContext: async () => ({ claims: { role } }) } }, async (tempApp) => {
+        const email = uniqueEmail('no-rederive');
+        const { refreshToken, accessToken: firstAccess } = await registerVerifyLoginOn(tempApp, email, 'Str0ng!Passw0rd');
+        assert.equal((await verifyAccessToken(firstAccess)).claims.role, 'member');
+
+        role = 'admin'; // simulate e.g. an admin changing this user's role mid-session
+
+        const refreshRes = await fetch(`${tempApp.baseUrl}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }) });
+        const { accessToken: secondAccess } = await refreshRes.json();
+        assert.equal((await verifyAccessToken(secondAccess)).claims.role, 'member', 'stale claims carried forward — role change not reflected until next login');
+    });
+});
+
+test('config.session.reresolveClaimsOnRefresh:true makes /refresh re-derive claims via resolveAuthContext', async () => {
+    let role = 'member';
+    await withTemporaryApp(
+        { config: { session: { reresolveClaimsOnRefresh: true } }, hooks: { resolveAuthContext: async () => ({ claims: { role } }) } },
+        async (tempApp) => {
+            const email = uniqueEmail('rederive');
+            const { refreshToken, accessToken: firstAccess } = await registerVerifyLoginOn(tempApp, email, 'Str0ng!Passw0rd');
+            assert.equal((await verifyAccessToken(firstAccess)).claims.role, 'member');
+
+            role = 'admin';
+
+            const refreshRes = await fetch(`${tempApp.baseUrl}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }) });
+            const { accessToken: secondAccess } = await refreshRes.json();
+            assert.equal((await verifyAccessToken(secondAccess)).claims.role, 'admin', 'role change should take effect on the very next refresh');
+        }
+    );
 });

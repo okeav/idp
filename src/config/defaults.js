@@ -13,6 +13,7 @@ export function withDefaults(config = {}) {
         ...config,
         cache: { adapter: 'memory', keyPrefix: 'idp:', ...config.cache },
         cookies: { secure: process.env.NODE_ENV !== 'development', sameSite: 'lax', domain: undefined, ...config.cookies },
+        session: { reresolveClaimsOnRefresh: false, ...config.session },
         ttls: { ...DEFAULT_TTL_SECONDS, ...config.ttls },
         security: {
             maxFailedLoginAttempts: 5,

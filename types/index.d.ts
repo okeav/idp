@@ -49,6 +49,17 @@ export interface IdpConfig {
     };
     signingKeys: { keys: Record<string, SigningKeyEntry> };
     cookies?: { secure?: boolean; sameSite?: 'lax' | 'strict' | 'none'; domain?: string };
+    session?: {
+        /**
+         * Default false: `POST /refresh` carries forward the access token's
+         * `claims` verbatim from the session that was created at login,
+         * without calling `hooks.resolveAuthContext` again. Set true to
+         * re-invoke `resolveAuthContext` on every refresh instead, so a
+         * capability/role change takes effect on the next access-token
+         * rotation rather than only at the next full login.
+         */
+        reresolveClaimsOnRefresh?: boolean;
+    };
     ttls?: Partial<{
         accessToken: number; idToken: number; refreshToken: number; internalToken: number;
         authCode: number; revocationCache: number; refreshTokenCache: number;

@@ -278,10 +278,18 @@ export async function refreshTokenHandler(req, res, next) {
         const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash);
         if (!existing) throw new IdpError({ code: 'INVALID_REFRESH_TOKEN', httpStatus: 401, message: 'Invalid or expired refresh token' });
 
-        const user = await state.storage.userRepository.findById(existing.user, { select: 'email status' });
+        // Default (narrow) select would be enough for the status check alone,
+        // but a full user is fetched so resolveAuthContext gets the same
+        // shape of `user` it gets from every other login path, in case
+        // config.session.reresolveClaimsOnRefresh is enabled below.
+        const user = await state.storage.userRepository.findById(existing.user);
         if (!user || user.status !== IDENTITY_STATUS.ACTIVE) throw new IdpError({ code: 'USER_NOT_ACTIVE', httpStatus: 403, message: 'User account is not active' });
 
-        const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims: existing.claims || {} });
+        const claims = state.config.session.reresolveClaimsOnRefresh
+            ? await resolveClaims(state, user, { isNewUser: false, method: 'refresh' })
+            : existing.claims || {};
+
+        const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims });
         const newRefreshTokenValue = generateOpaqueToken();
         const newRefreshTokenHash = hashOpaqueToken(state, newRefreshTokenValue);
         const refreshExpiresAt = refreshTokenExpiresAt(state);
@@ -296,7 +304,7 @@ export async function refreshTokenHandler(req, res, next) {
             ipAddress: req.ip,
             deviceInfo,
             deviceFingerprint: buildDeviceFingerprint(deviceInfo),
-            claims: existing.claims || {},
+            claims,
         });
 
         await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${existing.jti}`, '1', state.config.ttls.revocationCache);
