@@ -5,6 +5,17 @@
   "type": "module",
   "license": "MIT",
   "author": "Okeav",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adaptiveedge/IdentityProvider.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adaptiveedge/IdentityProvider/issues"
+  },
+  "homepage": "https://github.com/adaptiveedge/IdentityProvider#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "./src/index.js",
   "types": "./types/index.d.ts",
   "scripts": {
