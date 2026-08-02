@@ -128,6 +128,9 @@ export async function denyConsentHandler(req, res, next) {
         const state = getState();
         const { redirect_uri, state: oauthState, client_id } = req.body;
 
+        const client = await loadActiveClient(state, client_id);
+        validateRedirectUri(client, redirect_uri);
+
         await auditLog(state.logger, state.hooks, 'OAUTH2_CONSENT_DENIED', { userId: req.auth?.userId, clientId: client_id });
 
         const redirectUrl = new URL(redirect_uri);

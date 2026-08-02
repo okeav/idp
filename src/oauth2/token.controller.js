@@ -103,7 +103,11 @@ async function handleRefreshTokenGrant(req, res) {
     const user = await state.storage.userRepository.findById(existing.user);
     if (!user || user.status !== IDENTITY_STATUS.ACTIVE) throw new IdpError({ code: 'USER_NOT_ACTIVE', httpStatus: 400, message: 'User account is not active' });
 
-    const scopes = client.allowedScopes || [];
+    // Refreshing must never grant more than the user originally consented to — narrow the
+    // originally-granted scopes to whatever the client is still allowed, don't recompute from scratch.
+    const grantedScopes = existing.claims?.scopes || [];
+    const allowedScopes = new Set(client.allowedScopes || []);
+    const scopes = grantedScopes.filter((s) => s === 'openid' || allowedScopes.has(s));
     const accessTokenResult = await issueOAuth2AccessToken(state, user, client, scopes);
     const newRefreshTokenValue = generateOpaqueToken();
     const refreshExpiresAt = new Date(Date.now() + (client.refreshTokenTTL || state.config.ttls.refreshToken) * 1000);

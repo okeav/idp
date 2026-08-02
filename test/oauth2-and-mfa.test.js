@@ -148,6 +148,94 @@ test('allowedGrants is enforced: a client not registered for client_credentials 
     assert.equal((await tokenRes.json()).error, 'INVALID_REQUEST');
 });
 
+test('POST /oauth2/authorize/deny rejects a redirect_uri not registered to the client (open-redirect guard)', async () => {
+    const redirectUri = 'https://client.example.com/callback';
+    const registerRes = await fetch(`${app.baseUrl}/oauth2/clients`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            name: 'Deny Test Client', slug: `deny-client-${Date.now()}`,
+            redirectUris: [redirectUri], allowedScopes: ['openid'],
+        }),
+    });
+    const client = await registerRes.json();
+    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST' });
+
+    const email = uniqueEmail('denyuser');
+    const { accessToken } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
+
+    const denyRes = await fetch(`${app.baseUrl}/oauth2/authorize/deny`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ client_id: client.clientId, redirect_uri: 'https://evil.example.com/steal', state: 'xyz' }),
+        redirect: 'manual',
+    });
+    assert.equal(denyRes.status, 400, 'an unregistered redirect_uri must not be followed');
+    assert.equal((await denyRes.json()).error, 'INVALID_REDIRECT_URI');
+
+    // A redirect_uri that is actually registered to the client still works.
+    const okDenyRes = await fetch(`${app.baseUrl}/oauth2/authorize/deny`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ client_id: client.clientId, redirect_uri: redirectUri, state: 'xyz' }),
+        redirect: 'manual',
+    });
+    assert.equal(okDenyRes.status, 302);
+    const location = new URL(okDenyRes.headers.get('location'));
+    assert.equal(location.searchParams.get('error'), 'access_denied');
+});
+
+test('refresh_token grant narrows to the originally-consented scopes, not the client\'s current allowedScopes', async () => {
+    const redirectUri = 'https://client.example.com/callback';
+    const registerRes = await fetch(`${app.baseUrl}/oauth2/clients`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            name: 'Refresh Scope Client', slug: `refresh-scope-client-${Date.now()}`,
+            redirectUris: [redirectUri], allowedScopes: ['openid', 'email', 'profile'],
+        }),
+    });
+    const client = await registerRes.json();
+    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST' });
+
+    const email = uniqueEmail('refreshscopeuser');
+    const { accessToken } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
+
+    // User only ever consents to "openid email" — "profile" is never granted.
+    const confirmRes = await fetch(`${app.baseUrl}/oauth2/authorize/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ client_id: client.clientId, redirect_uri: redirectUri, scope: 'openid email' }),
+        redirect: 'manual',
+    });
+    const code = new URL(confirmRes.headers.get('location')).searchParams.get('code');
+
+    const tokenRes = await fetch(`${app.baseUrl}/oauth2/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: client.clientId, client_secret: client.clientSecret }),
+    });
+    const tokenBody = await tokenRes.json();
+    assert.equal(tokenBody.scope, 'openid email');
+
+    // Later, the client is granted a broader allowedScopes by an admin. A refresh must not
+    // silently pick up "profile" — the resource owner never consented to it.
+    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowedScopes: ['openid', 'email', 'profile', 'admin.everything'] }),
+    });
+
+    const refreshRes = await fetch(`${app.baseUrl}/oauth2/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: tokenBody.refresh_token, client_id: client.clientId, client_secret: client.clientSecret }),
+    });
+    const refreshBody = await refreshRes.json();
+    assert.equal(refreshRes.status, 200, JSON.stringify(refreshBody));
+    assert.equal(refreshBody.scope, 'openid email', 'refresh must not widen scope beyond what the user originally consented to');
+});
+
 test('MFA: setup -> confirm -> login requires challenge -> verify -> full session issued', async () => {
     const email = uniqueEmail('mfauser');
     const password = 'Str0ng!Passw0rd';
