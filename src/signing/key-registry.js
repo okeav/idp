@@ -44,6 +44,15 @@ export function getVerifiableKeys(registry) {
     return Object.entries(registry).filter(([, k]) => PUBLISHABLE_STATUSES.includes(k.status));
 }
 
+/**
+ * Looks up a key for verification purposes by `kid`. A REVOKED key never
+ * verifies, regardless of `kid` match — this is the one status that must
+ * actually invalidate previously-issued tokens, not just stop being
+ * published/used for new signing. ACTIVE/ROTATING/RETIRED all still verify,
+ * matching the set `/keys/:kid` allows.
+ */
 export function getPublicKeyByKid(registry, kid) {
-    return registry[kid]?.publicKeyPem ?? null;
+    const entry = registry[kid];
+    if (!entry || entry.status === KEY_STATUS.REVOKED) return null;
+    return entry.publicKeyPem;
 }
