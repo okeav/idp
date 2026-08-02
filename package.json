@@ -1,6 +1,6 @@
 {
   "name": "@okeav/idp-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone, pluggable identity provider for Node.js/TypeScript backends — OAuth2/OIDC authorization server, password + MFA + social login, session management, and service-to-service JWKS trust. Bring your own MongoDB.",
   "type": "module",
   "license": "MIT",
@@ -31,6 +31,7 @@
     "src",
     "types",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     ".env.example"
   ],
