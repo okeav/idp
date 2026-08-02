@@ -7,12 +7,12 @@
   "author": "Okeav",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/adaptiveedge/IdentityProvider.git"
+    "url": "git+https://github.com/okeav/idp.git"
   },
   "bugs": {
-    "url": "https://github.com/adaptiveedge/IdentityProvider/issues"
+    "url": "https://github.com/okeav/idp/issues"
   },
-  "homepage": "https://github.com/adaptiveedge/IdentityProvider#readme",
+  "homepage": "https://github.com/okeav/idp#readme",
   "publishConfig": {
     "access": "public"
   },
