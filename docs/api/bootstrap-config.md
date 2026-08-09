@@ -207,6 +207,11 @@ session on your behalf (password login, MFA-verify, SSO callback, magic-link ver
 login), configure `hooks.resolveAuthContext(user, ctx)` to build that `claims` object — called
 synchronously right before token issuance, defaults to `() => ({})`.
 
+The `User` record handed to `resolveAuthContext` has no generic field for your own app data
+(a `role`, an RBAC `capabilities` array, ...) — see
+[Storing App-Specific User Data](../examples/consumer-managed-app-data.md) for the intended
+pattern: a consumer-owned collection joined by `user.id`, looked up inside this hook.
+
 ## What this package deliberately does not do
 
 - No RBAC decisioning — no scope catalogue, wildcard permission matcher, or `requirePermission()`.
@@ -251,3 +256,5 @@ built on top of these same hooks.
 - [Repository Adapters](repository-adapters.md) — the `storage.factory` extension point.
 - [Cache Interface](cache-interface.md), [Rate Limiter Interface](rate-limiter-interface.md)
 - [Outbound Webhooks](webhooks.md)
+- [Storing App-Specific User Data](../examples/consumer-managed-app-data.md) — the
+  `resolveAuthContext` pattern for role/capability/profile fields idp-core doesn't model itself.

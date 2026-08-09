@@ -149,3 +149,6 @@ adapter is responsible for whatever atomicity guarantees it needs on its own.
 
 - [Repository Adapters](../api/repository-adapters.md) — the full eight-interface contract.
 - [Bootstrap & Config](../api/bootstrap-config.md) — `config.storage`/`config.mongo`.
+- [Storing App-Specific User Data](consumer-managed-app-data.md) — the default pattern for a
+  `role`/`capabilities`/profile field (a separate consumer-owned collection). Reach for Pattern 1
+  on this page only when the field genuinely needs to live on idp-core's own user document.
