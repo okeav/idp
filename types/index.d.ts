@@ -252,7 +252,7 @@ export function verifyServiceTokenRemote(token: string, opts: { expectedAud: str
 
 // ── Middleware ───────────────────────────────────────────────────────────
 
-export function authContextMiddleware(opts?: { issuer?: string }): RequestHandler;
+export function authContextMiddleware(opts?: { issuer?: string; optional?: boolean }): RequestHandler;
 export function serviceContextMiddleware(opts?: { ownServiceName?: string }): RequestHandler;
 export function requireServiceCallerMiddleware(...allowedCallers: string[]): RequestHandler;
 export function validateBody(schema: { parse: (input: unknown) => unknown }): RequestHandler;

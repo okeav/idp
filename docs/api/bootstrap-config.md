@@ -156,6 +156,20 @@ interface IdpConfig {
 }
 ```
 
+### `cookies.secure` and local browser testing
+
+`cookies.secure` defaults to `NODE_ENV !== 'development'` — correct fail-safe behavior for
+production, but easy to trip over locally: a plain `tsx watch server.ts` / `node server.js` run
+leaves `NODE_ENV` unset, so `Secure` cookies get issued over `http://` by default. A real browser
+silently refuses to store or send a `Secure` cookie on a non-HTTPS origin — but `curl`, Postman,
+and most HTTP clients don't enforce `Secure` at all, so a login flow that looks like it works from
+the terminal can still be completely broken in an actual browser with no error surfaced anywhere.
+Set `NODE_ENV=development`, or pass `cookies: { secure: false }` explicitly, when testing a
+cookie-based (browser) login flow locally. Only relevant if you're relying on the `access_token`/
+`refresh_token` cookies at all — an `Authorization: Bearer` client (see
+[Register, Login, Refresh, Logout](../examples/register-login-refresh-logout.md)) never touches
+cookies and is unaffected.
+
 ### `SigningKeyEntry`
 
 ```ts

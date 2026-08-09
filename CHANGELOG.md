@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adheres to [Semantic Versioning](https://semver.org/) (pre-1.0: a `MINOR` bump may include
 backwards-incompatible changes, per the [semver spec's rules for 0.y.z](https://semver.org/#spec-item-4)).
 
+## [0.2.1] - 2026-08-09
+
+### Fixed
+
+- **`authContextMiddleware`'s published type declaration was missing `optional`.** The JSDoc and
+  runtime already supported `authContextMiddleware({ optional: true })` (populate `req.auth` when
+  a valid token is present, but don't reject when no token is presented at all — used by routes
+  that behave differently for logged-in vs. anonymous callers). `types/index.d.ts` only declared
+  `opts?: { issuer?: string }`, so TypeScript consumers passing `optional` got a compile error
+  against otherwise-correct, already-working code. No runtime change.
+
+### Documentation
+
+- Added [Storing App-Specific User Data](docs/examples/consumer-managed-app-data.md) — the
+  canonical pattern for attaching a `role`/`capabilities`/profile field to a user via a
+  consumer-owned collection joined by `user.id`, since idp-core's own `User` record has no such
+  field. Cross-linked from Bootstrap & Config and the repository-adapter extension example.
+- Documented the `cookies.secure` / `NODE_ENV` interaction in Bootstrap & Config and the
+  quickstart/magic-link examples: a plain local run leaves `NODE_ENV` unset, which defaults
+  `cookies.secure` to `true` and makes a real browser silently refuse the session cookie over
+  `http://` — invisible to `curl`, which doesn't enforce `Secure` at all.
+
 ## [0.2.0] - 2026-08-02
 
 ### Fixed

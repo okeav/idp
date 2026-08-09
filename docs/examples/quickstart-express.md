@@ -104,6 +104,12 @@ curl -X POST http://localhost:3000/auth/login \
 - The `memory` cache/rate-limit adapters are single-instance only — switch to Redis before running
   more than one process (see [Redis Cache Adapter](redis-cache-adapter.md)).
 - No HTTPS or CORS configured — that's Express's and your app's job, same as any Express server.
+- **If you're testing a browser (cookie-based) login flow against this locally**, set
+  `NODE_ENV=development` (or pass `cookies: { secure: false }` explicitly) — `cookies.secure`
+  defaults to `NODE_ENV !== 'development'`, and a real browser silently refuses to store or send a
+  `Secure` cookie over plain `http://`. This fails quietly: `curl`/Postman don't enforce `Secure`
+  at all, so a login that looks like it worked in a terminal can still be broken in an actual
+  browser. Only matters for the cookie path — an `Authorization: Bearer` client is unaffected.
 
 ## Related
 

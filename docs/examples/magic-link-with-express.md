@@ -90,6 +90,11 @@ async function verifyMagicLink(token) {
 `isNewUser: true` in the response tells your frontend this was a first-time signup via magic
 link — useful for routing to an onboarding flow vs. a normal post-login redirect.
 
+Testing this against `http://localhost` in a real browser (not just `curl`)? See
+[`cookies.secure` and local browser testing](../api/bootstrap-config.md#cookiessecure-and-local-browser-testing)
+— the `credentials: 'include'` cookie path above silently fails in a real browser, without an
+error anywhere, unless `NODE_ENV=development` or `cookies: { secure: false }` is set.
+
 ## Related
 
 - [Magic Link](../api/magic-link.md) — full handler reference, including the enumeration-safety
