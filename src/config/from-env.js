@@ -51,6 +51,14 @@ export function configFromEnv(env = process.env) {
         mfa: {
             issuerLabel: env.IDP_MFA_ISSUER_LABEL || 'App',
             recoveryCodeCount: num(env.IDP_MFA_RECOVERY_CODE_COUNT, 10),
+            enabled: bool(env.IDP_MFA_ENABLED, true),
+            encryptionKey: env.IDP_MFA_ENCRYPTION_KEY || undefined,
+            previousEncryptionKeys: (env.IDP_MFA_PREVIOUS_ENCRYPTION_KEYS || '').split(',').map((k) => k.trim()).filter(Boolean),
+            requireEncrypted: bool(env.IDP_MFA_REQUIRE_ENCRYPTED, false),
+            allowPlaintext: bool(env.IDP_MFA_ALLOW_PLAINTEXT, false),
+        },
+        session: {
+            verifyOnEachRequest: bool(env.IDP_SESSION_VERIFY_ON_EACH_REQUEST, true),
         },
         oauthProviders: {
             google: env.IDP_SSO_GOOGLE_CLIENT_ID ? { clientId: env.IDP_SSO_GOOGLE_CLIENT_ID, clientSecret: env.IDP_SSO_GOOGLE_CLIENT_SECRET } : undefined,

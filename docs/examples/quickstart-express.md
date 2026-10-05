@@ -19,6 +19,8 @@ A complete, runnable identity server in one file. Based on the package's own
   Easiest path: `docker compose up -d` using the `docker-compose.yml` shipped in the package repo,
   which starts a single-node replica set with `rs.initiate()` already run.
 - `npm install @okeav/idp-core express cookie-parser`
+- An MFA encryption key, generated once and kept: `export IDP_MFA_ENCRYPTION_KEY=$(openssl rand -base64 32)`
+  — `initIdentityProvider()` refuses to start without one while MFA is enabled (the default).
 
 ## Code
 
@@ -48,6 +50,10 @@ await initIdentityProvider({
     emailHashPepper: 'dev-only-pepper-do-not-use-in-prod',
     tokenHashSecret: 'dev-only-token-secret-do-not-use-in-prod',
   },
+
+  // Encrypts TOTP secrets at rest. Must stay the same across restarts, or enrolled
+  // users' secrets become unreadable. Don't use TOTP? `mfa: { enabled: false }` instead.
+  mfa: { encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY },
 
   hooks: {
     // No real mailer wired up — print what would have been sent.
@@ -101,6 +107,12 @@ curl -X POST http://localhost:3000/auth/login \
 - The signing key is regenerated every restart here — pin one via a persisted PEM for anything
   beyond a demo (see [Tokens & Signing](../api/tokens-rs256.md)).
 - `emailHashPepper`/`tokenHashSecret` are placeholders — generate real random secrets.
+- `buildRouter()` with no options leaves OAuth2 client administration (`/oauth2/clients*`)
+  unmounted — pass `clientManagement: { middleware: [yourAdminAuth] }` if you need it (see
+  [Router & Schemas](../api/router-and-schemas.md)).
+- Every authenticated request does one indexed session lookup (`session.verifyOnEachRequest`,
+  default on) so logout-all and password reset take effect immediately — see
+  [Middleware](../api/middleware.md).
 - The `memory` cache/rate-limit adapters are single-instance only — switch to Redis before running
   more than one process (see [Redis Cache Adapter](redis-cache-adapter.md)).
 - No HTTPS or CORS configured — that's Express's and your app's job, same as any Express server.

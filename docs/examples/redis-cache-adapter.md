@@ -28,6 +28,7 @@ await initIdentityProvider({
   mongo: { uri: process.env.MONGO_URI },
   signingKeys: { keys: { /* ... */ } },
   security: { emailHashPepper: '...', tokenHashSecret: '...' },
+  mfa: { encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY },
 
   cache: {
     adapter: 'redis',

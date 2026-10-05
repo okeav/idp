@@ -18,19 +18,26 @@ internally — no internal state object leaks into the public signatures.
 ```ts
 function issueAccessToken(
   input: { sub: string; email?: string; claims?: Record<string, unknown> },
-  opts?: { ttlSeconds?: number; audience?: string }
+  opts?: { ttlSeconds?: number; audience?: string; sessionless?: boolean }
 ): Promise<IssuedToken>
 ```
 
 `IssuedToken` is `{ token: string; expiresAt: Date; kid: string; jti: string }`.
 
-Payload signed: `{ sub, email, claims, type: 'access_token', iss: config.issuer, aud: opts.audience ?? config.issuer, jti: crypto.randomUUID(), iat, exp }`.
+Payload signed: `{ sub, email, claims, type: 'access_token', iss: config.issuer, aud: opts.audience ?? config.issuer, jti: crypto.randomUUID(), iat, exp }`, plus `sessionless: true` when set.
 
 - `opts.ttlSeconds` defaults to `config.ttls.accessToken` (3600s).
+- `opts.sessionless` defaults to **`true`** for this public export: a token minted here has no
+  session row behind it, so it's marked `sessionless` and exempt from `authContextMiddleware`'s
+  per-request session check (`session.verifyOnEachRequest` — see [Middleware](middleware.md)),
+  which would otherwise reject it as `TOKEN_REVOKED`. It also means logout-all/password reset can't
+  revoke it before `exp`. Pass `{ sessionless: false }` only if you created a session row with this
+  token's `jti` yourself.
 - Throws `MISSING_REQUIRED_FIELDS` (400) if `sub` is omitted.
-- This is the same function `loginHandler`, `verifyMagicLinkHandler`, `verifyAuthenticationHandler`
-  (WebAuthn), and SSO callback all call internally via `issueSession()` — there is no separate,
-  weaker token-issuance path for any login method.
+- `loginHandler`, `verifyMagicLinkHandler`, `verifyAuthenticationHandler` (WebAuthn), MFA verify,
+  refresh, and the SSO callback all sign through the same underlying function via `issueSession()`
+  — there is no separate, weaker token-issuance path for any login method. Those tokens are
+  session-bound (never `sessionless`).
 
 ## `verifyAccessToken(token, opts?)`
 
@@ -66,7 +73,8 @@ token endpoint — see [OIDC](oidc.md).
 function issueOAuth2AccessToken(
   subject: { id: string },
   client: { clientId: string; accessTokenTTL?: number },
-  scopes: string[]
+  scopes: string[],
+  opts?: { sessionless?: boolean } // default true for this public export — see issueAccessToken above
 ): Promise<IssuedToken>
 ```
 
@@ -78,6 +86,10 @@ config.ttls.accessToken`. The signed payload carries **both** top-level `scope`/
 token verifies through the exact same `verifyAccessToken`/`authContextMiddleware` path as
 password- and SSO-issued tokens, all of which require `type: 'access_token'`; a flat
 OAuth2-only claim set would otherwise lack that field.
+
+The token endpoint's `authorization_code`/`refresh_token` grants create a session row with the
+token's `jti` (session-bound, revocable); the `client_credentials` grant has none and marks its
+token `sessionless`.
 
 ## `issueMfaChallengeToken(subjectId)` / `verifyMfaChallengeToken(token)`
 

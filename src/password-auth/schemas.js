@@ -45,7 +45,8 @@ export const changePasswordSchema = z.object({
     newPassword: password(),
 }).strict();
 
-export const logoutSchema = z.object({ refreshToken: z.string().min(1) }).strict();
+// refreshToken is optional: browser clients send it as the httpOnly refresh_token cookie instead, which logoutHandler also reads.
+export const logoutSchema = z.object({ refreshToken: z.string().min(1).optional() }).strict().optional();
 
 export const updateProfileSchema = z.object({
     firstName: name().optional(),

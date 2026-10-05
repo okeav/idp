@@ -21,10 +21,41 @@ export interface StorageContract {
     verificationTokenRepository: unknown;
     serviceKeyRepository: unknown;
     credentialRepository: unknown;
+    /** Optional — see `AttemptCounterRepository`. Without it the per-account MFA lockout is counted in-process only. */
+    attemptCounterRepository?: AttemptCounterRepository;
     // Loosely typed for now — the full per-repository shapes are documented
     // as JSDoc in src/storage/interfaces.js; a future pass may promote them
     // to real TS interfaces here.
 }
+
+/**
+ * Optional storage repository behind the per-account MFA lockout: atomic
+ * fixed-window failure counters with a lock, shared by every app instance.
+ * See src/storage/interfaces.js for the exact semantics `recordFailure` must have.
+ */
+export interface AttemptCounterRepository {
+    get(key: string): Promise<{ count: number; windowExpiresAt: Date; lockedUntil: Date | null } | null>;
+    recordFailure(key: string, opts: { max: number; windowSeconds: number; lockSeconds: number }): Promise<{ count: number; windowExpiresAt: Date; lockedUntil: Date | null }>;
+    reset(key: string): Promise<void>;
+    pruneExpired?(): Promise<{ deletedCount: number }>;
+}
+
+/**
+ * At-rest encryption for TOTP secrets — plug in a KMS/HSM via
+ * `config.mfa.secretCipher`. `encrypt`'s output is stored verbatim and must
+ * not be a bare base32 string (that shape marks a legacy plain-text secret);
+ * a prefix such as `kms:` is enough. `context` is the owning user's id —
+ * bind it to the ciphertext so a value copied onto another user fails.
+ */
+export interface SecretCipher {
+    encrypt(plaintext: string, opts: { context: string }): string | Promise<string>;
+    decrypt(ciphertext: string, opts: { context: string }): string | Promise<string>;
+    /** True when `ciphertext` was written under a non-current key; it is then re-encrypted on the next successful verify. */
+    needsRotation?(ciphertext: string): boolean;
+}
+
+/** A 32-byte key, base64. A bare string's id is a fingerprint of the key; `{ id, key }` names it explicitly. */
+export type MfaEncryptionKey = string | { id: string; key: string };
 
 export interface IdpConfig {
     issuer: string;
@@ -59,6 +90,18 @@ export interface IdpConfig {
          * rotation rather than only at the next full login.
          */
         reresolveClaimsOnRefresh?: boolean;
+        /**
+         * Default true (since 0.3.0): `authContextMiddleware` looks up the
+         * access token's session row (by `jti`) on every request and refuses
+         * the token if the row is missing, revoked or expired — so logout-all,
+         * password reset/change and session revocation take effect on every
+         * instance immediately. Costs one indexed storage read per
+         * authenticated request. Set false to fall back to the per-process
+         * revocation cache only: logout-all and password reset/change then
+         * don't revoke access tokens at all until they expire, and a single
+         * logout/revocation only takes effect on the instance that handled it.
+         */
+        verifyOnEachRequest?: boolean;
     };
     ttls?: Partial<{
         accessToken: number; idToken: number; refreshToken: number; internalToken: number;
@@ -73,7 +116,24 @@ export interface IdpConfig {
         accountLockDurationMs?: number;
         bcryptRounds?: number;
     };
-    mfa?: { issuerLabel?: string; recoveryCodeCount?: number };
+    mfa?: {
+        issuerLabel?: string;
+        recoveryCodeCount?: number;
+        /** Default true. When true, startup requires `encryptionKey` or `secretCipher` (unless `allowPlaintext`). Set false if you don't use TOTP MFA. */
+        enabled?: boolean;
+        /** Current AES-256-GCM key for TOTP secrets at rest. */
+        encryptionKey?: MfaEncryptionKey;
+        /** Retired keys still accepted for decryption during a rotation. */
+        previousEncryptionKeys?: MfaEncryptionKey[];
+        /** Custom cipher (e.g. KMS) — takes precedence over `encryptionKey`. */
+        secretCipher?: SecretCipher;
+        /** Refuse plain-text secrets left over from ≤0.2.x — set after `migrateMfaSecrets()` has run. */
+        requireEncrypted?: boolean;
+        /** Development only: allow MFA with no key, storing secrets in plain text (logs a loud warning). */
+        allowPlaintext?: boolean;
+        /** Per-account second-factor lockout. Defaults: 5 failures in 900s lock for 900s. */
+        lockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number };
+    };
     magicLink?: { allowSignupViaMagicLink?: boolean };
     /**
      * Fully opt-in — omit entirely to leave WebAuthn/passkey routes disabled.
@@ -195,6 +255,8 @@ export interface AccessTokenClaims {
     jti: string;
     iat: number;
     exp: number;
+    /** Present (true) on tokens with no session row behind them — see `issueAccessToken`. */
+    sessionless?: boolean;
 }
 
 // Express augmentation — `req.auth` / `req.serviceCaller` after the
@@ -225,10 +287,16 @@ export const ERROR_CODES: Record<string, string>;
 
 // ── Token issuance / verification ────────────────────────────────────────
 
-export function issueAccessToken(input: { sub: string; email?: string; claims?: Record<string, unknown> }, opts?: { ttlSeconds?: number; audience?: string }): Promise<IssuedToken>;
+/**
+ * Tokens minted through this export have no session row, so by default they
+ * carry `sessionless: true` and are exempt from `session.verifyOnEachRequest`.
+ * Pass `sessionless: false` only if you created a session row with this
+ * token's `jti` yourself.
+ */
+export function issueAccessToken(input: { sub: string; email?: string; claims?: Record<string, unknown> }, opts?: { ttlSeconds?: number; audience?: string; sessionless?: boolean }): Promise<IssuedToken>;
 export function verifyAccessToken(token: string, opts?: { issuer?: string }): Promise<AccessTokenClaims>;
 export function issueIdToken(user: IdentityUser, audience: string, nonce?: string): Promise<IssuedToken>;
-export function issueOAuth2AccessToken(subject: { id: string }, client: { clientId: string; accessTokenTTL?: number }, scopes: string[]): Promise<IssuedToken>;
+export function issueOAuth2AccessToken(subject: { id: string }, client: { clientId: string; accessTokenTTL?: number }, scopes: string[], opts?: { sessionless?: boolean }): Promise<IssuedToken>;
 export function issueMfaChallengeToken(subjectId: string): Promise<string>;
 export function verifyMfaChallengeToken(token: string): { sub: string; type: 'mfa_challenge' };
 export function verifyIssuedToken(token: string, opts?: { issuer?: string }): Record<string, unknown> | null;
@@ -334,6 +402,23 @@ export const verifyAuthenticationHandler: RequestHandler;
 export const generateMfaWebauthnChallengeOptionsHandler: RequestHandler;
 export const verifyMfaWebauthnChallengeHandler: RequestHandler;
 
+// ── MFA secret encryption ────────────────────────────────────────────────
+
+/** Built-in AES-256-GCM cipher. Stored format: `v1:<keyId>:<iv>:<ciphertext>:<tag>` (base64url parts). */
+export class AesGcmSecretCipher implements SecretCipher {
+    constructor(opts: { currentKey: MfaEncryptionKey; previousKeys?: MfaEncryptionKey[] });
+    readonly currentKeyId: string;
+    encrypt(plaintext: string, opts?: { context?: string }): string;
+    decrypt(ciphertext: string, opts?: { context?: string }): string;
+    needsRotation(ciphertext: string): boolean;
+}
+/**
+ * Encrypts every plain-text `mfaSecret`/`mfaTempSecret` (and re-encrypts any
+ * under a non-current key) in one pass. Idempotent; safe while serving
+ * traffic. Per-user errors are collected in `failed`, not thrown.
+ */
+export function migrateMfaSecrets(opts?: { batchSize?: number; dryRun?: boolean }): Promise<{ scanned: number; encrypted: number; reencrypted: number; failed: Array<{ userId: string; error: string }> }>;
+
 // ── Cache adapters ───────────────────────────────────────────────────────
 
 export interface CacheAdapter {
@@ -411,4 +496,16 @@ export const schemas: Record<string, { parse: (input: unknown) => unknown }>;
 
 // ── Router convenience ───────────────────────────────────────────────────
 
-export function buildRouter(opts?: { ownServiceName?: string }): Router;
+export interface BuildRouterOptions {
+    /**
+     * OAuth2 client administration (`/oauth2/clients*`). NOT mounted unless
+     * given; when given, every route runs behind `middleware` (your admin
+     * auth). Passing it without at least one middleware throws.
+     */
+    clientManagement?: { middleware: RequestHandler | RequestHandler[] };
+    /** Set a surface to false to leave its routes unmounted. All default to true. */
+    features?: Partial<Record<'magicLink' | 'webauthn' | 'sso' | 'oauth2' | 'oidc' | 'serviceMesh', boolean>>;
+    /** @deprecated Never had any effect on buildRouter(); accepted and ignored. */
+    ownServiceName?: string;
+}
+export function buildRouter(opts?: BuildRouterOptions): Router;

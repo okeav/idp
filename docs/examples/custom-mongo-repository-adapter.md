@@ -124,10 +124,36 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
   // method's exact signature. createSessionForLogin() in particular needs to
   // behave atomically (write session + audit + lastLoginAt together) even
   // without a real transaction, since nothing above the storage layer retries.
+  //
+  // sessionRepository.findByJti(jti) is optional but strongly recommended: it
+  // runs on every authenticated request (session.verifyOnEachRequest), so back
+  // it with an index on the session's jti, e.g.
+  //   async findByJti(jti) { return sessionsByJti.get(jti) ?? null; } // → { user, expiresAt, revokedAt } | null
+
+  // Optional: the per-account MFA lockout's counter. recordFailure must be
+  // atomic — in a real database, one conditional upsert, not read-then-write.
+  const counters = new Map();
+  const attemptCounterRepository = {
+    async get(key) { return counters.get(key) ?? null; },
+    async recordFailure(key, { max, windowSeconds, lockSeconds }) {
+      const now = Date.now();
+      const prev = counters.get(key);
+      const lockActive = prev?.lockedUntil && prev.lockedUntil.getTime() > now;
+      const fresh = !prev || (!lockActive && (prev.windowExpiresAt.getTime() <= now || prev.lockedUntil));
+      const entry = fresh
+        ? { count: 1, windowExpiresAt: new Date(now + windowSeconds * 1000), lockedUntil: null }
+        : { ...prev, count: prev.count + 1 };
+      if (entry.count >= max && !entry.lockedUntil) entry.lockedUntil = new Date(now + lockSeconds * 1000);
+      counters.set(key, entry);
+      return entry;
+    },
+    async reset(key) { counters.delete(key); },
+  };
 
   return {
     close: async () => { users.clear(); },
     userRepository,
+    attemptCounterRepository,
     // ...the other seven repositories
   };
 }
@@ -137,8 +163,14 @@ await initIdentityProvider({
   storage: { factory: createInMemoryStorage }, // no config.mongo needed at all
   signingKeys: { keys: { k1: { privateKey, publicKey, status: 'ACTIVE' } } },
   security: { emailHashPepper: '...', tokenHashSecret: '...' },
+  mfa: { encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY }, // required while MFA is enabled (the default)
 });
 ```
+
+Leave out `findByJti` or `attemptCounterRepository` and `initIdentityProvider()` still boots, but
+logs a warning and falls back to process-local state: access tokens survive logout-all/password
+reset until they expire, and the MFA lockout is counted per instance. Fine for a single-process
+test store; implement both for anything scaled.
 
 Note `mongo.skipTransactionCheck` and the whole Mongo-transaction-support startup probe (see
 [Repository Adapters](../api/repository-adapters.md#transactions-are-required)) only apply to the
@@ -147,7 +179,8 @@ adapter is responsible for whatever atomicity guarantees it needs on its own.
 
 ## Related
 
-- [Repository Adapters](../api/repository-adapters.md) — the full eight-interface contract.
+- [Repository Adapters](../api/repository-adapters.md) — the full eight-interface contract, plus
+  the optional `findByJti` and `AttemptCounterRepository`.
 - [Bootstrap & Config](../api/bootstrap-config.md) — `config.storage`/`config.mongo`.
 - [Storing App-Specific User Data](consumer-managed-app-data.md) — the default pattern for a
   `role`/`capabilities`/profile field (a separate consumer-owned collection). Reach for Pattern 1

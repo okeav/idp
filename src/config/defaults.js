@@ -1,4 +1,4 @@
-import { DEFAULT_TTL_SECONDS, DEFAULT_RATE_LIMITS, DEFAULT_WEBHOOK_CONFIG } from './constants.js';
+import { DEFAULT_TTL_SECONDS, DEFAULT_RATE_LIMITS, DEFAULT_WEBHOOK_CONFIG, DEFAULT_MFA_LOCKOUT } from './constants.js';
 
 export function withDefaults(config = {}) {
     if (!config.issuer) throw new Error('config.issuer is required');
@@ -13,7 +13,10 @@ export function withDefaults(config = {}) {
         ...config,
         cache: { adapter: 'memory', keyPrefix: 'idp:', ...config.cache },
         cookies: { secure: process.env.NODE_ENV !== 'development', sameSite: 'lax', domain: undefined, ...config.cookies },
-        session: { reresolveClaimsOnRefresh: false, ...config.session },
+        // verifyOnEachRequest (default true since 0.3.0): authContextMiddleware
+        // checks the token's session row in storage on every request, so a
+        // logout-all / password reset takes effect on every instance at once.
+        session: { reresolveClaimsOnRefresh: false, verifyOnEachRequest: true, ...config.session },
         ttls: { ...DEFAULT_TTL_SECONDS, ...config.ttls },
         security: {
             maxFailedLoginAttempts: 5,
@@ -23,7 +26,18 @@ export function withDefaults(config = {}) {
             tokenHashSecret: config.security?.tokenHashSecret,
             ...config.security,
         },
-        mfa: { issuerLabel: 'App', recoveryCodeCount: 10, ...config.mfa },
+        mfa: {
+            issuerLabel: 'App',
+            recoveryCodeCount: 10,
+            // TOTP MFA is on by default, which (since 0.3.0) means a key —
+            // encryptionKey or secretCipher — is required at startup. See mfa/secrets.js.
+            enabled: true,
+            allowPlaintext: false,
+            requireEncrypted: false,
+            previousEncryptionKeys: [],
+            ...config.mfa,
+            lockout: { ...DEFAULT_MFA_LOCKOUT, ...config.mfa?.lockout },
+        },
         magicLink: { allowSignupViaMagicLink: true, ...config.magicLink },
         // No defaults for rpID/rpName/origin — they're deployment-specific
         // (rpID in particular must be the *frontend's* registrable domain,

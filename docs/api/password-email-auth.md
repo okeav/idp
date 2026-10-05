@@ -21,8 +21,9 @@ through the same internal helpers, also individually exported for reuse:
   `sessionRepository.createSessionForLogin(...)` — a single atomic Mongo transaction writing the
   session, an access-token audit record, and `lastLoginAt` together (see
   [Repository Adapters](repository-adapters.md)). The session's `jti` is set equal to the paired
-  access token's `jti`, so a revocation-cache write keyed by this `jti` is checked by
-  `authContextMiddleware` against the presented access token without a second lookup. Also fires
+  access token's `jti`, so `authContextMiddleware` can resolve a presented access token to its
+  session row (`findByJti`, under `session.verifyOnEachRequest`) or to a revocation-cache entry
+  keyed by that `jti`. Also fires
   (fire-and-forget, `.catch`-guarded) new-device detection.
 - **`setSessionCookies(res, state, session)`** — sets `access_token`/`refresh_token` cookies via
   `cookieOptions()`: `{ httpOnly: true, secure: config.cookies.secure ?? (NODE_ENV !== 'development'), sameSite: config.cookies.sameSite || 'lax', path: '/', domain?: config.cookies.domain }`.
@@ -78,7 +79,8 @@ become invalid).
 strong-password policy is **not** re-applied on login, correctly, since it must accept legacy
 passwords). Rate limited on two independent keys: `login:ip:<req.ip>` against
 `config.rateLimiting.login` (10/15min default) and `login:email:<normalized email>` against
-`config.rateLimiting.loginByEmail` (5/15min default).
+`config.rateLimiting.loginByEmail` (5/15min default). Both fail closed: a rate-limiter backend
+error → 503 `RATE_LIMITER_UNAVAILABLE`.
 
 **Auto-unlock on attempt**: if the account is `LOCKED` and `lockUntil` has already passed, the
 handler resets it to `ACTIVE` (clearing `failedLoginAttempts`/`lockUntil`) *before* checking the
@@ -106,6 +108,14 @@ whatever `assertUsableStatus` throws for locked/suspended/pending accounts.
 
 ## Refresh & logout
 
+> **Revocation and access tokens.** With `config.session.verifyOnEachRequest` on (the default
+> since 0.3.0), every revocation below — refresh rotation, logout, logout-all, password
+> reset/change, `DELETE /me`, `DELETE /me/sessions[/:id]` — kills the affected access tokens on
+> every instance at once, because `authContextMiddleware` checks the session row on each request.
+> The revocation-cache notes below (which operations write a `jti` entry, and that bulk ones
+> don't) only decide behaviour when it's set to `false` — then tokens from bulk-revoked sessions
+> stay valid until natural expiry. See [Middleware](middleware.md).
+
 **`POST /refresh`** — reads the refresh token from the `refresh_token` **cookie** or
 `req.body.refreshToken` (cookie wins). No dedicated zod schema — body shape isn't validated by a
 mounted schema in `buildRouter()`. Rate limited: `refresh:ip:<req.ip>` against
@@ -116,7 +126,7 @@ mounted schema in `buildRouter()`. Rate limited: `refresh:ip:<req.ip>` against
 (a plain `createSession`, not the transactional `createSessionForLogin` — this isn't a new login).
 Also writes a revocation-cache entry for the **old** access token's `jti`
 (`config.ttls.revocationCache`, default 3600s) so it stops working immediately rather than at
-natural JWT expiry. By default, claims are **carried forward unchanged** from the prior session —
+natural JWT expiry (it's also refused through its now-revoked session row). By default, claims are **carried forward unchanged** from the prior session —
 refresh does **not** call `resolveAuthContext` again. Set **`config.session.reresolveClaimsOnRefresh:
 true`** (default `false`) to re-derive claims from `resolveAuthContext` on every refresh instead —
 useful if claims (roles/permissions/tenant) can change between refreshes and should be picked up
@@ -125,8 +135,11 @@ without forcing a full re-login.
 Errors: `REFRESH_TOKEN_REQUIRED` (400), `INVALID_REFRESH_TOKEN` (401, no matching active session),
 `USER_NOT_ACTIVE` (403).
 
-**`POST /logout`** — reads the refresh token from `req.body.refreshToken` or the cookie (body wins
-— opposite precedence from `/refresh`). Revokes the session (`onlyIfActive: false` — explicitly
+**`POST /logout`** — body `{ refreshToken? }` (`logoutSchema`; the body itself may be omitted).
+Reads the refresh token from `req.body.refreshToken` or, when the body omits it, the httpOnly
+`refresh_token` cookie (body wins — opposite precedence from `/refresh`). (Before 0.3.0 the
+mounted schema wrongly required `refreshToken` in the body, so cookie-only logout failed
+validation.) Revokes the session (`onlyIfActive: false` — explicitly
 allows revoking an already-inactive row) and, if found, writes a revocation-cache entry for its
 `jti`. Clears both cookies via `res.clearCookie(name)` with **no options argument** — if you've
 configured a non-default `config.cookies.domain`, the browser may not actually clear the cookie
@@ -135,14 +148,16 @@ if you hit this. Errors: `REFRESH_TOKEN_REQUIRED` (400) if no token found anywhe
 
 **`POST /logout/all`** (auth required) — revokes every session for the caller
 (`revokeAllForUser`) but, unlike `revokeAllSessionsHandler` below, does **not** return
-`revokedCount` and does **not** write per-session revocation-cache entries — already-issued access
-tokens for those sessions stay valid until natural expiry. Fires `auditLog('LOGOUT_ALL', ...)`.
+`revokedCount` and does **not** write per-session revocation-cache entries — with
+`session.verifyOnEachRequest: false`, already-issued access tokens for those sessions stay valid
+until natural expiry. Fires `auditLog('LOGOUT_ALL', ...)`.
 
 ## Password management
 
 **`POST /password/forgot`** — body `{ email }`. Always `200 { status: 'ok' }` (enumeration-safe —
 silent no-op if the email is unknown, no audit log fired in that case either). Rate limited:
-`password-reset:ip:<req.ip>` against `config.rateLimiting.passwordReset` (3/hour default). Reset
+`password-reset:ip:<req.ip>` against `config.rateLimiting.passwordReset` (3/hour default),
+fail-closed (503 `RATE_LIMITER_UNAVAILABLE` on a backend error). Reset
 token: 32-byte opaque, hash-only (no numeric-code counterpart, unlike email verification). Fires
 `onPasswordResetRequested({ email, resetToken, firstName?, lastName? })` only if the user exists.
 
@@ -150,9 +165,9 @@ token: 32-byte opaque, hash-only (no numeric-code counterpart, unlike email veri
 `INVALID_OR_EXPIRED_TOKEN` (400) for both "no such user" and "token invalid/expired/wrong owner" —
 deliberately non-distinguishing. On success: rehashes, sets `passwordChangedAt`, and **revokes all
 sessions** for the user (forces re-login everywhere) — but does **not** fire `onPasswordChanged`
-(that hook is exclusive to `/password/change` below) and does not proactively revoke
-already-issued access tokens' `jti`s (they remain valid until natural expiry despite the session
-revocation).
+(that hook is exclusive to `/password/change` below) and does not write revocation-cache entries
+for already-issued access tokens — they die with their session rows under
+`session.verifyOnEachRequest` (default), and otherwise remain valid until natural expiry.
 
 **`POST /password/change`** (auth required) — body `{ currentPassword, newPassword }`.
 `CURRENT_PASSWORD_INCORRECT` (400) if the bcrypt compare fails. Same rehash +

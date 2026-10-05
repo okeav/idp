@@ -58,16 +58,29 @@ import { jwksHandler, authPublicKeyHandler } from '../signing/jwks.controller.js
 import { registerServiceKeyHandler, getServicesJwksHandler } from '../service-mesh/service-key.controller.js';
 import { s2sBootstrapMiddleware } from '../service-mesh/s2s-bootstrap.middleware.js';
 
+const FEATURE_NAMES = ['magicLink', 'webauthn', 'sso', 'oauth2', 'oidc', 'serviceMesh'];
+
 /**
- * Assembles a fully-wired `express.Router()` covering every route this
+ * Assembles a fully-wired `express.Router()` covering the routes this
  * package implements, using sensible default paths. Entirely optional — if
- * your app wants different paths, custom rate limiting, or to omit a
- * feature (e.g. no OAuth2 authorization-server surface), mount the
+ * your app wants different paths or custom rate limiting, mount the
  * individual handler exports on your own router instead of calling this.
  *
- * @param {{ ownServiceName?: string }} [opts] - passed through to serviceContextMiddleware
+ * @param {object} [opts]
+ * @param {{ middleware: import('express').RequestHandler | import('express').RequestHandler[] }} [opts.clientManagement]
+ *   OAuth2 client (relying-party) administration — register, list, get,
+ *   update, approve, rotate-secret, deactivate under `/oauth2/clients`. NOT
+ *   mounted unless this is given, because this package has no admin-role
+ *   concept of its own: you supply the admin authentication/authorization as
+ *   `middleware`, which runs before every one of those routes. At least one
+ *   middleware is required — passing `clientManagement` without any throws.
+ * @param {Partial<Record<'magicLink'|'webauthn'|'sso'|'oauth2'|'oidc'|'serviceMesh', boolean>>} [opts.features]
+ *   Set a surface to `false` to leave its routes unmounted. Everything
+ *   defaults to `true` (mounted).
  */
 export function buildRouter(opts = {}) {
+    const features = resolveFeatures(opts.features);
+    const clientManagementMiddleware = resolveClientManagement(opts.clientManagement);
     const router = express.Router();
 
     // Password / email identity
@@ -77,15 +90,17 @@ export function buildRouter(opts = {}) {
     router.post('/login', validateBody(loginSchema), loginHandler);
     router.post('/mfa/verify', validateBody(verifyMfaChallengeSchema), verifyMfaChallengeHandler);
     router.post('/refresh', refreshTokenHandler);
-    router.post('/logout', validateBody(logoutSchema), logoutHandler);
+    router.post('/logout', validateBody(logoutSchema), logoutHandler); // refreshToken in the body OR the httpOnly cookie
     router.post('/logout/all', authContextMiddleware(), logoutAllHandler);
     router.post('/password/forgot', validateBody(forgotPasswordSchema), forgotPasswordHandler);
     router.post('/password/reset', validateBody(resetPasswordSchema), resetPasswordHandler);
     router.post('/password/change', authContextMiddleware(), validateBody(changePasswordSchema), changePasswordHandler);
 
     // Magic link (passwordless email login)
-    router.post('/magic-link/request', validateBody(requestMagicLinkSchema), requestMagicLinkHandler);
-    router.post('/magic-link/verify', validateBody(verifyMagicLinkSchema), verifyMagicLinkHandler);
+    if (features.magicLink) {
+        router.post('/magic-link/request', validateBody(requestMagicLinkSchema), requestMagicLinkHandler);
+        router.post('/magic-link/verify', validateBody(verifyMagicLinkSchema), verifyMagicLinkHandler);
+    }
 
     // Self-service identity ("me")
     router.get('/me', authContextMiddleware(), getMeHandler);
@@ -102,61 +117,103 @@ export function buildRouter(opts = {}) {
     router.delete('/me/mfa', authContextMiddleware(), validateBody(disableMfaSchema), disableMfaHandler);
     router.post('/me/mfa/recovery-codes', authContextMiddleware(), validateBody(regenerateRecoveryCodesSchema), regenerateRecoveryCodesHandler);
 
-    // WebAuthn / passkeys — registering a credential always requires an
-    // authenticated caller (adding a passkey to an existing account).
-    router.post('/webauthn/registration/options', authContextMiddleware(), validateBody(registrationOptionsSchema), generateRegistrationOptionsHandler);
-    router.post('/webauthn/registration/verify', authContextMiddleware(), validateBody(verifyRegistrationSchema), verifyRegistrationHandler);
+    if (features.webauthn) {
+        // WebAuthn / passkeys — registering a credential always requires an
+        // authenticated caller (adding a passkey to an existing account).
+        router.post('/webauthn/registration/options', authContextMiddleware(), validateBody(registrationOptionsSchema), generateRegistrationOptionsHandler);
+        router.post('/webauthn/registration/verify', authContextMiddleware(), validateBody(verifyRegistrationSchema), verifyRegistrationHandler);
 
-    // Primary passwordless login — no prior auth required.
-    router.post('/webauthn/authentication/options', validateBody(authenticationOptionsSchema), generateAuthenticationOptionsHandler);
-    router.post('/webauthn/authentication/verify', validateBody(verifyAuthenticationSchema), verifyAuthenticationHandler);
+        // Primary passwordless login — no prior auth required.
+        router.post('/webauthn/authentication/options', validateBody(authenticationOptionsSchema), generateAuthenticationOptionsHandler);
+        router.post('/webauthn/authentication/verify', validateBody(verifyAuthenticationSchema), verifyAuthenticationHandler);
 
-    // Passkey as an MFA second factor — completes the challenge loginHandler
-    // issued when user.mfaEnabled, as an alternative to /mfa/verify (TOTP).
-    router.post('/webauthn/mfa/options', validateBody(mfaWebauthnOptionsSchema), generateMfaWebauthnChallengeOptionsHandler);
-    router.post('/webauthn/mfa/verify', validateBody(verifyMfaWebauthnSchema), verifyMfaWebauthnChallengeHandler);
+        // Passkey as an MFA second factor — completes the challenge loginHandler
+        // issued when user.mfaEnabled, as an alternative to /mfa/verify (TOTP).
+        router.post('/webauthn/mfa/options', validateBody(mfaWebauthnOptionsSchema), generateMfaWebauthnChallengeOptionsHandler);
+        router.post('/webauthn/mfa/verify', validateBody(verifyMfaWebauthnSchema), verifyMfaWebauthnChallengeHandler);
+    }
 
     // OAuth2 authorization server
-    router.get('/oauth2/authorize', validateQuery(authorizeQuerySchema), authContextMiddleware({ optional: true }), authorizeHandler);
-    router.post('/oauth2/authorize/confirm', authContextMiddleware(), validateBody(confirmAuthorizeSchema), confirmConsentHandler);
-    router.post('/oauth2/authorize/deny', authContextMiddleware(), validateBody(denyAuthorizeSchema), denyConsentHandler);
-    router.post('/oauth2/token', validateBody(tokenSchema), tokenHandler);
-    router.post('/oauth2/token/revoke', validateBody(revokeTokenSchema), revokeTokenHandler);
-    router.post('/oauth2/token/introspect', authContextMiddleware(), validateBody(introspectTokenSchema), introspectTokenHandler);
-    router.get('/oauth2/consent', authContextMiddleware(), getConsentHandler);
-    router.get('/oauth2/consent/sessions', authContextMiddleware(), listConsentsHandler);
-    router.delete('/oauth2/consent/sessions/:clientId', authContextMiddleware(), revokeConsentHandler);
+    if (features.oauth2) {
+        router.get('/oauth2/authorize', validateQuery(authorizeQuerySchema), authContextMiddleware({ optional: true }), authorizeHandler);
+        router.post('/oauth2/authorize/confirm', authContextMiddleware(), validateBody(confirmAuthorizeSchema), confirmConsentHandler);
+        router.post('/oauth2/authorize/deny', authContextMiddleware(), validateBody(denyAuthorizeSchema), denyConsentHandler);
+        router.post('/oauth2/token', validateBody(tokenSchema), tokenHandler);
+        router.post('/oauth2/token/revoke', validateBody(revokeTokenSchema), revokeTokenHandler);
+        router.post('/oauth2/token/introspect', authContextMiddleware(), validateBody(introspectTokenSchema), introspectTokenHandler);
+        router.get('/oauth2/consent', authContextMiddleware(), getConsentHandler);
+        router.get('/oauth2/consent/sessions', authContextMiddleware(), listConsentsHandler);
+        router.delete('/oauth2/consent/sessions/:clientId', authContextMiddleware(), revokeConsentHandler);
+    }
 
-    // OAuth2 client (relying party) management — mount your own admin-auth
-    // middleware in front of these in a real app; left unauthenticated here
-    // since this package has no admin-role concept of its own (see README).
-    router.post('/oauth2/clients', validateBody(registerOAuthClientSchema), registerOAuthClientHandler);
-    router.get('/oauth2/clients', listOAuthClientsHandler);
-    router.get('/oauth2/clients/:clientId', getOAuthClientHandler);
-    router.patch('/oauth2/clients/:clientId', validateBody(updateOAuthClientSchema), updateOAuthClientHandler);
-    router.post('/oauth2/clients/:clientId/approve', approveOAuthClientHandler);
-    router.post('/oauth2/clients/:clientId/rotate-secret', rotateOAuthClientSecretHandler);
-    router.delete('/oauth2/clients/:clientId', deactivateOAuthClientHandler);
+    // OAuth2 client (relying party) management — only behind the caller's
+    // own admin middleware, never by default. Every route lives on a
+    // sub-router whose first handlers are that middleware, so nothing under
+    // /oauth2/clients is reachable without passing it.
+    if (clientManagementMiddleware) {
+        const clients = express.Router();
+        clients.use(...clientManagementMiddleware);
+        clients.post('/', validateBody(registerOAuthClientSchema), registerOAuthClientHandler);
+        clients.get('/', listOAuthClientsHandler);
+        clients.get('/:clientId', getOAuthClientHandler);
+        clients.patch('/:clientId', validateBody(updateOAuthClientSchema), updateOAuthClientHandler);
+        clients.post('/:clientId/approve', approveOAuthClientHandler);
+        clients.post('/:clientId/rotate-secret', rotateOAuthClientSecretHandler);
+        clients.delete('/:clientId', deactivateOAuthClientHandler);
+        router.use('/oauth2/clients', clients);
+    }
 
     // OIDC
-    router.get('/userinfo', authContextMiddleware(), userinfoHandler);
-    router.get('/oidc/end-session', authContextMiddleware({ optional: true }), endSessionHandler);
-    router.get('/.well-known/openid-configuration', openidConfigurationHandler);
+    if (features.oidc) {
+        router.get('/userinfo', authContextMiddleware(), userinfoHandler);
+        router.get('/oidc/end-session', authContextMiddleware({ optional: true }), endSessionHandler);
+        router.get('/.well-known/openid-configuration', openidConfigurationHandler);
+    }
 
     // SSO
-    router.get('/sso/:provider', validateQuery(ssoInitiateQuerySchema), initiateSsoHandler);
-    router.get('/sso/:provider/callback', ssoCallbackHandler);
-    router.post('/sso/:provider/callback', express.urlencoded({ extended: false }), ssoCallbackHandler);
+    if (features.sso) {
+        router.get('/sso/:provider', validateQuery(ssoInitiateQuerySchema), initiateSsoHandler);
+        router.get('/sso/:provider/callback', ssoCallbackHandler);
+        router.post('/sso/:provider/callback', express.urlencoded({ extended: false }), ssoCallbackHandler);
+    }
 
-    // JWKS
+    // JWKS — always mounted: every relying party and resource server needs
+    // these to verify the access tokens this IdP issues.
     router.get('/.well-known/jwks.json', jwksHandler);
     router.get('/keys/:kid', authPublicKeyHandler);
 
     // Service mesh (S2S JWKS trust)
-    router.post('/internal/service-keys', s2sBootstrapMiddleware, registerServiceKeyHandler);
-    router.get('/.well-known/services-jwks.json', getServicesJwksHandler);
+    if (features.serviceMesh) {
+        router.post('/internal/service-keys', s2sBootstrapMiddleware, registerServiceKeyHandler);
+        router.get('/.well-known/services-jwks.json', getServicesJwksHandler);
+    }
 
     return router;
+}
+
+function resolveFeatures(input = {}) {
+    if (input === null || typeof input !== 'object') throw new Error('buildRouter: opts.features must be an object');
+    const unknown = Object.keys(input).filter((k) => !FEATURE_NAMES.includes(k));
+    if (unknown.length > 0) {
+        throw new Error(`buildRouter: unknown opts.features key(s): ${unknown.join(', ')} — expected any of ${FEATURE_NAMES.join(', ')}`);
+    }
+    return Object.fromEntries(FEATURE_NAMES.map((name) => [name, input[name] !== false]));
+}
+
+/** null when client management isn't requested; otherwise the validated, non-empty middleware list. Misconfiguration throws at startup rather than mounting the routes open. */
+function resolveClientManagement(input) {
+    if (input === undefined || input === null || input === false) return null;
+    const list = typeof input.middleware === 'function' ? [input.middleware] : input.middleware;
+    if (!Array.isArray(list) || list.length === 0) {
+        throw new Error(
+            'buildRouter: opts.clientManagement requires at least one middleware (your admin authentication/authorization) ' +
+            'in opts.clientManagement.middleware — the OAuth2 client routes are never mounted unauthenticated.'
+        );
+    }
+    if (!list.every((fn) => typeof fn === 'function')) {
+        throw new Error('buildRouter: every entry in opts.clientManagement.middleware must be a middleware function');
+    }
+    return list;
 }
 
 export { serviceContextMiddleware }; // re-exported for building your own protected internal routes alongside this router

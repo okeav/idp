@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import cookieParser from 'cookie-parser';
-import { initIdentityProvider, buildRouter, verifyWebhookSignature } from '@okeav/idp-core';
+import { initIdentityProvider, buildRouter, authContextMiddleware, verifyWebhookSignature } from '@okeav/idp-core';
 
 import { pushActivity, getActivitySince } from './lib/activity-log.js';
 import { recordDevToken, latestDevToken } from './lib/dev-store.js';
@@ -22,6 +22,12 @@ const IDP_BASE_URL = `${BASE_URL}${AUTH_PREFIX}`;
 // since this harness's whole Mongo/Redis dataset is throwaway.
 const WEBHOOK_SECRET = 'harness-webhook-secret-do-not-use-in-prod';
 const BOOTSTRAP_SECRET = 'harness-s2s-bootstrap-secret-do-not-use-in-prod';
+// TOTP secrets are encrypted at rest and idp-core refuses to boot without a
+// key while MFA is enabled. Fixed (not regenerated per boot like the signing
+// key below) because enrolled users' secrets live in the persistent Mongo
+// volume — a new key every restart would make them unreadable.
+const MFA_ENCRYPTION_KEY = process.env.IDP_MFA_ENCRYPTION_KEY
+    || crypto.createHash('sha256').update('harness-dev-only-mfa-encryption-key').digest('base64'); // 32 bytes
 
 // Ephemeral RSA signing keypair — every restart invalidates existing
 // sessions (the `kid` changes), which is fine for a manual test harness.
@@ -52,7 +58,7 @@ await initIdentityProvider({
         // of the way keeps the two from being conflated on screen.
         maxFailedLoginAttempts: 1000,
     },
-    mfa: { issuerLabel: 'IdpE2EHarness' },
+    mfa: { issuerLabel: 'IdpE2EHarness', encryptionKey: MFA_ENCRYPTION_KEY },
     magicLink: { allowSignupViaMagicLink: true },
     // rpID 'localhost' + an http:// origin is the one case the WebAuthn spec
     // carves out as a valid secure context without HTTPS — exactly what lets
@@ -117,8 +123,18 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // idp-core's own router — every /auth/* route is the exact same public
-// surface a real consumer mounts, untouched.
-app.use(AUTH_PREFIX, buildRouter());
+// surface a real consumer mounts, untouched. OAuth2 client administration
+// (/oauth2/clients*, flow 9) is only mounted behind the consumer's own admin
+// middleware. idp-core has no admin-role concept, so in this harness any
+// logged-in user counts as an admin; a real app checks its own admin claim here.
+const harnessAdmin = [
+    authContextMiddleware(),
+    (req, _res, next) => {
+        pushActivity('hook', `clientManagement middleware: ${req.method} ${req.originalUrl} allowed (harness treats any logged-in user as admin)`, { userId: req.auth.userId });
+        next();
+    },
+];
+app.use(AUTH_PREFIX, buildRouter({ clientManagement: { middleware: harnessAdmin } }));
 
 // Harness-only plumbing (not part of idp-core) ---------------------------
 app.get('/api/activity', (req, res) => {

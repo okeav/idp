@@ -102,6 +102,17 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
     magicLinkPerIp: { max: 3, windowSeconds: 60 * 60 },
 });
 
+// Per-ACCOUNT limit on failed second-factor attempts (TOTP, recovery codes,
+// WebAuthn-as-MFA, and the codes that confirm/disable MFA), counted in
+// storage so it holds across instances. Distinct from the per-IP
+// `mfaChallengePerIp` rate limit above, which an attacker with many IPs
+// sidesteps. Independent of `rateLimiting.enabled`.
+export const DEFAULT_MFA_LOCKOUT = Object.freeze({
+    maxFailedAttempts: 5,
+    windowSeconds: 15 * 60,
+    lockSeconds: 15 * 60,
+});
+
 // Outbound webhooks — additive to the in-process hooks, never a replacement.
 // Delivery is fire-and-forget from the caller's perspective: nothing here is
 // ever awaited by the request that triggered the event.

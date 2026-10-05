@@ -23,7 +23,7 @@ export async function requestMagicLinkHandler(req, res, next) {
         const state = getState();
         const { email } = req.body;
 
-        await enforceRateLimit(state, `magic-link:ip:${req.ip}`, state.config.rateLimiting.magicLink);
+        await enforceRateLimit(state, `magic-link:ip:${req.ip}`, state.config.rateLimiting.magicLink, { failMode: 'closed' });
 
         let user = await state.storage.userRepository.findByEmail(email);
         let isNewUser = false;

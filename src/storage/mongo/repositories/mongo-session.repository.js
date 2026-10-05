@@ -1,4 +1,4 @@
-import { withIds } from '../normalize.js';
+import { withId, withIds } from '../normalize.js';
 
 /** @implements {import('../../interfaces.js').SessionRepository} */
 export class MongoSessionRepository {
@@ -14,6 +14,18 @@ export class MongoSessionRepository {
 
     async findByRefreshTokenHash(hash) {
         return this.model.findOne({ tokenHash: hash });
+    }
+
+    /**
+     * The per-request check behind `session.verifyOnEachRequest`: a session's
+     * `jti` equals its paired access token's `jti`, so this resolves an access
+     * token to the session row that decides whether it's still live. Served
+     * by the `{ jti: 1 }` index — one indexed read per authenticated request.
+     */
+    async findByJti(jti) {
+        if (!jti) return null;
+        const doc = await this.model.findOne({ jti }).select('user expiresAt revokedAt jti').lean();
+        return doc ? withId(doc) : null;
     }
 
     /** Atomic find+revoke — only one concurrent caller can successfully consume a given refresh token. */

@@ -5,6 +5,7 @@ import { buildTestApp, uniqueEmail } from './helpers/build-test-app.js';
 import { verifyAccessToken } from '../src/index.js';
 
 let app;
+const ADMIN = { 'x-test-admin': 'yes' }; // see testAdminMiddleware in helpers/build-test-app.js
 
 before(async () => {
     app = await buildTestApp();
@@ -27,7 +28,7 @@ test('OAuth2 authorization-code flow issues an access token with type "access_to
     const redirectUri = 'https://client.example.com/callback';
     const registerClientRes = await fetch(`${app.baseUrl}/oauth2/clients`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...ADMIN },
         body: JSON.stringify({
             name: 'Test Client', slug: `test-client-${Date.now()}`,
             redirectUris: [redirectUri], allowedScopes: ['openid', 'email', 'profile'],
@@ -36,7 +37,7 @@ test('OAuth2 authorization-code flow issues an access token with type "access_to
     const client = await registerClientRes.json();
     assert.equal(registerClientRes.status, 201, JSON.stringify(client));
 
-    const approveRes = await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST' });
+    const approveRes = await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST', headers: ADMIN });
     assert.equal(approveRes.status, 200);
 
     // 2. Log in a resource-owner user.
@@ -87,7 +88,7 @@ test('OAuth2 authorization-code flow issues an access token with type "access_to
 test('OAuth2 client_credentials grant issues a machine token with type "access_token" (no refresh token, no user involved)', async () => {
     const registerRes = await fetch(`${app.baseUrl}/oauth2/clients`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...ADMIN },
         body: JSON.stringify({
             name: 'M2M Client', slug: `m2m-client-${Date.now()}`,
             redirectUris: ['https://client.example.com/callback'],
@@ -97,7 +98,7 @@ test('OAuth2 client_credentials grant issues a machine token with type "access_t
     });
     const client = await registerRes.json();
     assert.equal(registerRes.status, 201, JSON.stringify(client));
-    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST' });
+    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST', headers: ADMIN });
 
     // No scope requested -> defaults to every scope allowed for the client.
     const tokenRes = await fetch(`${app.baseUrl}/oauth2/token`, {
@@ -129,7 +130,7 @@ test('OAuth2 client_credentials grant issues a machine token with type "access_t
 test('allowedGrants is enforced: a client not registered for client_credentials is rejected', async () => {
     const registerRes = await fetch(`${app.baseUrl}/oauth2/clients`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...ADMIN },
         body: JSON.stringify({
             name: 'Auth-code-only Client', slug: `authcode-only-${Date.now()}`,
             redirectUris: ['https://client.example.com/callback'],
@@ -137,7 +138,7 @@ test('allowedGrants is enforced: a client not registered for client_credentials 
         }),
     });
     const client = await registerRes.json();
-    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST' });
+    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST', headers: ADMIN });
 
     const tokenRes = await fetch(`${app.baseUrl}/oauth2/token`, {
         method: 'POST',
@@ -152,14 +153,14 @@ test('POST /oauth2/authorize/deny rejects a redirect_uri not registered to the c
     const redirectUri = 'https://client.example.com/callback';
     const registerRes = await fetch(`${app.baseUrl}/oauth2/clients`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...ADMIN },
         body: JSON.stringify({
             name: 'Deny Test Client', slug: `deny-client-${Date.now()}`,
             redirectUris: [redirectUri], allowedScopes: ['openid'],
         }),
     });
     const client = await registerRes.json();
-    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST' });
+    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST', headers: ADMIN });
 
     const email = uniqueEmail('denyuser');
     const { accessToken } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
@@ -189,14 +190,14 @@ test('refresh_token grant narrows to the originally-consented scopes, not the cl
     const redirectUri = 'https://client.example.com/callback';
     const registerRes = await fetch(`${app.baseUrl}/oauth2/clients`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...ADMIN },
         body: JSON.stringify({
             name: 'Refresh Scope Client', slug: `refresh-scope-client-${Date.now()}`,
             redirectUris: [redirectUri], allowedScopes: ['openid', 'email', 'profile'],
         }),
     });
     const client = await registerRes.json();
-    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST' });
+    await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST', headers: ADMIN });
 
     const email = uniqueEmail('refreshscopeuser');
     const { accessToken } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
@@ -222,7 +223,7 @@ test('refresh_token grant narrows to the originally-consented scopes, not the cl
     // silently pick up "profile" — the resource owner never consented to it.
     await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...ADMIN },
         body: JSON.stringify({ allowedScopes: ['openid', 'email', 'profile', 'admin.everything'] }),
     });
 

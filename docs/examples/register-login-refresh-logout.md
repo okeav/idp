@@ -108,6 +108,8 @@ async function logout(refreshToken) {
   const res = await fetch(`${BASE}/logout`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    // Browser clients can omit the body: the handler falls back to the
+    // httpOnly refresh_token cookie (credentials: 'include' sends it).
     body: JSON.stringify({ refreshToken }),
     credentials: 'include',
   });

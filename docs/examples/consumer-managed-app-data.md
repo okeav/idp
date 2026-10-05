@@ -44,6 +44,7 @@ await initIdentityProvider({
   mongo: { uri: process.env.IDP_MONGO_URI },
   signingKeys: { keys: { /* ... */ } },
   security: { emailHashPepper: '...', tokenHashSecret: '...' },
+  mfa: { encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY },
 
   hooks: {
     // Called on every login that mints a session (password, MFA-verify, SSO, magic-link,

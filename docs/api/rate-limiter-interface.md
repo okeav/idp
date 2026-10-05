@@ -3,7 +3,7 @@ title: "Rate Limiter Interface"
 package: "@okeav/idp-core"
 category: "api-reference"
 tags: ["rate-limiting", "redis", "security"]
-description: "The RateLimiter contract, built-in memory/Redis/noop adapters, per-endpoint default rules, and the fail-open backend behavior."
+description: "The RateLimiter contract, built-in memory/Redis/noop adapters, per-endpoint default rules, and the per-key fail-closed/fail-open backend behavior."
 ---
 
 # Rate Limiter Interface
@@ -11,7 +11,9 @@ description: "The RateLimiter contract, built-in memory/Redis/noop adapters, per
 Request-rate limiting throttles the *rate* of requests to a handful of sensitive endpoints within
 a rolling fixed window, regardless of whether individual requests succeed. It's a **distinct
 concern** from `security.maxFailedLoginAttempts` (which permanently locks one account after N
-wrong passwords, tracked on the user record — see [Password & Email Auth](password-email-auth.md)).
+wrong passwords, tracked on the user record — see [Password & Email Auth](password-email-auth.md))
+and from the per-account MFA lockout (`config.mfa.lockout`, counted in storage and independent of
+`rateLimiting.enabled` — see [MFA](mfa.md#per-account-lockout)).
 
 ## `RateLimiter` contract
 
@@ -55,7 +57,7 @@ touched.
 | `login` | Login, per IP | 10 / 15 min |
 | `loginByEmail` | Login, per email | 5 / 15 min |
 | `passwordReset` | Password reset request, per IP | 3 / hour |
-| `mfaChallenge` | MFA challenge verification, per IP | 5 / 15 min |
+| `mfaChallenge` | MFA challenge verification (`/mfa/verify` and `/webauthn/mfa/verify`, one shared key), per IP | 5 / 15 min |
 | `refreshToken` | Refresh token, per IP | 30 / min |
 | `magicLink` | Magic-link request, per IP | 3 / hour |
 
@@ -65,21 +67,28 @@ merged over the default (partial overrides work).
 **Not env-configurable** — only `IDP_RATE_LIMIT_ENABLED`/`IDP_RATE_LIMIT_ADAPTER` are read by
 `configFromEnv()`. Override per-rule thresholds in code.
 
-## `enforceRateLimit(state, key, rule)` (internal pattern)
+## `enforceRateLimit(state, key, rule, opts?)` (internal pattern)
+
+```ts
+enforceRateLimit(state, key: string, rule: { max: number; windowSeconds: number }, opts?: { failMode?: 'open' | 'closed' })
+```
 
 Every rate-limited handler calls this internally before doing work, e.g.
-`` enforceRateLimit(state, `login:ip:${req.ip}`, config.rateLimiting.login) ``. Throws
-`RATE_LIMIT_EXCEEDED` (429) when the limit is exceeded — this is the one place the *check itself*
-fails closed to the caller (a 429 is returned). What differs from the cache layer is what happens
-when the **backend** errors:
+`` enforceRateLimit(state, `login:ip:${req.ip}`, config.rateLimiting.login, { failMode: 'closed' }) ``.
+Throws `RATE_LIMIT_EXCEEDED` (429) when the limit is exceeded. `failMode` decides what happens
+when the **backend** errors (Redis down, timeout):
 
-## Fails open, deliberately
+## Backend errors: fail closed on credential checks, open elsewhere
 
-The inverse of the cache layer's revocation check ([Cache Interface](cache-interface.md)). If the
-rate limiter's backend errors (Redis down, timeout), the request is **allowed through** and the
-error is logged (`logger.warn`), rather than locking users out because of an infrastructure
-hiccup. Rate limiting here is defense-in-depth, not a security invariant the way revocation
-checking is.
+- **`'closed'`** — the request is rejected with 503 `RATE_LIMITER_UNAVAILABLE` (logged at
+  `error`). Used for every key guarding a credential check, so an attacker who can knock the
+  limiter over doesn't get unlimited guesses: `login` and `loginByEmail`, `mfaChallenge` (TOTP and
+  WebAuthn MFA verify), `passwordReset`, and `magicLink`.
+- **`'open'`** (the default) — the request is allowed through and the error is logged
+  (`logger.warn`). Kept for limits whose job is load-shedding rather than brute-force protection:
+  `refreshToken`.
+
+Before 0.3.0 every key failed open.
 
 ## `MemoryRateLimiter`
 
@@ -121,7 +130,7 @@ consumers who want the same "always allow" adapter shape for testing.
 
 ## Related
 
-- [Cache Interface](cache-interface.md) — connection-sharing partner, and the contrasting
-  fail-*closed* behavior for revocation checks.
-- [Errors](errors.md) — `RATE_LIMIT_EXCEEDED` (429).
+- [Cache Interface](cache-interface.md) — connection-sharing partner, and the fail-closed
+  revocation check.
+- [Errors](errors.md) — `RATE_LIMIT_EXCEEDED` (429), `RATE_LIMITER_UNAVAILABLE` (503).
 - [Redis Rate Limiter example](../examples/redis-rate-limiter-adapter.md)

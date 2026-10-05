@@ -28,6 +28,7 @@ await initIdentityProvider({
   mongo: { uri: 'mongodb://localhost:27017/idp?replicaSet=rs0' },
   signingKeys: { keys: { 'k1': { privateKey, publicKey, status: 'ACTIVE' } } },
   security: { emailHashPepper: '...', tokenHashSecret: '...' },
+  mfa: { encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY }, // or mfa: { enabled: false }
 
   // Invite-only apps: set false so an unrecognized email silently no-ops
   // instead of creating a new account via magic link.

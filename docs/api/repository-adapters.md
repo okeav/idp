@@ -3,7 +3,7 @@ title: "Repository Adapters (Storage)"
 package: "@okeav/idp-core"
 category: "api-reference"
 tags: ["mongodb", "storage-adapter", "repository"]
-description: "The eight repository interfaces, the built-in MongoDB adapter, the storage.factory pluggability contract, and the transaction requirement."
+description: "The eight repository interfaces (plus the optional attempt counter), the built-in MongoDB adapter, the storage.factory pluggability contract, and the transaction requirement."
 ---
 
 # Repository Adapters (Storage)
@@ -11,8 +11,10 @@ description: "The eight repository interfaces, the built-in MongoDB adapter, the
 MongoDB is the only concrete storage adapter shipped in this version, behind **eight repository
 interfaces** documented as JSDoc typedefs in `src/storage/interfaces.js` (the canonical contract —
 `types/index.d.ts` loosely types `StorageContract` fields as `unknown` and points here for the
-full per-repository shapes). A future adapter (Postgres, DynamoDB, ...) implements the same eight
-interfaces; nothing above the storage layer needs to change.
+full per-repository shapes). A separate adapter (Postgres, DynamoDB, ...) implements the same eight
+interfaces; nothing above the storage layer needs to change. Two newer pieces are optional —
+`SessionRepository.findByJti` and `attemptCounterRepository` (both 0.3.0) — and an adapter without
+them still boots, with a startup warning and a weaker fallback (see below).
 
 ## `StorageContract`
 
@@ -28,6 +30,7 @@ interface StorageContract {
   verificationTokenRepository: VerificationTokenRepository;
   serviceKeyRepository: ServiceKeyRepository;
   credentialRepository: CredentialRepository;
+  attemptCounterRepository?: AttemptCounterRepository; // optional (0.3.0)
 }
 ```
 
@@ -50,7 +53,7 @@ emailDeps)`. This is how a separate adapter package (e.g. `@okeav/idp-core-postg
 `hashEmail`/`normalizeEmail` are handed to your factory so a custom adapter can implement the same
 email blind-index pattern the Mongo adapter uses (see below).
 
-## The eight interfaces
+## The interfaces
 
 ### `UserRepository`
 ```ts
@@ -70,6 +73,7 @@ findMany(opts: { skip?: number; limit?: number }): Promise<User[]>
 ```ts
 createSession(input): Promise<Session>
 findByRefreshTokenHash(hash): Promise<Session | null>
+findByJti?(jti): Promise<{ user, expiresAt: Date, revokedAt: Date | null } | null>  // optional (0.3.0) — see below
 revokeByRefreshTokenHash(hash, opts?: { onlyIfActive?: boolean }): Promise<Session | null>
 revokeById(id, userId): Promise<Session | null>
 revokeAllForUser(userId, opts?: { exceptTokenHash?: string }): Promise<{ revokedCount: number }>
@@ -80,6 +84,15 @@ recordIssuedAccessToken?(entry): Promise<void>  // optional, write-only audit
 createSessionForLogin(input): Promise<Session>  // atomic composite write — see below
 pruneExpired?(): Promise<{ deletedCount: number }>  // optional, for adapters without native TTL
 ```
+
+**`findByJti(jti)`** returns the session whose `jti` matches an access token's `jti` (each session
+row stores its paired access token's `jti`). `authContextMiddleware` calls it on **every
+authenticated request** while `config.session.verifyOnEachRequest` is on (the default), so it must
+be an indexed lookup (Mongo: `{ jti: 1 }`; `@okeav/idp-core-postgres`: `idp_sessions_jti_idx`).
+`user` is compared with the token's `sub` via `String()`; return `null` for no match; throw only on
+a real backend failure (→ 503 `SESSION_STORE_UNAVAILABLE`). Without it, the middleware falls back
+to the per-process revocation cache, with a startup warning — logout-all and password reset then
+don't revoke access tokens before they expire. See [Middleware](middleware.md).
 
 ### `AuthorizationCodeRepository`
 ```ts
@@ -135,6 +148,29 @@ countForUser(userId): Promise<number>
 `credentialId` is the base64url credential ID from the browser (globally unique per WebAuthn spec)
 and is the natural lookup key during both passwordless and MFA-second-factor authentication.
 
+### `AttemptCounterRepository` (optional)
+```ts
+get(key): Promise<{ count: number, windowExpiresAt: Date, lockedUntil: Date | null } | null>
+recordFailure(key, opts: { max: number, windowSeconds: number, lockSeconds: number }): Promise<{ count, windowExpiresAt, lockedUntil }>
+reset(key): Promise<void>
+pruneExpired?(): Promise<{ deletedCount: number }>
+```
+Fixed-window failure counters with a lock, keyed by an opaque string (currently `mfa:<userId>` —
+the [per-account MFA lockout](mfa.md#per-account-lockout)). Lives in storage rather than the rate
+limiter so every instance sees the same count whatever cache/rate-limiter adapter is configured.
+
+`recordFailure` must be **atomic**: if there's no record, or (with no lock still active) its window
+has passed or its lock has expired, start over at `count: 1` with a new window; otherwise
+`count + 1`. When the count reaches `max` and no lock is set, set `lockedUntil = now +
+lockSeconds`. Return the post-update record. Concurrent callers must each see a distinct count
+(exactly one sees `count === max` — that one emits the `MFA_LOCKED` audit event). An error thrown
+from any method fails the MFA attempt closed.
+
+Without it, `initIdentityProvider()` substitutes an in-process counter and logs a warning — correct
+for one instance, but each instance of a scaled deployment then keeps its own count.
+`@okeav/idp-core-postgres` 0.2.0 implements both this and `findByJti` (its `0002_` migration adds
+the `idp_attempt_counters` table); the MSSQL and DynamoDB adapters don't yet and get the fallbacks.
+
 ## The built-in MongoDB adapter
 
 `createMongoStorage(mongoConfig, { hashEmail, normalizeEmail })` (`src/storage/mongo/index.js`):
@@ -173,12 +209,14 @@ the package repo's `docker-compose.yml` for local dev (single-node replica set,
 `mongo.skipTransactionCheck: true` to skip this startup probe (e.g. a CI job reusing a known-good
 cluster).
 
-### Nine Mongoose models (backing eight repositories)
+### Ten Mongoose models (backing nine repositories)
 
 `identity-user`, `session` (+ a separate `access-token-audit` model for write-only audit records),
-`authorization-code`, `consent`, `oauth-client`, `verification-token`, `service-key`, `credential`
-— one per repository (session backs two models). All registered on the dedicated connection via
-`defineXModel(connection, ...)` factories.
+`authorization-code`, `consent`, `oauth-client`, `verification-token`, `service-key`, `credential`,
+`attempt-counter` (collection model `IdpAttemptCounter`, unique on `key`, TTL index on
+`expiresAt`) — one per repository (session backs two models). All registered on the dedicated
+connection via `defineXModel(connection, ...)` factories. The session model's `{ jti: 1 }` index
+serves `findByJti`.
 
 ## Related
 

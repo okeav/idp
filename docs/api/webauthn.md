@@ -111,10 +111,14 @@ established presence/verification; re-demanding it here just adds friction, per
 
 **`POST /webauthn/mfa/verify`**
 
-Body: `{ mfaChallengeToken: string, response: <AuthenticationResponseJSON> }`. Re-verifies the
-challenge token, consumes the stored challenge, verifies the assertion, then explicitly checks
+Body: `{ mfaChallengeToken: string, response: <AuthenticationResponseJSON> }`. Rate limited,
+fail-closed, on the same `mfa-challenge:ip:<req.ip>` key and `config.rateLimiting.mfaChallenge`
+rule as TOTP's `/mfa/verify`. Re-verifies the challenge token, then — under the [per-account MFA
+lockout](mfa.md#per-account-lockout) shared with TOTP and recovery codes (`method: 'webauthn'`) —
+consumes the stored challenge, verifies the assertion, and explicitly checks
 `credentialDoc.user === userId` from the challenge token (not merely "is this a valid registered
-credential") before issuing a session.
+credential") before issuing a session. A failed, malformed, or unknown-credential assertion counts as a failed
+attempt; an expired/missing challenge (`WEBAUTHN_CHALLENGE_EXPIRED`) doesn't.
 
 **Success (200)**: same shape as primary WebAuthn login.
 
@@ -122,7 +126,8 @@ credential") before issuing a session.
 (400, no passkeys registered); `WEBAUTHN_CHALLENGE_EXPIRED` (400);
 `WEBAUTHN_VERIFICATION_FAILED` (401, credential belongs to a different user than the challenge —
 distinct 401 from the 400 used for a straightforward crypto-verification failure);
-`USER_NOT_ACTIVE` (403).
+`USER_NOT_ACTIVE` (403); `MFA_LOCKED` (429); `RATE_LIMIT_EXCEEDED` (429) /
+`RATE_LIMITER_UNAVAILABLE` (503).
 
 ## Related
 

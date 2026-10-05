@@ -121,7 +121,9 @@ allowed); `INVALID_REFRESH_TOKEN` (400); `USER_NOT_ACTIVE` (400).
 Body adds: `client_id, client_secret, scope?`. **Confidential clients only** — rejected even if
 `allowedGrants` includes it when `client.clientType !== 'confidential'`. If `scope` is omitted,
 defaults to the client's **entire `allowedScopes` set** (not `[]`, not `openid`). Token's `sub`
-claim is the client's own `clientId`, not a user id.
+claim is the client's own `clientId`, not a user id. No session row backs it, so the token
+carries `sessionless: true` and is exempt from `authContextMiddleware`'s per-request session check
+(see [Middleware](middleware.md)) — it can't be revoked before it expires.
 
 ```json
 { "access_token": "...", "token_type": "Bearer", "expires_in": 3600, "scope": "..." }
@@ -168,11 +170,17 @@ returned here.
 
 ## Client management — `POST/GET/PATCH/DELETE /oauth2/clients*`
 
-> None of these six handlers check `req.auth` or `req.serviceCaller` themselves. `buildRouter()`
-> mounts them **unauthenticated** — see [Router & Schemas](router-and-schemas.md). Gate them with
-> your own admin middleware before exposing them.
+> None of these seven handlers check `req.auth` or `req.serviceCaller` themselves. Since 0.3.0
+> `buildRouter()` mounts them **only** when given `clientManagement: { middleware: [...] }` —
+> your own admin auth, which runs before every one of them — and otherwise not at all (404). See
+> [Router & Schemas](router-and-schemas.md). If you mount the handlers yourself, gate them the same
+> way.
+>
+> ```js
+> buildRouter({ clientManagement: { middleware: [requireAdmin] } }) // requireAdmin: your middleware
+> ```
 
-- **`POST /oauth2/clients`** (self-registration, public) — body: `name, slug, clientType?,
+- **`POST /oauth2/clients`** (registration) — body: `name, slug, clientType?,
   redirectUris (≥1, url), allowedScopes?, allowedGrants?, metadata?`. Defaults:
   `clientType: 'confidential'`, `allowedScopes: ['openid','email','profile']`, `allowedGrants:
   ['authorization_code','refresh_token']`. **Status is always forced to `PENDING_APPROVAL`** —
@@ -196,7 +204,7 @@ returned here.
   invalidating the old one (no grace period/dual-secret support) → `{ clientId, clientSecret }`.
 - **`DELETE /oauth2/clients/:clientId`** (deactivate) — `status → INACTIVE`.
 
-All six: `OAUTH_CLIENT_NOT_FOUND` (404) if the client doesn't exist.
+The five `/:clientId` routes: `OAUTH_CLIENT_NOT_FOUND` (404) if the client doesn't exist.
 
 ### Client status lifecycle
 

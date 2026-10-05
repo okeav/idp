@@ -12,13 +12,13 @@ export function mountOAuth2Flow(app, { AUTH_PREFIX, BASE_URL }) {
       <div class="flag">Log in first via <a href="/flows/login">2. Login</a> — <code>/oauth2/authorize</code> needs your existing session cookie to know who's granting consent.</div>
 
       <div class="card">
-        <p class="step">Step 1 — self-register a test OAuth client. Lands <code>PENDING_APPROVAL</code> (this package has no admin-role concept of its own — see idp-core's README).</p>
+        <p class="step">Step 1 — register a test OAuth client. Lands <code>PENDING_APPROVAL</code>. The <code>/oauth2/clients*</code> routes only exist because <code>server.js</code> passes <code>buildRouter({ clientManagement: { middleware } })</code> — this package has no admin-role concept of its own, so the harness's middleware accepts any logged-in user (a <code>401</code> here means you're not logged in).</p>
         <button onclick="registerClient()">Register OAuth client</button>
         <pre id="register-result" class="result"></pre>
       </div>
 
       <div class="card">
-        <p class="step">Step 2 — approve it (the approve endpoint is intentionally unauthenticated in this package — mount your own admin-auth in front of it in a real app).</p>
+        <p class="step">Step 2 — approve it (behind the same <code>clientManagement</code> middleware — a real app's own admin check goes there).</p>
         <button onclick="approveClient()">Approve client</button>
         <pre id="approve-result" class="result"></pre>
       </div>

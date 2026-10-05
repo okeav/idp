@@ -54,8 +54,10 @@ Zero-config default. **Single-process, in-memory only** — state is lost on res
 shared across instances**. Fine for local dev or a genuinely single-instance deployment; **wrong
 for anything horizontally scaled**, because two invariants silently break:
 
-1. Revocation checks (logout, refresh rotation) only apply on the instance that handled the
-   revoking request — a different instance still accepts the "revoked" token.
+1. With `session.verifyOnEachRequest: false`, revocation checks (logout, refresh rotation) only
+   apply on the instance that handled the revoking request — a different instance still accepts
+   the "revoked" token. (With it on — the default — the session row in storage decides, so this
+   one doesn't apply.)
 2. SSO CSRF-state and WebAuthn challenges aren't shared, so a callback/verify landing on a
    different instance than the one that issued the challenge spuriously fails.
 
@@ -85,16 +87,21 @@ Values are JSON-serialized on `set` (raw strings are stored as-is) and JSON-pars
 
 ## Fail-closed revocation checks
 
-**This is a security invariant, not adapter-specific behavior.** The internal `isRevoked(cache,
-key)` helper (used by `authContextMiddleware`):
+**This is a security invariant, not adapter-specific behavior.** With
+`session.verifyOnEachRequest` on (the default), the cache is only a fast path in front of the
+session store: a cached "revoked" rejects immediately, a miss falls through to the storage lookup,
+and a cache error is logged and left to storage to decide (a storage error → 503
+`SESSION_STORE_UNAVAILABLE` — see [Middleware](middleware.md)). Otherwise — verification off, a
+`sessionless` token, or an adapter without `findByJti` — the cache is the whole check, via the
+internal `isRevoked(cache, key)` helper:
 
 - A cache **miss** (key genuinely absent) legitimately means "not revoked" → returns `false`.
 - A cache **error** (adapter threw — connection down, timeout, etc.) means revocation status is
   *unknown* → throws `IdpError({ code: 'CACHE_UNAVAILABLE', httpStatus: 503 })` rather than
   treating the failure as "not revoked." The caller must reject the token.
 
-This is the inverse of [rate limiting](rate-limiter-interface.md)'s fail-open backend behavior —
-revocation is a security check, rate limiting is defense-in-depth.
+Compare [rate limiting](rate-limiter-interface.md), which fails closed only on credential-check
+keys and open elsewhere.
 
 ## Writing a custom adapter
 

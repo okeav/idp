@@ -6,6 +6,15 @@ import { initIdentityProvider } from '../../src/index.js';
 import { buildRouter } from '../../src/routes/build-router.js';
 import { getState, setState } from '../../src/config/state.js';
 
+/** A fixed 32-byte test key — tests that need a second/rotated key make their own. */
+export const TEST_MFA_KEY = Buffer.alloc(32, 7).toString('base64');
+
+/** Test stand-in for an app's admin auth: requires `x-test-admin: yes`. */
+export function testAdminMiddleware(req, res, next) {
+    if (req.headers['x-test-admin'] === 'yes') return next();
+    res.status(403).json({ error: 'FORBIDDEN' });
+}
+
 function generateTestSigningKey() {
     const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
         modulusLength: 2048,
@@ -54,7 +63,7 @@ export async function buildTestApp(overrides = {}) {
             tokenHashSecret: 'test-token-hash-secret-do-not-use-in-prod',
             bcryptRounds: 4, // fast for tests
         },
-        mfa: { issuerLabel: 'TestApp', recoveryCodeCount: 5 },
+        mfa: { issuerLabel: 'TestApp', recoveryCodeCount: 5, encryptionKey: TEST_MFA_KEY },
         // Disabled by default so the shared test app (used by every *other*
         // test file) isn't coupled to production-tuned thresholds — a test
         // file that specifically wants to exercise rate limiting passes its
@@ -69,7 +78,7 @@ export async function buildTestApp(overrides = {}) {
     app.use(cookieParserLib());
     app.use(express.json());
     app.use(express.urlencoded({ extended: false }));
-    app.use('/', buildRouter());
+    app.use('/', buildRouter(overrides.router ?? { clientManagement: { middleware: [testAdminMiddleware] } }));
     app.use((err, _req, res, _next) => {
         res.status(err.httpStatus || 500).json({ error: err.code || 'INTERNAL_ERROR', message: err.message });
     });

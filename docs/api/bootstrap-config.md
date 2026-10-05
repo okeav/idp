@@ -27,16 +27,25 @@ function initIdentityProvider(config: IdpConfig): Promise<{
   signingKeys: KeyRegistry;
   hashEmail: (email: string) => string;
   normalizeEmail: (email: string) => string;
+  mfaCipher: SecretCipher | null;        // built from config.mfa (see MFA secret encryption below)
+  attemptCounters: AttemptCounterRepository; // storage's, or the in-process fallback
 }>
 ```
 
 The full return value is the exact same object stored in the module-level singleton — every field
 above is present, not just the four most commonly used ones (`config`/`logger`/`storage`/`cache`).
 
-Wires, in order: config defaults (`withDefaults`) → logger → webhook dispatcher → hooks
-(wrapped so notification hooks also fire webhook deliveries) → cache adapter → rate limiter
+Wires, in order: config defaults (`withDefaults`) → logger → MFA secret cipher + config
+validation (before anything connects, so a missing key fails the boot) → webhook dispatcher →
+hooks (wrapped so notification hooks also fire webhook deliveries) → cache adapter → rate limiter
 (sharing the cache adapter's Redis connection when applicable) → signing-key registry →
 storage (Mongo by default, or `config.storage.factory` if provided).
+
+Two storage capabilities are optional, and an adapter missing either still boots with a
+`logger.warn` at startup: no `attemptCounterRepository` → the per-account MFA lockout counts
+in-process only (not shared across instances); no `sessionRepository.findByJti` while
+`session.verifyOnEachRequest` is on → falls back to the per-process revocation cache. See
+[Repository Adapters](repository-adapters.md).
 
 Returns a read-only-ish view of the wired state for consumers who want direct access (e.g. to
 close the Mongo connection in tests). You don't need to hold onto or pass around this return
@@ -52,6 +61,11 @@ errors):
 | `config.signingKeys.keys` empty | `config.signingKeys.keys is required (at least one ACTIVE signing key)` |
 | `config.security.emailHashPepper` missing | `config.security.emailHashPepper is required` |
 | `config.security.tokenHashSecret` missing | `config.security.tokenHashSecret is required` |
+| `mfa.enabled` (default `true`) with neither `mfa.encryptionKey` nor `mfa.secretCipher`, and no `mfa.allowPlaintext` | `MFA secrets must be encrypted at rest: set config.mfa.encryptionKey ...` |
+| `mfa.requireEncrypted` with neither `encryptionKey` nor `secretCipher` | `config.mfa.requireEncrypted is set but no config.mfa.encryptionKey or config.mfa.secretCipher is configured` |
+| An `encryptionKey`/`previousEncryptionKeys` entry that doesn't decode to 32 bytes | `MFA encryption key must decode to exactly 32 bytes (got N) ...` |
+| `mfa.secretCipher` without `encrypt`/`decrypt` functions | `config.mfa.secretCipher must implement encrypt(plaintext, { context }) and decrypt(ciphertext, { context })` |
+| A `mfa.lockout.*` value that isn't a positive integer | `config.mfa.lockout.<name> must be a positive integer (got ...)` |
 
 **Throws** `IdpError({ code: 'MONGO_TRANSACTIONS_UNSUPPORTED', httpStatus: 500 })` if the target
 MongoDB deployment doesn't support transactions (see [Repository Adapters](repository-adapters.md)
@@ -79,6 +93,11 @@ Notable env-var behavior:
 - `IDP_WEBAUTHN_RP_ID` gates whether `webauthn` config is populated — omit it and `webauthn: {}`.
 - `IDP_WEBHOOK_URL` supports a single endpoint only; configure `config.webhooks.endpoints`
   directly in code for multiple.
+- `IDP_MFA_ENCRYPTION_KEY` → `mfa.encryptionKey`; `IDP_MFA_PREVIOUS_ENCRYPTION_KEYS` is
+  comma-separated → `mfa.previousEncryptionKeys`. `IDP_MFA_ENABLED` (default `true`),
+  `IDP_MFA_REQUIRE_ENCRYPTED` and `IDP_MFA_ALLOW_PLAINTEXT` (both default `false`) map to the
+  `mfa` flags of the same name; `mfa.lockout` is code-only.
+- `IDP_SESSION_VERIFY_ON_EACH_REQUEST` (default `true`) → `session.verifyOnEachRequest`.
 - Per-rule rate-limit thresholds (`login`, `passwordReset`, etc.) are **not** env-configurable —
   only `IDP_RATE_LIMIT_ENABLED`/`IDP_RATE_LIMIT_ADAPTER`. Override the per-rule `{max,
   windowSeconds}` pairs in code.
@@ -116,6 +135,7 @@ interface IdpConfig {
 
   session?: {
     reresolveClaimsOnRefresh?: boolean; // default false — see password-email-auth.md's Refresh section
+    verifyOnEachRequest?: boolean;      // default true — see middleware.md
   };
 
   ttls?: Partial<{ /* see table below — all in seconds */ }>;
@@ -128,7 +148,17 @@ interface IdpConfig {
     bcryptRounds?: number;            // default 12
   };
 
-  mfa?: { issuerLabel?: string; recoveryCodeCount?: number };       // defaults: 'App', 10
+  mfa?: {
+    issuerLabel?: string;           // default 'App'
+    recoveryCodeCount?: number;     // default 10
+    enabled?: boolean;              // default true — requires encryptionKey or secretCipher at startup
+    encryptionKey?: string | { id: string; key: string }; // 32 bytes, base64
+    previousEncryptionKeys?: Array<string | { id: string; key: string }>; // default [] — decrypt only
+    secretCipher?: SecretCipher;    // custom (e.g. KMS) — takes precedence over encryptionKey
+    requireEncrypted?: boolean;     // default false — refuse plain-text secrets left from <=0.2.x
+    allowPlaintext?: boolean;       // default false — development only
+    lockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number }; // defaults 5, 900, 900
+  };
   magicLink?: { allowSignupViaMagicLink?: boolean };                // default true
   webauthn?: { rpID?: string; rpName?: string; origin?: string | string[] }; // no defaults — opt-in
   oauthProviders?: { google?, github?, microsoft?, apple?, linkedin? };     // see SSO doc
@@ -169,6 +199,20 @@ cookie-based (browser) login flow locally. Only relevant if you're relying on th
 `refresh_token` cookies at all — an `Authorization: Bearer` client (see
 [Register, Login, Refresh, Logout](../examples/register-login-refresh-logout.md)) never touches
 cookies and is unaffected.
+
+### MFA secret encryption (`config.mfa`)
+
+Since 0.3.0 TOTP secrets are encrypted at rest, and because `mfa.enabled` defaults to `true`,
+**`initIdentityProvider()` throws unless `mfa.encryptionKey` (or `mfa.secretCipher`) is set**:
+
+```bash
+openssl rand -base64 32   # → IDP_MFA_ENCRYPTION_KEY / config.mfa.encryptionKey
+```
+
+If the deployment doesn't use TOTP at all, set `mfa.enabled: false` instead (no key needed;
+`setupMfaHandler`/`confirmMfaHandler` then respond 404 `FEATURE_DISABLED`). `mfa.allowPlaintext:
+true` boots without a key for local development only, with a loud warning. Format, rotation, and
+migrating secrets written by 0.2.x: [MFA](mfa.md#secret-encryption-at-rest).
 
 ### `SigningKeyEntry`
 
@@ -229,8 +273,8 @@ pattern: a consumer-owned collection joined by `user.id`, looked up inside this 
 ## What this package deliberately does not do
 
 - No RBAC decisioning — no scope catalogue, wildcard permission matcher, or `requirePermission()`.
-- No message bus, SMTP, or push integration — wire your own inside [hooks](hooks-events.md is
-  covered inline in each auth-flow doc; see the Event hooks table below).
+- No message bus, SMTP, or push integration — wire your own inside the hooks (see
+  [Event hooks](#event-hooks-confighooks) below).
 - No secrets-vault client — resolve config values before calling `initIdentityProvider()`.
 - No QR-code rendering for MFA — `setupMfaHandler` returns the raw `otpauth://` URI.
 
@@ -250,7 +294,7 @@ to a registered no-op.
 
 | Hook | Fires on | Payload |
 |---|---|---|
-| `onAuditLog(event)` | Every audit-worthy action | `{ action, ...eventFields, timestamp }` — `action` values include `REGISTERED`, `LOGIN`, `LOGOUT`, `LOGOUT_ALL`, `EMAIL_VERIFIED`, `VERIFICATION_TOKEN_REGENERATED`, `PASSWORD_RESET`, `PASSWORD_CHANGED`, `ACCOUNT_LOCKED`, `PROFILE_UPDATED`, `ACCOUNT_DELETED`, `SESSION_REVOKED`, `SESSIONS_REVOKED_ALL`, `TOKEN_REFRESHED`, `MAGIC_LINK_REQUESTED`, `MAGIC_LINK_LOGIN`, `WEBAUTHN_CREDENTIAL_REGISTERED`, `WEBAUTHN_LOGIN`, `MFA_VERIFIED`, plus OAuth2/OIDC/SSO/MFA-setup actions |
+| `onAuditLog(event)` | Every audit-worthy action | `{ action, ...eventFields, timestamp }` — `action` values include `REGISTERED`, `LOGIN`, `LOGOUT`, `LOGOUT_ALL`, `EMAIL_VERIFIED`, `VERIFICATION_TOKEN_REGENERATED`, `PASSWORD_RESET`, `PASSWORD_CHANGED`, `ACCOUNT_LOCKED`, `PROFILE_UPDATED`, `ACCOUNT_DELETED`, `SESSION_REVOKED`, `SESSIONS_REVOKED_ALL`, `TOKEN_REFRESHED`, `MAGIC_LINK_REQUESTED`, `MAGIC_LINK_LOGIN`, `WEBAUTHN_CREDENTIAL_REGISTERED`, `WEBAUTHN_LOGIN`, `MFA_VERIFIED`, `MFA_LOCKED` (see [MFA](mfa.md#per-account-lockout)), plus OAuth2/OIDC/SSO/MFA-setup actions |
 | `onVerificationEmailRequested` | Registration and resend-verification | `{ email, firstName?, lastName?, verificationToken, verificationCode }` |
 | `onPasswordResetRequested` | Forgot-password | `{ email, resetToken, firstName?, lastName? }` |
 | `onPasswordChanged` | Password change/reset completed | `{ userId, email, firstName, lastName, locale, when, deviceInfo, ipAddress }` |

@@ -50,12 +50,14 @@ just the refresh token) — the revoked device is signed out right away, not jus
 
 ## Sign out everywhere
 
-Two endpoints do overlapping things here — pick based on whether you need the revoked count:
+Two endpoints do overlapping things here — pick based on whether you need the revoked count.
+Both revoke **every** session, the caller's own included. With `session.verifyOnEachRequest` on
+(the default) their access tokens — including the one making this call — stop working on the next
+request, on every instance; with it off, they stay valid until they expire (see
+[Middleware](../api/middleware.md)).
 
 ```js
-// Returns how many sessions were revoked, but does NOT proactively invalidate
-// their still-live access tokens (those expire naturally, same caveat as
-// password change/reset — see password-email-auth.md).
+// Returns how many sessions were revoked.
 async function revokeAllSessions(accessToken) {
   const res = await fetch(`${BASE}/me/sessions`, { method: 'DELETE', headers: authHeader(accessToken) });
   return res.json(); // { status: 'ok', revokedCount: 3 }

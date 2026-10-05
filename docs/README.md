@@ -35,20 +35,20 @@ relative path.
 | [errors.md](api/errors.md) | `IdpError`, `isIdpError`, the `ERROR_CODES` catalogue |
 | [tokens-rs256.md](api/tokens-rs256.md) | RS256 token issuance/verification, opaque-token hashing |
 | [jwks-oidc-discovery.md](api/jwks-oidc-discovery.md) | User-token JWKS, OIDC discovery document |
-| [middleware.md](api/middleware.md) | `authContextMiddleware`, `serviceContextMiddleware`, `validateBody`/`validateQuery`, `cookieParser` |
+| [middleware.md](api/middleware.md) | `authContextMiddleware` (incl. the per-request session check), `serviceContextMiddleware`, `validateBody`/`validateQuery`, `cookieParser` |
 | [password-email-auth.md](api/password-email-auth.md) | Register, login, refresh/logout, password reset/change, self-service profile & sessions |
-| [mfa.md](api/mfa.md) | TOTP setup, confirm, disable, recovery codes, challenge verification |
+| [mfa.md](api/mfa.md) | TOTP setup, confirm, disable, recovery codes, challenge verification, per-account lockout, secret encryption at rest + `migrateMfaSecrets()` |
 | [magic-link.md](api/magic-link.md) | Passwordless email login |
 | [webauthn.md](api/webauthn.md) | Passkey registration, passwordless login, passkey-as-MFA |
 | [oauth2-authorization-server.md](api/oauth2-authorization-server.md) | Authorization code + PKCE, client credentials, refresh grants, client lifecycle, consent, revocation/introspection |
 | [oidc.md](api/oidc.md) | UserInfo, RP-initiated logout |
 | [sso-social-login.md](api/sso-social-login.md) | Google/GitHub/Microsoft/Apple/LinkedIn social login |
 | [service-mesh.md](api/service-mesh.md) | Service-to-service JWKS trust and token minting/verification |
-| [repository-adapters.md](api/repository-adapters.md) | The eight storage interfaces, built-in Mongo adapter, `storage.factory` pluggability |
+| [repository-adapters.md](api/repository-adapters.md) | The eight storage interfaces (plus optional `findByJti`/`AttemptCounterRepository`), built-in Mongo adapter, `storage.factory` pluggability |
 | [cache-interface.md](api/cache-interface.md) | `CacheAdapter` contract, memory/Redis adapters, fail-closed revocation checks |
-| [rate-limiter-interface.md](api/rate-limiter-interface.md) | `RateLimiter` contract, memory/Redis/noop adapters, default per-endpoint rules |
+| [rate-limiter-interface.md](api/rate-limiter-interface.md) | `RateLimiter` contract, memory/Redis/noop adapters, default per-endpoint rules, fail-closed/fail-open backend errors |
 | [webhooks.md](api/webhooks.md) | `WebhookDispatcher`, `verifyWebhookSignature`, HMAC signature scheme |
-| [router-and-schemas.md](api/router-and-schemas.md) | `buildRouter()`, the full mounted route table, exported zod `schemas` |
+| [router-and-schemas.md](api/router-and-schemas.md) | `buildRouter()` (`clientManagement`, `features`), the full mounted route table, exported zod `schemas` |
 
 ## Examples (`examples/`)
 
@@ -67,6 +67,7 @@ relative path.
 | [sso-google-login.md](examples/sso-google-login.md) | Google social login, redirect-URI allowlisting |
 | [service-mesh-s2s-tokens.md](examples/service-mesh-s2s-tokens.md) | Registering service identities, minting/verifying S2S tokens |
 | [session-management.md](examples/session-management.md) | Listing/revoking sessions ("devices logged in" UI) |
+| [consumer-managed-app-data.md](examples/consumer-managed-app-data.md) | Attaching role/capabilities/profile data via a consumer-owned collection |
 
 ## Source of truth
 

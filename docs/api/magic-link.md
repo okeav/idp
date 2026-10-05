@@ -13,7 +13,7 @@ description: "requestMagicLinkHandler and verifyMagicLinkHandler — single-use,
 `VerificationTokenRepository` used for email verification and password reset (no separate
 storage — see [Repository Adapters](repository-adapters.md)).
 
-## Routes (via `buildRouter()`)
+## Routes (via `buildRouter()`, unless `features.magicLink: false`)
 
 | Method | Path | Auth | Schema |
 |---|---|---|---|
@@ -24,7 +24,8 @@ storage — see [Repository Adapters](repository-adapters.md)).
 
 **Body**: `{ email: string }` (trimmed, lowercased, valid-email, max 255 chars).
 
-**Rate limited**: `magic-link:ip:<req.ip>` against `config.rateLimiting.magicLink` (default 3/hour).
+**Rate limited**: `magic-link:ip:<req.ip>` against `config.rateLimiting.magicLink` (default 3/hour),
+fail-closed — a rate-limiter backend error → 503 `RATE_LIMITER_UNAVAILABLE`.
 
 **Always responds** `{ status: 'ok' }` (enumeration-safe) regardless of whether the email belongs
 to an existing account, a newly-created one, or neither.

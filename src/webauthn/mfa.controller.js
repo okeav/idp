@@ -8,6 +8,14 @@ import { auditLog } from '../hooks/index.js';
 import { verifyStoredCredentialAssertion } from './shared.js';
 import { issueSession, setSessionCookies, resolveClaims } from '../password-auth/controllers.js';
 import { verifyMfaChallengeToken as verifyMfaChallengeTokenJwt } from '../signing/token.service.js';
+import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { guardMfaAttempt } from '../mfa/attempt-guard.js';
+
+// A failed assertion is a failed second-factor attempt, counted against the
+// same per-account limit as a wrong TOTP/recovery code. An expired or missing
+// challenge isn't — no guess was made.
+const ASSERTION_FAILURE_CODES = new Set(['WEBAUTHN_VERIFICATION_FAILED', 'CREDENTIAL_NOT_FOUND', 'INVALID_REQUEST']);
+const isAssertionFailure = (err) => ASSERTION_FAILURE_CODES.has(err?.code);
 
 /**
  * Passkey as a *second factor* — an alternative to `verifyMfaChallengeHandler`
@@ -65,23 +73,27 @@ export async function verifyMfaWebauthnChallengeHandler(req, res, next) {
         const state = getState();
         const { mfaChallengeToken, response } = req.body;
 
+        await enforceRateLimit(state, `mfa-challenge:ip:${req.ip}`, state.config.rateLimiting.mfaChallenge, { failMode: 'closed' });
+
         const { sub: userId } = assertMfaChallenge(state, mfaChallengeToken);
 
-        const expectedChallenge = await consumeChallenge(state, `mfa-webauthn:${userId}`);
-        if (!expectedChallenge) {
-            throw new IdpError({ code: 'WEBAUTHN_CHALLENGE_EXPIRED', httpStatus: 400, message: 'MFA challenge expired or not found — restart login' });
-        }
+        await guardMfaAttempt(state, userId, { method: 'webauthn', isFailure: isAssertionFailure }, async () => {
+            const expectedChallenge = await consumeChallenge(state, `mfa-webauthn:${userId}`);
+            if (!expectedChallenge) {
+                throw new IdpError({ code: 'WEBAUTHN_CHALLENGE_EXPIRED', httpStatus: 400, message: 'MFA challenge expired or not found — restart login' });
+            }
 
-        const credentialDoc = await verifyStoredCredentialAssertion(state, { response, expectedChallenge });
+            const credentialDoc = await verifyStoredCredentialAssertion(state, { response, expectedChallenge });
 
-        // Defense in depth: allowCredentials scoping in the browser should
-        // already prevent this, but a malicious client could submit any
-        // credential id in the assertion response — independently confirm the
-        // verified credential belongs to the SAME user the password step
-        // already authenticated, not merely some valid registered passkey.
-        if (String(credentialDoc.user) !== String(userId)) {
-            throw new IdpError({ code: 'WEBAUTHN_VERIFICATION_FAILED', httpStatus: 401, message: 'Credential does not belong to the challenged account' });
-        }
+            // Defense in depth: allowCredentials scoping in the browser should
+            // already prevent this, but a malicious client could submit any
+            // credential id in the assertion response — independently confirm the
+            // verified credential belongs to the SAME user the password step
+            // already authenticated, not merely some valid registered passkey.
+            if (String(credentialDoc.user) !== String(userId)) {
+                throw new IdpError({ code: 'WEBAUTHN_VERIFICATION_FAILED', httpStatus: 401, message: 'Credential does not belong to the challenged account' });
+            }
+        });
 
         const user = await state.storage.userRepository.findById(userId);
         if (!user || user.status !== IDENTITY_STATUS.ACTIVE) {

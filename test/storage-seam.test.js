@@ -22,6 +22,7 @@ function baseConfig(overrides = {}) {
             emailHashPepper: 'seam-test-pepper',
             tokenHashSecret: 'seam-test-token-secret',
         },
+        mfa: { encryptionKey: Buffer.alloc(32, 3).toString('base64') },
         logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
         ...overrides,
     };

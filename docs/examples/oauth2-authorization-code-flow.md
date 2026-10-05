@@ -14,22 +14,38 @@ reference.
 
 ## Prerequisites
 
-- A running idp-core server with the full router mounted (`buildRouter()` includes the OAuth2
-  routes by default).
-- **Register and approve a client first** — new clients start `PENDING_APPROVAL` and can't
-  complete an authorize/token exchange until approved. In this example, approval is done directly
-  against the unauthenticated `/oauth2/clients/:id/approve` route for simplicity — in production,
-  gate client-management routes behind your own admin auth (see
+- A running idp-core server with the router mounted. `buildRouter()` includes the OAuth2
+  authorize/token/consent routes by default, but the `/oauth2/clients*` management routes **only**
+  when you pass `clientManagement` with your own admin middleware (see
   [Router & Schemas](../api/router-and-schemas.md)).
+- **Register and approve a client first** — new clients start `PENDING_APPROVAL` and can't
+  complete an authorize/token exchange until approved.
+
+Server side, for this example — admin auth is yours to define; here, any caller whose access
+token carries an `admin` role claim (set by your `resolveAuthContext`):
+
+```js
+import { buildRouter, authContextMiddleware } from '@okeav/idp-core';
+
+const requireAdmin = [
+  authContextMiddleware(),
+  (req, res, next) => (req.auth.claims.role === 'admin'
+    ? next()
+    : res.status(403).json({ error: 'FORBIDDEN' })),
+];
+
+app.use('/auth', buildRouter({ clientManagement: { middleware: requireAdmin } }));
+```
 
 ## 1. Register a client
 
 ```js
 const BASE = 'http://localhost:3000/auth';
+const adminHeaders = { Authorization: `Bearer ${adminAccessToken}` }; // an admin's access token
 
 const registerRes = await fetch(`${BASE}/oauth2/clients`, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
+  headers: { 'Content-Type': 'application/json', ...adminHeaders },
   body: JSON.stringify({
     name: 'My Relying App',
     slug: 'my-relying-app',
@@ -42,7 +58,7 @@ const registerRes = await fetch(`${BASE}/oauth2/clients`, {
 const { clientId, status } = await registerRes.json(); // status: 'PENDING_APPROVAL'
 
 // An operator approves it (e.g. via an internal admin tool):
-await fetch(`${BASE}/oauth2/clients/${clientId}/approve`, { method: 'POST' });
+await fetch(`${BASE}/oauth2/clients/${clientId}/approve`, { method: 'POST', headers: adminHeaders });
 ```
 
 ## 2. Generate a PKCE pair (public client)

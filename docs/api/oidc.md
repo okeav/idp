@@ -76,7 +76,9 @@ Query: `post_logout_redirect_uri?, state?, id_token_hint?`.
    post-logout list is set → `INVALID_REDIRECT_URI` (400) otherwise.
 4. If a `userId` was resolved (from session or hint), calls `sessionRepository.revokeAllForUser` —
    **this is a global logout, revoking every session for the user, not just the one tied to the
-   presented `id_token_hint`'s client.** Fires `auditLog('END_SESSION', { userId, revokedSessions })`.
+   presented `id_token_hint`'s client.** Its access tokens stop working on the next request under
+   `session.verifyOnEachRequest` (default — see [Middleware](middleware.md)). Fires
+   `auditLog('END_SESSION', { userId, revokedSessions })`.
 5. Redirects to `post_logout_redirect_uri?state=...` if supplied; otherwise `200 { status: 'ok' }`.
 
 **No cookies are read or cleared by this handler** — it's purely token/session-store based. If

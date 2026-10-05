@@ -154,7 +154,9 @@ async function handleClientCredentialsGrant(req, res) {
         throw new IdpError({ code: 'INVALID_REQUEST', httpStatus: 400, message: `Requested scopes not allowed: ${invalidScopes.join(', ')}` });
     }
 
-    const accessTokenResult = await issueOAuth2AccessToken(state, { id: client.clientId }, client, requestedScopes);
+    // No user, no refresh token, no session row — marked sessionless so the
+    // per-request session check doesn't refuse it.
+    const accessTokenResult = await issueOAuth2AccessToken(state, { id: client.clientId }, client, requestedScopes, { sessionless: true });
 
     await auditLog(state.logger, state.hooks, 'OAUTH2_TOKEN_ISSUED', { clientId: client_id, grantType: 'client_credentials', scopes: requestedScopes });
 

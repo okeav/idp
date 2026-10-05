@@ -13,8 +13,11 @@ export { ERROR_CODES } from './errors/error-codes.js';
 // Thin wrappers over signing/token.service.js that inject the singleton
 // state, so the public signatures match the design doc exactly — no
 // internal state object leaks into the public API.
-export async function issueAccessToken(input, opts) {
-    return tokenService.issueAccessToken(getState(), input, opts);
+// Tokens minted directly through this export have no session row, so they're
+// marked `sessionless` (exempt from `session.verifyOnEachRequest`) unless the
+// caller passes `sessionless: false` because it created a matching session itself.
+export async function issueAccessToken(input, opts = {}) {
+    return tokenService.issueAccessToken(getState(), input, { sessionless: true, ...opts });
 }
 export async function verifyAccessToken(token, opts) {
     return tokenService.verifyAccessToken(getState(), token, opts);
@@ -22,8 +25,8 @@ export async function verifyAccessToken(token, opts) {
 export async function issueIdToken(user, audience, nonce) {
     return tokenService.issueIdToken(getState(), user, audience, nonce);
 }
-export async function issueOAuth2AccessToken(subject, client, scopes) {
-    return tokenService.issueOAuth2AccessToken(getState(), subject, client, scopes);
+export async function issueOAuth2AccessToken(subject, client, scopes, opts) {
+    return tokenService.issueOAuth2AccessToken(getState(), subject, client, scopes, { sessionless: true, ...opts });
 }
 export async function issueMfaChallengeToken(subjectId) {
     return tokenService.issueMfaChallengeToken(getState(), subjectId);
@@ -110,6 +113,10 @@ export { ssoCallbackHandler } from './sso/callback.controller.js';
 
 // ── Magic link (passwordless email login) ───────────────────────────────
 export { requestMagicLinkHandler, verifyMagicLinkHandler } from './magic-link/controller.js';
+
+// ── MFA secret encryption (advanced — most consumers just set config.mfa.encryptionKey) ──
+export { migrateMfaSecrets } from './mfa/secrets.js';
+export { AesGcmSecretCipher } from './mfa/secret-cipher.js';
 
 // ── WebAuthn / passkeys ──────────────────────────────────────────────────
 export { generateRegistrationOptionsHandler, verifyRegistrationHandler } from './webauthn/registration.controller.js';

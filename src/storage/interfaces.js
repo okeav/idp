@@ -4,7 +4,8 @@
  *
  * This file exists so every Mongo repository can `@implements` a named
  * interface, and so a future non-Mongo adapter has a single place to read
- * the full contract it must satisfy. All 8 repositories are returned
+ * the full contract it must satisfy. All 8 required repositories (plus the
+ * optional `attemptCounterRepository`) are returned
  * together from a `createXStorage(config, {hashEmail, normalizeEmail})`
  * factory (see mongo/index.js for the MongoDB one) — a non-Mongo adapter
  * exports the same factory shape and can be wired in via
@@ -30,6 +31,10 @@
  * @typedef {Object} SessionRepository
  * @property {(input: object) => Promise<object>} createSession
  * @property {(hash: string) => Promise<object|null>} findByRefreshTokenHash
+ * @property {(jti: string) => Promise<{user, expiresAt: Date, revokedAt: Date|null}|null>} [findByJti] - the
+ *   session whose `jti` matches an access token's `jti`. Called once per authenticated request when
+ *   `config.session.verifyOnEachRequest` is on (the default), so it must be an indexed lookup. Optional
+ *   for now: an adapter without it falls back to the per-process revocation cache, with a startup warning.
  * @property {(hash: string, opts?: {onlyIfActive?: boolean}) => Promise<object|null>} revokeByRefreshTokenHash
  * @property {(id: string, userId: string) => Promise<object|null>} revokeById
  * @property {(userId: string, opts?: {exceptTokenHash?: string}) => Promise<{revokedCount: number}>} revokeAllForUser
@@ -81,5 +86,21 @@
  * @property {(credentialId: string, newCounter: number) => Promise<void>} updateCounter
  * @property {(credentialId: string, userId: string) => Promise<void>} deleteByCredentialId - scoped to the claimed owner
  * @property {(userId: string) => Promise<number>} countForUser
+ *
+ * @typedef {Object} AttemptCounterRepository
+ * Optional. Fixed-window failure counters with a lock, keyed by an opaque
+ * string (currently `mfa:<userId>` — the per-account second-factor lockout).
+ * Lives in storage rather than the rate limiter so every app instance sees
+ * the same count whatever cache/rate-limiter adapter is configured. An
+ * adapter that doesn't provide it gets an in-process fallback
+ * (src/mfa/memory-attempt-counter.js) and a startup warning.
+ * @property {(key: string) => Promise<{count: number, windowExpiresAt: Date, lockedUntil: Date|null}|null>} get
+ * @property {(key: string, opts: {max: number, windowSeconds: number, lockSeconds: number}) => Promise<{count: number, windowExpiresAt: Date, lockedUntil: Date|null}>} recordFailure -
+ *   ATOMIC: if there's no record, or (with no lock still active) its window has passed or its lock has
+ *   expired, start over at count 1 with a new window; otherwise count + 1. When the count reaches `max` and no lock is set, set
+ *   `lockedUntil = now + lockSeconds`. Returns the post-update record. Concurrent callers must each see a
+ *   distinct count (exactly one sees `count === max`).
+ * @property {(key: string) => Promise<void>} reset
+ * @property {() => Promise<{deletedCount: number}>} [pruneExpired]
  */
 export {};

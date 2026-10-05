@@ -74,12 +74,15 @@ active login cookie, MFA enabled, a registered passkey, etc.) as noted.
   List sessions (do flow 2/3 a couple of times first so there's more than
   one) → revoke one by ID → re-list to confirm it's gone → logout (current
   session) → re-list now 401s (correct — you have no valid cookie anymore)
-  → log back in via flow 2 → logout all.
+  → log back in via flow 2 → logout all → **expected:** the next
+  authenticated call gets `401 TOKEN_REVOKED` (logout-all doesn't clear
+  your cookie, but `session.verifyOnEachRequest` finds the session revoked).
 
 - [ ] **5. Forgot / reset password** (`/flows/password-reset`)
   Request a reset for the flow-1 account → dev-mode token shown → reset →
   **expected:** old password now fails at flow 2, new one works, and all
-  prior sessions were revoked.
+  prior sessions were revoked — including their access tokens (an old login
+  cookie now gets `401 TOKEN_REVOKED`).
 
 - [ ] **6. MFA (TOTP)** (`/flows/mfa`)
   Requires being logged in (flow 2). Setup → shows the raw `otpauth://` URI
@@ -87,7 +90,12 @@ active login cookie, MFA enabled, a registered passkey, etc.) as noted.
   the "compute current code" convenience button) → confirm → login again
   triggers `mfaRequired:true` → complete the challenge. **Expected:** a full
   session issued only after the TOTP step; recovery codes shown once at
-  confirm time.
+  confirm time. A recovery code (`XXXXXX-XXXXXX`) also completes the
+  challenge. Five wrong codes in 15 minutes lock the second-factor step:
+  every attempt, right code or not, then gets `429 MFA_LOCKED` for 15
+  minutes and `MFA_LOCKED` appears in the activity panel. The secret is
+  stored encrypted (`server.js` sets a fixed dev-only `mfa.encryptionKey`,
+  overridable with `IDP_MFA_ENCRYPTION_KEY`).
 
 - [ ] **7. Magic link** (`/flows/magic-link`)
   Request a link for a brand-new email → dev-mode token shown, `isNewUser:
@@ -105,7 +113,9 @@ active login cookie, MFA enabled, a registered passkey, etc.) as noted.
   fire `resolveAuthContext` exactly like password login (check the panel).
 
 - [ ] **9. OAuth2 / OIDC** (`/flows/oauth2`)
-  Requires being logged in (flow 2). Register a test client → approve it →
+  Requires being logged in (flow 2) — the client-management routes run
+  behind the harness's `clientManagement` middleware, which only lets
+  logged-in users through. Register a test client → approve it →
   authorize (real page navigation — first pass usually lands on a raw
   `consent_required` JSON response; grant consent via the form, then
   authorize again) → lands on `/oauth2-callback` with a `code` → exchange

@@ -11,14 +11,34 @@ description: "buildRouter() and the full mounted route table, plus the exported 
 ## `buildRouter(opts?)`
 
 ```ts
-function buildRouter(opts?: { ownServiceName?: string }): express.Router
+function buildRouter(opts?: {
+  clientManagement?: { middleware: RequestHandler | RequestHandler[] };
+  features?: Partial<Record<'magicLink' | 'webauthn' | 'sso' | 'oauth2' | 'oidc' | 'serviceMesh', boolean>>;
+  ownServiceName?: string; // deprecated — never had any effect; accepted and ignored
+}): express.Router
 ```
 
-Assembles a fully-wired `express.Router()` covering every route this package implements, using
-sensible default paths. Entirely optional — if your app wants different paths, custom rate
-limiting, or to omit a feature (e.g. no OAuth2 authorization-server surface), mount the individual
-handler exports on your own router instead. `opts.ownServiceName` is passed through to
-`serviceContextMiddleware` for the (unmounted-by-default) service-mesh routes that need it.
+Assembles a fully-wired `express.Router()` covering the routes this package implements, using
+sensible default paths. Entirely optional — if your app wants different paths or custom rate
+limiting, mount the individual handler exports on your own router instead.
+
+**`opts.clientManagement`** — OAuth2 client administration (the seven `/oauth2/clients*` routes
+below) is **not mounted unless this is given** (since 0.3.0; without it every client path is a
+plain 404). This package has no admin-role concept, so you supply the admin
+authentication/authorization as `middleware` — one function or an array. The routes are mounted on
+a sub-router whose first handlers are that middleware, so it runs before every client route and
+can refuse. `buildRouter` throws at startup if `clientManagement` is given without at least one
+middleware function (missing `middleware`, empty array, or a non-function entry). Independent of
+`features.oauth2`.
+
+```js
+app.use('/auth', buildRouter({ clientManagement: { middleware: [requireAdmin] } })); // requireAdmin: your own middleware
+```
+
+**`opts.features`** — each of `magicLink`, `webauthn`, `sso`, `oauth2`, `oidc`, `serviceMesh`
+defaults to `true`; set one to `false` to leave that surface's routes (marked in the tables below)
+unmounted. An unknown key throws. Password/email auth, `/me*`, MFA, and JWKS routes are always
+mounted.
 
 `serviceContextMiddleware` is also re-exported alongside `buildRouter` for building your own
 protected internal routes alongside it.
@@ -38,13 +58,13 @@ at the application root regardless of prefix — see note below).
 | POST | `/login` | `validateBody(loginSchema)` |
 | POST | `/mfa/verify` | `validateBody(verifyMfaChallengeSchema)` |
 | POST | `/refresh` | — |
-| POST | `/logout` | `validateBody(logoutSchema)` |
+| POST | `/logout` | `validateBody(logoutSchema)` — `refreshToken` in the body is optional; the `refresh_token` cookie is read when it's omitted |
 | POST | `/logout/all` | `authContextMiddleware()` |
 | POST | `/password/forgot` | `validateBody(forgotPasswordSchema)` |
 | POST | `/password/reset` | `validateBody(resetPasswordSchema)` |
 | POST | `/password/change` | `authContextMiddleware()`, `validateBody(changePasswordSchema)` |
 
-### Magic link
+### Magic link — `features.magicLink`
 | Method | Path | Middleware |
 |---|---|---|
 | POST | `/magic-link/request` | `validateBody(requestMagicLinkSchema)` |
@@ -69,7 +89,7 @@ at the application root regardless of prefix — see note below).
 | DELETE | `/me/mfa` | `authContextMiddleware()`, `validateBody(disableMfaSchema)` |
 | POST | `/me/mfa/recovery-codes` | `authContextMiddleware()`, `validateBody(regenerateRecoveryCodesSchema)` |
 
-### WebAuthn / passkeys
+### WebAuthn / passkeys — `features.webauthn`
 | Method | Path | Middleware |
 |---|---|---|
 | POST | `/webauthn/registration/options` | `authContextMiddleware()`, `validateBody(registrationOptionsSchema)` |
@@ -79,7 +99,7 @@ at the application root regardless of prefix — see note below).
 | POST | `/webauthn/mfa/options` | `validateBody(mfaWebauthnOptionsSchema)` |
 | POST | `/webauthn/mfa/verify` | `validateBody(verifyMfaWebauthnSchema)` |
 
-### OAuth2 authorization server
+### OAuth2 authorization server — `features.oauth2`
 | Method | Path | Middleware |
 |---|---|---|
 | GET | `/oauth2/authorize` | `validateQuery(authorizeQuerySchema)`, `authContextMiddleware({ optional: true })` |
@@ -91,6 +111,12 @@ at the application root regardless of prefix — see note below).
 | GET | `/oauth2/consent` | `authContextMiddleware()` |
 | GET | `/oauth2/consent/sessions` | `authContextMiddleware()` |
 | DELETE | `/oauth2/consent/sessions/:clientId` | `authContextMiddleware()` |
+
+### OAuth2 client management — only with `opts.clientManagement`
+Every route runs behind `clientManagement.middleware` first.
+
+| Method | Path | Middleware |
+|---|---|---|
 | POST | `/oauth2/clients` | `validateBody(registerOAuthClientSchema)` |
 | GET | `/oauth2/clients` | — |
 | GET | `/oauth2/clients/:clientId` | — |
@@ -99,34 +125,33 @@ at the application root regardless of prefix — see note below).
 | POST | `/oauth2/clients/:clientId/rotate-secret` | — |
 | DELETE | `/oauth2/clients/:clientId` | — |
 
-> **The six `/oauth2/clients*` management routes are left unauthenticated by `buildRouter()`** —
-> this package has no admin-role concept of its own (see [Bootstrap & Config](bootstrap-config.md)
-> "What this package deliberately does not do"). Mount your own admin-auth middleware in front of
-> these in a real app before exposing `buildRouter()`'s output publicly, or don't mount this slice
-> of the router and wire the handlers yourself behind `requireServiceCallerMiddleware` or your own
-> RBAC layer.
+> **Upgrading from 0.2.x**: these routes used to be mounted unauthenticated. If you administer
+> OAuth clients over HTTP, pass `clientManagement: { middleware: [yourAdminAuth] }`; if you had a
+> workaround that 404'd `/oauth2/clients*` in front of `buildRouter()`, remove it. To keep them off
+> HTTP entirely, omit the option and call the handlers (or the repository) from your own admin
+> tooling.
 
-### OIDC
+### OIDC — `features.oidc`
 | Method | Path | Middleware |
 |---|---|---|
 | GET | `/userinfo` | `authContextMiddleware()` |
 | GET | `/oidc/end-session` | `authContextMiddleware({ optional: true })` |
 | GET | `/.well-known/openid-configuration` | — |
 
-### SSO
+### SSO — `features.sso`
 | Method | Path | Middleware |
 |---|---|---|
 | GET | `/sso/:provider` | `validateQuery(ssoInitiateQuerySchema)` |
 | GET | `/sso/:provider/callback` | — |
 | POST | `/sso/:provider/callback` | `express.urlencoded({ extended: false })` (Apple's `form_post` callback) |
 
-### JWKS
+### JWKS — always mounted
 | Method | Path | Middleware |
 |---|---|---|
 | GET | `/.well-known/jwks.json` | — |
 | GET | `/keys/:kid` | — |
 
-### Service mesh
+### Service mesh — `features.serviceMesh`
 | Method | Path | Middleware |
 |---|---|---|
 | POST | `/internal/service-keys` | `s2sBootstrapMiddleware` |

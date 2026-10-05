@@ -57,13 +57,16 @@ validation list.
 | `SERVICE_UNAVAILABLE` | 503 | Generic |
 | `NOT_FOUND` | 404 | Generic |
 | `RATE_LIMIT_EXCEEDED` | 429 | Generic — thrown by `enforceRateLimit` |
+| `RATE_LIMITER_UNAVAILABLE` | 503 | Generic — rate-limiter backend errored on a fail-closed key (login, MFA verify, password-reset request, magic-link request); see [Rate Limiter Interface](rate-limiter-interface.md) |
+| `FEATURE_DISABLED` | 404 | Generic — `setupMfaHandler`/`confirmMfaHandler` with `config.mfa.enabled: false` |
 | `AUTH_REQUIRED` | 401 | AuthN — `authContextMiddleware`, no token presented and not `optional` |
 | `UNAUTHENTICATED` | 401 | AuthN — handler-level check when `req.auth` is missing |
 | `FORBIDDEN` | 403 | AuthN |
 | `INVALID_TOKEN` | 401 | AuthN — malformed/unverifiable token |
 | `TOKEN_EXPIRED` | 401 | AuthN |
-| `TOKEN_REVOKED` | 401 | AuthN — presented token's `jti` found in the revocation cache |
-| `CACHE_UNAVAILABLE` | 503 | AuthN — cache adapter errored during a revocation check (fail-closed) |
+| `TOKEN_REVOKED` | 401 | AuthN — presented token's `jti` found in the revocation cache, or (with `session.verifyOnEachRequest`) its session row is missing, revoked, expired, or another user's |
+| `CACHE_UNAVAILABLE` | 503 | AuthN — cache adapter errored during a revocation check with `session.verifyOnEachRequest: false` (fail-closed). With it on, a cache error is logged and the session store decides |
+| `SESSION_STORE_UNAVAILABLE` | 503 | AuthN — `sessionRepository.findByJti` errored during the per-request session check (fail-closed); see [Middleware](middleware.md) |
 | `INVALID_CREDENTIALS` | 401 | Credentials |
 | `EMAIL_AND_PASSWORD_REQUIRED` | 400 | Credentials |
 | `EMAIL_REQUIRED` | 400 | Credentials |
@@ -85,6 +88,10 @@ validation list.
 | `MFA_SETUP_REQUIRED` | 400 | MFA |
 | `INVALID_MFA_CODE` | 400 | MFA |
 | `INVALID_MFA_CHALLENGE_TOKEN` | 401 | MFA |
+| `MFA_LOCKED` | 429 | MFA — per-account second-factor lockout; returned for every attempt while locked, right code or not (see [MFA](mfa.md#per-account-lockout)) |
+| `MFA_ENCRYPTION_NOT_CONFIGURED` | 500 | MFA — an encrypted secret was found, or one must be written, with no `mfa.encryptionKey`/`secretCipher` |
+| `MFA_SECRET_NOT_ENCRYPTED` | 500 | MFA — a plain-text secret was found with `mfa.requireEncrypted: true`; run `migrateMfaSecrets()` |
+| `MFA_SECRET_UNREADABLE` | 500 | MFA — stored secret failed to decrypt (tampered, wrong key, unknown key id); fails closed, no tokens issued |
 | `UNKNOWN_KID` | 404 | OAuth2/OIDC/JWKS |
 | `KEY_NOT_ALLOWED` | 403 | OAuth2/OIDC/JWKS |
 | `INVALID_REDIRECT_URI` | 400 | OAuth2/OIDC/JWKS |
@@ -131,5 +138,6 @@ an unknown email rather than a distinguishable error).
 ## Related
 
 - [Bootstrap & Config](bootstrap-config.md)
-- [Rate Limiter Interface](rate-limiter-interface.md) — `RATE_LIMIT_EXCEEDED` fails closed to the client but the *backend* fails open.
+- [Rate Limiter Interface](rate-limiter-interface.md) — a backend error fails closed (`RATE_LIMITER_UNAVAILABLE`) on credential-check keys, open elsewhere.
 - [Cache Interface](cache-interface.md) — `CACHE_UNAVAILABLE` fails closed for revocation checks.
+- [MFA](mfa.md) — `MFA_LOCKED` and the `MFA_SECRET_*` codes.

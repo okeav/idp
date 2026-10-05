@@ -184,8 +184,8 @@ export async function loginHandler(req, res, next) {
         const state = getState();
         const { email, password } = req.body;
 
-        await enforceRateLimit(state, `login:ip:${req.ip}`, state.config.rateLimiting.login);
-        await enforceRateLimit(state, `login:email:${state.normalizeEmail(email)}`, state.config.rateLimiting.loginByEmail);
+        await enforceRateLimit(state, `login:ip:${req.ip}`, state.config.rateLimiting.login, { failMode: 'closed' });
+        await enforceRateLimit(state, `login:email:${state.normalizeEmail(email)}`, state.config.rateLimiting.loginByEmail, { failMode: 'closed' });
 
         let user = await state.storage.userRepository.findByEmail(email, { select: '+passwordHash' });
 
@@ -359,7 +359,7 @@ export async function forgotPasswordHandler(req, res, next) {
         const state = getState();
         const { email } = req.body;
 
-        await enforceRateLimit(state, `password-reset:ip:${req.ip}`, state.config.rateLimiting.passwordReset);
+        await enforceRateLimit(state, `password-reset:ip:${req.ip}`, state.config.rateLimiting.passwordReset, { failMode: 'closed' });
 
         const user = await state.storage.userRepository.findByEmail(email);
         if (!user) return res.json({ status: 'ok' }); // enumeration-safe

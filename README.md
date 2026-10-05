@@ -30,7 +30,7 @@ import express from 'express';
 import { initIdentityProvider, buildRouter, cookieParser, configFromEnv } from '@okeav/idp-core';
 
 await initIdentityProvider({
-  ...configFromEnv(), // reads the IDP_* env vars documented in .env.example
+  ...configFromEnv(), // reads the IDP_* env vars documented in .env.example — including IDP_MFA_ENCRYPTION_KEY
   hooks: {
     onVerificationEmailRequested: async ({ email, verificationCode }) => {
       await sendEmail(email, `Your verification code is ${verificationCode}`);
@@ -52,7 +52,37 @@ app.use((err, req, res, next) => {
 app.listen(3000);
 ```
 
+`buildRouter()` mounts every surface by default except OAuth2 client administration
+(`/oauth2/clients*`), which it mounts only behind your own admin middleware:
+`buildRouter({ clientManagement: { middleware: [requireAdmin] } })`. `features: { sso: false, ... }`
+leaves a surface (`magicLink`, `webauthn`, `sso`, `oauth2`, `oidc`, `serviceMesh`) unmounted. See
+`docs/api/router-and-schemas.md`.
+
 Prefer wiring routes yourself? Every handler in `buildRouter()` is also a named export — `import { loginHandler } from '@okeav/idp-core'` — so you can mount them on your own router with your own paths, rate limiters, and middleware order.
+
+## Upgrading from 0.2.x
+
+0.3.0 is a security release with three changes that need action or a decision:
+
+1. **OAuth2 client management is no longer mounted by default.** `buildRouter()` used to mount
+   `/oauth2/clients*` unauthenticated; now those paths 404 unless you pass
+   `clientManagement: { middleware: [yourAdminAuth] }`. If you administer clients over HTTP, pass
+   it; if you had a workaround that 404'd `/oauth2/clients*`, remove it.
+2. **TOTP secrets are encrypted at rest, and a key is required.** Set `mfa.encryptionKey`
+   (`IDP_MFA_ENCRYPTION_KEY`, `openssl rand -base64 32`) — or `mfa.enabled: false` if you don't use
+   TOTP — or `initIdentityProvider()` throws. Deploy; run `migrateMfaSecrets()` once to encrypt
+   existing secrets (they're also re-encrypted lazily on each user's next MFA verify); then set
+   `mfa.requireEncrypted: true`. See `docs/api/mfa.md`.
+3. **Access tokens die on logout-all / password reset.** `session.verifyOnEachRequest` (default
+   `true`) makes `authContextMiddleware` check the token's session row on every request, so
+   revocations take effect on every instance immediately. Budget one indexed storage read per
+   authenticated request, or set it `false` to keep 0.2.x behaviour (revoked users' access tokens
+   live until expiry, up to 1 hour by default). See `docs/api/middleware.md`.
+
+Also new: a per-account MFA lockout (`mfa.lockout`, 5 failures → 15-minute lock, returning 429
+`MFA_LOCKED`), and rate limiting that fails closed on credential checks (see "Rate limiting"
+below). Custom storage adapters keep working but should add `sessionRepository.findByJti` and
+`attemptCounterRepository` (see "Storage"). Full list in `CHANGELOG.md`.
 
 ## Configuration
 
@@ -63,6 +93,7 @@ See `.env.example` for the full list of environment variables and `types/index.d
 - `signingKeys.keys` — at least one `ACTIVE` RS256 keypair (PEM or base64 PEM).
 - `security.emailHashPepper` — HMAC key for the email blind index.
 - `security.tokenHashSecret` — HMAC key for hashing opaque refresh/reset/verification tokens at rest.
+- `mfa.encryptionKey` — 32-byte base64 key (`openssl rand -base64 32`) that encrypts TOTP secrets at rest (AES-256-GCM). Required while `mfa.enabled` (default `true`); set `mfa.enabled: false` instead if you don't use TOTP. Rotation and KMS-backed ciphers: `docs/api/mfa.md`.
 
 Everything else has a sensible default. RBAC-shaped config (roles, scopes, capabilities) doesn't exist in this schema on purpose — see "Claims are opaque" below.
 
@@ -73,7 +104,7 @@ Everything else has a sensible default. RBAC-shaped config (roles, scopes, capab
 - **memory** — zero config, but single-process only. State (revocation cache, SSO CSRF state) is lost on restart and not shared across instances. Fine for local dev or a genuinely single-instance deployment; wrong for anything horizontally scaled.
 - **redis** — set `config.cache.adapter = 'redis'` and `config.cache.redis = { host, port, password }`. Requires `ioredis` as a peer dependency; it's only `import()`-ed when this adapter is actually selected.
 
-**Revocation checks fail closed regardless of adapter**: if the cache adapter throws (connection down, timeout), `authContextMiddleware` rejects the request rather than treating the failure as "not revoked." A cache *miss* (key genuinely absent) still correctly means "not revoked" — only adapter *errors* trigger the fail-closed path.
+**Revocation checks fail closed regardless of adapter.** By default (`config.session.verifyOnEachRequest: true`) `authContextMiddleware` looks up the access token's session row by `jti` on every request — one indexed read — and rejects it (401 `TOKEN_REVOKED`) if the session is gone, revoked, or expired, so logout-all, password reset, and session revocation take effect on every instance at once. The cache is only a fast path in front of that: a cached revocation short-circuits, a cache error is logged and storage decides, and a storage error rejects with 503 `SESSION_STORE_UNAVAILABLE`. With `verifyOnEachRequest: false` (0.2.x behaviour) only the cache is checked: a cache *error* rejects with 503 `CACHE_UNAVAILABLE`, a *miss* means "not revoked", and access tokens survive logout-all and password reset/change until they expire (the cache only records single-session logouts/revocations, on the instance that handled them).
 
 ### Claims are opaque
 
@@ -113,11 +144,13 @@ Request-rate limiting is enabled by default (`config.rateLimiting.enabled = true
 | Refresh token, per IP | 30 / min |
 | Magic-link request, per IP | 3 / hour |
 
+The MFA challenge limit covers both `/mfa/verify` and `/webauthn/mfa/verify`. Separately — and regardless of `rateLimiting.enabled` — a per-**account** MFA lockout (`config.mfa.lockout`, default 5 failed second-factor attempts in 15 min → locked for 15 min, 429 `MFA_LOCKED`) is counted in storage, so it holds across instances and IPs.
+
 Override any of these under `config.rateLimiting.{login, loginByEmail, passwordReset, mfaChallenge, refreshToken, magicLink}` — each takes `{ max, windowSeconds }`. Set `config.rateLimiting.enabled = false` to disable entirely if you already rate-limit at a gateway/CDN layer (e.g. Cloudflare, an API gateway) — running it twice is redundant, not harmful, but the extra storage round-trip on every request is pure overhead if a layer in front of this service already enforces it.
 
 Uses the same adapter pattern as the cache layer: `config.rateLimiting.adapter` is `'memory'` (default, single-process) or `'redis'` (shares the cache adapter's Redis connection automatically if `config.cache.adapter` is also `'redis'`, otherwise set `config.rateLimiting.redis` separately).
 
-**Fails open, deliberately** — the inverse of the cache layer's revocation check. If the rate limiter's backend errors (Redis down, timeout), the request is allowed through and the error is logged, rather than locking users out because of an infrastructure hiccup. Rate limiting here is defense-in-depth, not a security invariant the way revocation checking is.
+**Backend errors fail closed on credential checks, open elsewhere.** If the rate limiter's backend errors (Redis down, timeout), login (per IP and per email), MFA challenge verification, password-reset requests, and magic-link requests are rejected with 503 `RATE_LIMITER_UNAVAILABLE` — an attacker who can knock the limiter over must not get unlimited guesses. Refresh fails open: the error is logged and the request proceeds.
 
 ### Magic link (passwordless email login)
 
@@ -177,7 +210,9 @@ Every error this package throws is an `IdpError` (`{ code, httpStatus, message, 
 
 ## Storage
 
-MongoDB is the only concrete storage adapter shipped in this version, behind eight repository interfaces (`UserRepository`, `SessionRepository`, `AuthorizationCodeRepository`, `ConsentRepository`, `OAuthClientRepository`, `VerificationTokenRepository`, `ServiceKeyRepository`, `CredentialRepository` — documented in `src/storage/interfaces.js`). A future adapter (Postgres, DynamoDB, ...) implements the same eight interfaces; nothing above the storage layer needs to change.
+MongoDB is the only concrete storage adapter shipped in this package, behind eight repository interfaces (`UserRepository`, `SessionRepository`, `AuthorizationCodeRepository`, `ConsentRepository`, `OAuthClientRepository`, `VerificationTokenRepository`, `ServiceKeyRepository`, `CredentialRepository` — documented in `src/storage/interfaces.js`). Other adapters (Postgres, DynamoDB, ...) implement the same eight interfaces and plug in through `config.storage.factory`; nothing above the storage layer needs to change.
+
+Two optional additions (0.3.0): `SessionRepository.findByJti` (the per-request session check) and an `AttemptCounterRepository` (the MFA lockout counter; Mongo stores it in the `IdpAttemptCounter` collection). An adapter without them still works but logs a startup warning and falls back to process-local state — access tokens then survive logout-all and password reset until they expire, and the lockout is counted per instance. `@okeav/idp-core-postgres` 0.2.0 implements both. See `docs/api/repository-adapters.md`.
 
 **Mongo replica set required for transactions.** `SessionRepository.createSessionForLogin()` — the atomic "write session + audit record + update lastLoginAt" used by login/MFA-verify/SSO — uses a real Mongo transaction (`connection.startSession().withTransaction()`), which requires your MongoDB deployment to be a replica set (including a single-node one) or a sharded cluster. A standalone `mongod` cannot run it. Atlas and most managed Mongo offerings are replica sets by default.
 

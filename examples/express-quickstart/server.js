@@ -41,7 +41,13 @@ await initIdentityProvider({
         tokenHashSecret: process.env.IDP_TOKEN_HASH_SECRET || 'quickstart-dev-only-token-secret-do-not-use-in-prod',
     },
 
-    mfa: { issuerLabel: 'IdpQuickstart' },
+    // 0.3.0+: TOTP secrets are encrypted at rest and a key is required at
+    // startup. Dev-only fallback key — set IDP_MFA_ENCRYPTION_KEY
+    // (`openssl rand -base64 32`) for anything real.
+    mfa: {
+        issuerLabel: 'IdpQuickstart',
+        encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY || Buffer.alloc(32, 0x51).toString('base64'),
+    },
 
     hooks: {
         // No real mailer wired up — print what would have been sent so you

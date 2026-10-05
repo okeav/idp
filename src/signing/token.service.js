@@ -9,7 +9,10 @@ const ALGORITHM = 'RS256';
 /**
  * @param {object} state - the initialized IDP state (see config/state.js)
  * @param {{ sub: string, email?: string, claims?: Record<string, unknown> }} input
- * @param {{ ttlSeconds?: number, audience?: string }} [opts]
+ * @param {{ ttlSeconds?: number, audience?: string, sessionless?: boolean }} [opts] - `sessionless: true`
+ *   marks a token that has no session row behind it, so authContextMiddleware's per-request session
+ *   check (`session.verifyOnEachRequest`) skips it instead of refusing it. Internal session-backed
+ *   issuance (login, refresh) never sets it.
  */
 export async function issueAccessToken(state, input, opts = {}) {
     const { sub, email, claims = {} } = input;
@@ -30,6 +33,7 @@ export async function issueAccessToken(state, input, opts = {}) {
         jti: crypto.randomUUID(),
         iat: issuedAt,
         exp: expiresAt,
+        ...(opts.sessionless ? { sessionless: true } : {}),
     };
 
     const token = jwt.sign(payload, key.privateKeyPem, { algorithm: ALGORITHM, keyid: kid });
@@ -72,7 +76,7 @@ export async function issueIdToken(state, user, audience, nonce) {
     return { token, expiresAt: new Date(expiresAt * 1000), kid, jti: claims.jti };
 }
 
-export async function issueOAuth2AccessToken(state, subject, client, scopes) {
+export async function issueOAuth2AccessToken(state, subject, client, scopes, { sessionless = false } = {}) {
     const now = Math.floor(Date.now() / 1000);
     const ttl = client.accessTokenTTL || state.config.ttls.accessToken;
     const expiresAt = now + ttl;
@@ -95,6 +99,7 @@ export async function issueOAuth2AccessToken(state, subject, client, scopes) {
         jti: crypto.randomUUID(),
         iat: now,
         exp: expiresAt,
+        ...(sessionless ? { sessionless: true } : {}),
     };
 
     const token = jwt.sign(claims, key.privateKeyPem, { algorithm: ALGORITHM, keyid: kid });

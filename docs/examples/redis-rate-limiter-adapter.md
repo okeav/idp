@@ -11,8 +11,8 @@ description: "Move rate-limit counters from the single-process memory adapter to
 The default `memory` rate-limit adapter counts per-process — each instance in a horizontally
 scaled deployment enforces its own independent limit, effectively multiplying the real limit by
 instance count. Switch to Redis for a shared, accurate limit. See
-[Rate Limiter Interface](../api/rate-limiter-interface.md) for the full contract and the
-fail-open backend behavior.
+[Rate Limiter Interface](../api/rate-limiter-interface.md) for the full contract and what a
+backend error does (fail-closed on credential-check keys, fail-open on refresh).
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ await initIdentityProvider({
 ## Related
 
 - [Rate Limiter Interface](../api/rate-limiter-interface.md) — the default per-endpoint table,
-  and why backend errors fail *open* here (unlike the cache layer's revocation checks, which fail
-  closed).
+  and why a Redis outage rejects login/MFA/password-reset/magic-link requests with 503
+  `RATE_LIMITER_UNAVAILABLE` (fail-closed) but lets refresh through (fail-open).
 - [Redis Cache Adapter example](redis-cache-adapter.md) — the connection-sharing partner.
-- [Errors](../api/errors.md) — `RATE_LIMIT_EXCEEDED` (429).
+- [Errors](../api/errors.md) — `RATE_LIMIT_EXCEEDED` (429), `RATE_LIMITER_UNAVAILABLE` (503).

@@ -8,6 +8,7 @@ import { defineOAuthClientModel } from './models/oauth-client.model.js';
 import { defineVerificationTokenModel } from './models/verification-token.model.js';
 import { defineServiceKeyModel } from './models/service-key.model.js';
 import { defineCredentialModel } from './models/credential.model.js';
+import { defineAttemptCounterModel } from './models/attempt-counter.model.js';
 
 import { MongoUserRepository } from './repositories/mongo-user.repository.js';
 import { MongoSessionRepository } from './repositories/mongo-session.repository.js';
@@ -17,6 +18,7 @@ import { MongoOAuthClientRepository } from './repositories/mongo-oauth-client.re
 import { MongoVerificationTokenRepository } from './repositories/mongo-verification-token.repository.js';
 import { MongoServiceKeyRepository } from './repositories/mongo-service-key.repository.js';
 import { MongoCredentialRepository } from './repositories/mongo-credential.repository.js';
+import { MongoAttemptCounterRepository } from './repositories/mongo-attempt-counter.repository.js';
 
 /**
  * @param {{ uri?: string, connection?: import('mongoose').Connection }} mongoConfig
@@ -32,6 +34,7 @@ import { MongoCredentialRepository } from './repositories/mongo-credential.repos
  *   verificationTokenRepository: import('../interfaces.js').VerificationTokenRepository,
  *   serviceKeyRepository: import('../interfaces.js').ServiceKeyRepository,
  *   credentialRepository: import('../interfaces.js').CredentialRepository,
+ *   attemptCounterRepository: import('../interfaces.js').AttemptCounterRepository,
  * }>}
  */
 export async function createMongoStorage(mongoConfig, emailDeps) {
@@ -46,6 +49,7 @@ export async function createMongoStorage(mongoConfig, emailDeps) {
     const verificationTokenModel = defineVerificationTokenModel(connection);
     const serviceKeyModel = defineServiceKeyModel(connection);
     const credentialModel = defineCredentialModel(connection);
+    const attemptCounterModel = defineAttemptCounterModel(connection);
 
     // Fail fast, at startup, if this deployment can't run transactions —
     // see assert-transactions.js for why and what this package tells the
@@ -75,5 +79,6 @@ export async function createMongoStorage(mongoConfig, emailDeps) {
         verificationTokenRepository: new MongoVerificationTokenRepository(verificationTokenModel),
         serviceKeyRepository: new MongoServiceKeyRepository(serviceKeyModel),
         credentialRepository: new MongoCredentialRepository(credentialModel),
+        attemptCounterRepository: new MongoAttemptCounterRepository(attemptCounterModel),
     };
 }

@@ -21,9 +21,39 @@ Authenticates the caller and sets `req.auth = { userId, email, claims, tokenMeta
 Accepts either the `access_token` cookie (browser flows, paired with `cookieParser()`) or an
 `Authorization: Bearer <token>` header (API/service clients) — cookie wins if both are present.
 
-Steps: extract token → `verifyAccessToken` → check the revocation cache for
-`revoked-refresh-token:<jti>` (fail-closed — see [Cache Interface](cache-interface.md)) → set
-`req.auth`.
+Steps: extract token → `verifyAccessToken` → revocation check (below) → set `req.auth`.
+
+### Revocation check (`config.session.verifyOnEachRequest`)
+
+**On (the default since 0.3.0)**: the middleware looks up the token's session row by `jti`
+(`sessionRepository.findByJti` — each session's `jti` equals its paired access token's `jti`) on
+every request, and rejects 401 `TOKEN_REVOKED` if the row is missing, revoked, expired, or belongs
+to a different user. Logout, logout-all, password reset/change, session revocation, account
+deletion, OIDC end-session, and refresh rotation all revoke session rows, so each takes effect on
+**every instance immediately**, not just the one that handled it.
+
+- The revocation cache (`revoked-refresh-token:<jti>`) is a fast path only: a cache hit
+  short-circuits with `TOKEN_REVOKED`; a miss never skips the storage check. A cache error is
+  logged and the storage check decides.
+- A storage error fails closed: 503 `SESSION_STORE_UNAVAILABLE`.
+- **Cost**: one indexed storage read per authenticated request (Mongo: the `{ jti: 1 }` index on
+  the sessions collection; `@okeav/idp-core-postgres`: `idp_sessions_jti_idx`).
+- Tokens with no session row carry a `sessionless: true` claim and skip the storage check (cache
+  check only): `client_credentials` grant tokens, and tokens minted with the public
+  `issueAccessToken()`/`issueOAuth2AccessToken()` exports (see
+  [Tokens & Signing](tokens-rs256.md)). Tokens from login, MFA, SSO, magic link, WebAuthn,
+  refresh, and the `authorization_code`/`refresh_token` OAuth2 grants are session-bound.
+- A storage adapter whose `sessionRepository` has no `findByJti` falls back to the cache-only
+  behaviour below, with a startup warning.
+
+**Off** (`session: { verifyOnEachRequest: false }`, env `IDP_SESSION_VERIFY_ON_EACH_REQUEST=false`
+— 0.2.x behaviour): only the revocation cache is checked (fail-closed: a cache error → 503
+`CACHE_UNAVAILABLE` — see [Cache Interface](cache-interface.md)). Single-session revocations
+(logout, refresh rotation, session revoke, OAuth2 token revoke) write that cache — visible to other
+instances only with a shared (Redis) cache — but the bulk ones (logout-all, password
+reset/change, revoke-all, account deletion, OIDC end-session) don't write it at all, so those
+users' access tokens stay valid until they expire — up to `ttls.accessToken` (default 1 hour).
+This trades that revocation lag for the per-request read.
 
 **`opts.optional: true`** populates `req.auth` when a valid token is present but calls `next()`
 with no error (and `req.auth` left `undefined`) when **no token is presented at all**, instead of
@@ -36,8 +66,11 @@ Throws:
 - `AUTH_REQUIRED` (401) — no token presented, `optional` not set.
 - Whatever `verifyAccessToken` throws (`TOKEN_EXPIRED`, `INVALID_TOKEN`, both 401) for a present-
   but-invalid token.
-- `TOKEN_REVOKED` (401) — token's `jti` found in the revocation cache.
-- `CACHE_UNAVAILABLE` (503) — cache adapter errored during the revocation check.
+- `TOKEN_REVOKED` (401) — token's `jti` found in the revocation cache, or its session row is
+  missing/revoked/expired/another user's.
+- `SESSION_STORE_UNAVAILABLE` (503) — `findByJti` errored (verification on).
+- `CACHE_UNAVAILABLE` (503) — cache adapter errored during the revocation check (verification off,
+  or a `sessionless` token).
 
 Every rejection is logged via `logger.warn({ err, path: req.originalUrl }, 'authContextMiddleware rejected request')`
 before being passed to `next(err)`.
@@ -143,5 +176,6 @@ handler, and `authContextMiddleware()` before any handler that reads `req.auth`.
 
 - [Errors](errors.md) — every code above.
 - [Cache Interface](cache-interface.md) — the revocation-cache fail-closed behavior.
+- [Repository Adapters](repository-adapters.md) — `SessionRepository.findByJti`.
 - [Service Mesh](service-mesh.md) — the S2S trust model behind `serviceContextMiddleware`.
 - [Router & Schemas](router-and-schemas.md) — the exported zod schemas these middlewares consume.

@@ -9,6 +9,8 @@ import { wrapHooksWithWebhooks } from '../webhooks/wrap-hooks.js';
 import { buildKeyRegistry } from '../signing/key-registry.js';
 import { createMongoStorage } from '../storage/mongo/index.js';
 import { makeHashEmail, normalizeEmail } from '../utils/email-hash.js';
+import { createMfaSecretCipher, assertMfaSecretConfig } from '../mfa/secrets.js';
+import { MemoryAttemptCounterRepository } from '../mfa/memory-attempt-counter.js';
 
 /**
  * Wires storage, cache, signing keys, hooks, and logger, and stores the
@@ -29,6 +31,12 @@ export async function initIdentityProvider(config) {
     if (!resolved.security.tokenHashSecret) throw new Error('config.security.tokenHashSecret is required');
 
     const logger = config.logger || createConsoleLogger();
+
+    // MFA secret encryption is validated before anything connects, so a
+    // missing key fails the boot rather than the first enrolment.
+    const mfaCipher = createMfaSecretCipher(resolved.mfa);
+    assertMfaSecretConfig(resolved.mfa, mfaCipher, logger);
+    assertMfaLockoutConfig(resolved.mfa.lockout);
     const webhookDispatcher = new WebhookDispatcher(resolved.webhooks, logger);
     const hooks = wrapHooksWithWebhooks(mergeHooks(resolved.hooks), webhookDispatcher);
     const cache = await createCacheAdapter(resolved.cache);
@@ -46,10 +54,29 @@ export async function initIdentityProvider(config) {
         ? await resolved.storage.factory(resolved, { hashEmail, normalizeEmail })
         : await createMongoStorage(resolved.mongo, { hashEmail, normalizeEmail });
 
-    const state = { config: resolved, logger, hooks, cache, rateLimiter, webhookDispatcher, signingKeys, storage, hashEmail, normalizeEmail };
+    // Adapters that predate 0.3.0 (or haven't caught up yet) keep working:
+    // the MFA lockout falls back to an in-process counter, and per-request
+    // session verification falls back to the per-process revocation cache.
+    // Both are weaker on a multi-instance deployment, so say so loudly.
+    let attemptCounters = storage.attemptCounterRepository;
+    if (!attemptCounters) {
+        attemptCounters = new MemoryAttemptCounterRepository();
+        logger.warn({}, '@okeav/idp-core: storage adapter has no attemptCounterRepository — the per-account MFA lockout is counted in-process only (not shared across instances). Upgrade the adapter.');
+    }
+    if (resolved.session.verifyOnEachRequest && typeof storage.sessionRepository?.findByJti !== 'function') {
+        logger.warn({}, '@okeav/idp-core: session.verifyOnEachRequest is on but the storage adapter\'s sessionRepository has no findByJti() — falling back to the per-process revocation cache, so logout-all/password reset will NOT revoke access tokens before they expire. Upgrade the adapter.');
+    }
+
+    const state = { config: resolved, logger, hooks, cache, rateLimiter, webhookDispatcher, signingKeys, storage, hashEmail, normalizeEmail, mfaCipher, attemptCounters };
     setState(state);
 
     logger.info({ issuer: resolved.issuer }, '@okeav/idp-core initialized');
 
     return state;
+}
+
+function assertMfaLockoutConfig({ maxFailedAttempts, windowSeconds, lockSeconds }) {
+    for (const [name, value] of Object.entries({ maxFailedAttempts, windowSeconds, lockSeconds })) {
+        if (!Number.isInteger(value) || value < 1) throw new Error(`config.mfa.lockout.${name} must be a positive integer (got ${value})`);
+    }
 }
