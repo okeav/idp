@@ -36,7 +36,8 @@ export async function initIdentityProvider(config) {
     // missing key fails the boot rather than the first enrolment.
     const mfaCipher = createMfaSecretCipher(resolved.mfa);
     assertMfaSecretConfig(resolved.mfa, mfaCipher, logger);
-    assertMfaLockoutConfig(resolved.mfa.lockout);
+    assertLockoutConfig('mfa.lockout', resolved.mfa.lockout);
+    assertLockoutConfig('security.verificationCodeLockout', resolved.security.verificationCodeLockout);
     const webhookDispatcher = new WebhookDispatcher(resolved.webhooks, logger);
     const hooks = wrapHooksWithWebhooks(mergeHooks(resolved.hooks), webhookDispatcher);
     const cache = await createCacheAdapter(resolved.cache);
@@ -75,8 +76,8 @@ export async function initIdentityProvider(config) {
     return state;
 }
 
-function assertMfaLockoutConfig({ maxFailedAttempts, windowSeconds, lockSeconds }) {
+function assertLockoutConfig(path, { maxFailedAttempts, windowSeconds, lockSeconds }) {
     for (const [name, value] of Object.entries({ maxFailedAttempts, windowSeconds, lockSeconds })) {
-        if (!Number.isInteger(value) || value < 1) throw new Error(`config.mfa.lockout.${name} must be a positive integer (got ${value})`);
+        if (!Number.isInteger(value) || value < 1) throw new Error(`config.${path}.${name} must be a positive integer (got ${value})`);
     }
 }

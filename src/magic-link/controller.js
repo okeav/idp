@@ -4,7 +4,7 @@ import { IDENTITY_STATUS } from '../config/constants.js';
 import { hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
 import { auditLog, safeInvokeHook } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
-import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus } from '../password-auth/controllers.js';
+import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus, mfaChallengeResponse } from '../password-auth/controllers.js';
 
 /**
  * POST /magic-link/request
@@ -76,9 +76,23 @@ export async function verifyMagicLinkHandler(req, res, next) {
 
         const isNewUser = user.status === IDENTITY_STATUS.PENDING_VERIFICATION;
         if (isNewUser) {
-            user = await state.storage.userRepository.updateById(user.id, { status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null });
+            // Clicking the link proves ownership of the address — but NOT of any password set on this
+            // still-unverified account, which anyone could have registered with. Activating it with that
+            // password intact hands the account to whoever pre-registered the victim's email; it is
+            // discarded instead (the owner can set one through password reset).
+            user = await state.storage.userRepository.updateById(user.id, {
+                status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null,
+                passwordHash: null, mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [],
+            });
+            await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
         } else {
             assertUsableStatus(user);
+        }
+
+        // A magic link is one factor (the inbox). An account with MFA still has to present it.
+        if (user.mfaEnabled) {
+            await auditLog(state.logger, state.hooks, 'MAGIC_LINK_MFA_REQUIRED', { userId: String(user.id) });
+            return res.json(await mfaChallengeResponse(state, user));
         }
 
         const claims = await resolveClaims(state, user, { isNewUser, method: 'magic_link' });

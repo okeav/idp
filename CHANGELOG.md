@@ -40,6 +40,47 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
 - **`/userinfo` released email without the `email` scope**, did not require `openid`, and answered for
   suspended/deleted users. It now requires `openid`, releases `email` / profile claims only for the
   matching scopes, refuses inactive users, and sends `Cache-Control: no-store`.
+- **SSO linked accounts by an unverified email (Critical).** With no local account linked to a
+  provider identity yet, the callback attached it to whichever account had the same email, without
+  checking that the provider had verified the address. Anyone able to put an arbitrary email on a
+  provider account logged in as its owner — most simply via Microsoft (`mail` is set by the tenant
+  admin; with the default `common` authority any tenant qualifies — "nOAuth"). SSO now creates or
+  links an account by email only when the provider asserts `email_verified` (Google, Apple,
+  LinkedIn); GitHub uses only the account's primary *verified* address (never the public profile
+  email); Microsoft's address is trusted only when `oauthProviders.microsoft.tenant` names a single
+  tenant, or with an explicit `trustEmail: true`. A refusal redirects with `error=email_not_verified`.
+  Identities already linked keep logging in by provider id. **Upgrade:** with Microsoft on the
+  `common` authority, new users can no longer sign up or link through Microsoft.
+- **SSO and magic-link login skipped MFA (High).** Both issued a full session to accounts with MFA
+  enabled. They now stop at the MFA challenge like password login: magic-link verify answers
+  `{ mfaRequired, mfaChallengeToken, expiresIn }`; the SSO callback redirects to `redirect_uri` with
+  `#mfa_required=1&mfa_challenge_token=…&expires_in=…` (in the fragment, so it never reaches a server
+  log or `Referer`) and sets no cookies. **Upgrade:** handle both responses in your frontend.
+- **Pre-registration account takeover (High).** An attacker could register the victim's email with a
+  password of their choosing; when the account was later activated — by the victim verifying their
+  "own" registration (a repeat registration was silently accepted, keeping the first password), by a
+  magic link, or through SSO — the attacker's password worked. Now: registering an address that is
+  still pending replaces its password and invalidates earlier codes before sending a fresh one;
+  activation by magic link or SSO discards any password (and MFA state) set before the address was
+  proven. SSO never attaches a login method to a locked/suspended/deleted account.
+- **The 6-digit email-verification code could be brute-forced (High).** `/register/verify-email`
+  had no rate limit and no attempt limit, against a code valid for 24 hours. Wrong codes/tokens now
+  count per account (`security.verificationCodeLockout`, default 5 per hour); the attempt that
+  exhausts the budget deletes every outstanding code, and further attempts get 429
+  `VERIFICATION_LOCKED`. Attempts are counted *before* the code is checked, so a concurrent burst
+  gets no more guesses than the budget. Codes are now stored as HMACs (codes issued before 0.4.0,
+  stored in plain text, keep working until they expire). New per-IP limits on `/register`,
+  `/register/resend-verification` (`rateLimiting.register`) and `/register/verify-email`
+  (`rateLimiting.emailVerification`), and a per-address limit on verification emails
+  (`rateLimiting.verificationEmailByEmail`), all fail-closed.
+- **Account enumeration.** `/register/verify-email` answered 404 `USER_NOT_FOUND` for unknown
+  addresses and `ok` for verified ones; `/register/resend-verification` answered 400
+  `EMAIL_ALREADY_VERIFIED`. Both now answer the same for every address (verify: 400
+  `INVALID_OR_EXPIRED_TOKEN`; resend: `{ status: 'ok' }`). **Upgrade:** a second click on an
+  already-used verification link now gets 400 instead of `ok`.
+- **Password login on a passwordless account returned 500** (bcrypt threw on the missing hash),
+  revealing which accounts are SSO/magic-link only. `verifyPassword` now returns false (after the
+  same dummy work) for an account without a password.
 
 ## [0.3.0] - 2026-10-05
 

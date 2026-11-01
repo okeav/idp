@@ -113,6 +113,21 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
     mfaChallengePerIp: { max: 5, windowSeconds: 15 * 60 },
     refreshTokenPerIp: { max: 30, windowSeconds: 60 },
     magicLinkPerIp: { max: 3, windowSeconds: 60 * 60 },
+    registerPerIp: { max: 10, windowSeconds: 60 * 60 },
+    emailVerificationPerIp: { max: 20, windowSeconds: 15 * 60 },
+    // Every request that makes this IdP send a verification email to an address
+    // (registering it, re-registering a pending one, asking for a resend).
+    verificationEmailPerEmail: { max: 3, windowSeconds: 60 * 60 },
+});
+
+// Per-ACCOUNT limit on wrong email-verification codes/tokens. When it is used
+// up, every outstanding verification code for the account is deleted, so a
+// 6-digit code can be guessed at most `maxFailedAttempts` times before the
+// owner has to request a new one (which goes to their inbox, not the attacker's).
+export const DEFAULT_VERIFICATION_CODE_LOCKOUT = Object.freeze({
+    maxFailedAttempts: 5,
+    windowSeconds: 60 * 60,
+    lockSeconds: 15 * 60,
 });
 
 // Per-ACCOUNT limit on failed second-factor attempts (TOTP, recovery codes,

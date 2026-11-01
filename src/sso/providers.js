@@ -23,6 +23,8 @@ function generateAppleClientSecret(appleConfig) {
     return `${signingInput}.${signature}`;
 }
 
+const MULTI_TENANT_AUTHORITIES = new Set(['common', 'organizations', 'consumers']);
+
 /** Builds the provider table from `config.oauthProviders` + `config.sso.baseCallbackUrl`. Providers with no clientId configured are omitted. */
 export function buildSsoProviders(config) {
     const p = config.oauthProviders || {};
@@ -63,6 +65,11 @@ export function buildSsoProviders(config) {
         const tenant = p.microsoft.tenant || 'common';
         providers.microsoft = {
             name: 'microsoft',
+            // Graph's `mail` / `userPrincipalName` are set by whichever tenant's admin owns the account,
+            // and Microsoft does not verify them — with a multi-tenant authority, anyone can create a
+            // tenant and give a user `mail = victim@yourcompany.com` ("nOAuth"). The address is only
+            // trusted when the authority is pinned to one tenant (yours), or explicitly via `trustEmail`.
+            emailTrusted: p.microsoft.trustEmail === true || !MULTI_TENANT_AUTHORITIES.has(String(tenant).toLowerCase()),
             authorizationUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`,
             tokenUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`,
             userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
@@ -110,32 +117,40 @@ export function isAllowedRedirectUri(config, uri) {
     }
 }
 
-/** Normalizes each provider's raw profile response into a consistent shape. */
-export function normalizeUserInfo(provider, raw) {
+// Apple sends email_verified as the string "true"; the others as a boolean.
+const isTrue = (v) => v === true || v === 'true';
+
+/**
+ * Normalizes each provider's raw profile response into a consistent shape. `emailVerified` is true
+ * only when the provider itself asserts it verified the address — it decides whether this identity
+ * may be linked to (or create) a local account by email. `providerConfig` is needed for Microsoft.
+ */
+export function normalizeUserInfo(provider, raw, providerConfig = {}) {
     switch (provider) {
         case 'google':
-            return { providerId: raw.sub, email: raw.email, firstName: raw.given_name || null, lastName: raw.family_name || null, name: raw.name, avatarUrl: raw.picture };
+            return { providerId: raw.sub, email: raw.email, emailVerified: isTrue(raw.email_verified), firstName: raw.given_name || null, lastName: raw.family_name || null, name: raw.name, avatarUrl: raw.picture };
         case 'github':
             return {
-                providerId: String(raw.id), email: raw.email,
+                // fetchUserInfo replaces `email` with the account's primary *verified* address (or null).
+                providerId: String(raw.id), email: raw.email, emailVerified: isTrue(raw.email_verified),
                 firstName: raw.name?.split(' ')[0] || null,
                 lastName: raw.name?.split(' ').slice(1).join(' ') || null,
                 name: raw.name || raw.login, avatarUrl: raw.avatar_url,
             };
         case 'microsoft':
-            return { providerId: raw.id, email: raw.mail || raw.userPrincipalName, firstName: raw.givenName || null, lastName: raw.surname || null, name: raw.displayName, avatarUrl: null };
+            return { providerId: raw.id, email: raw.mail || raw.userPrincipalName, emailVerified: providerConfig.emailTrusted === true, firstName: raw.givenName || null, lastName: raw.surname || null, name: raw.displayName, avatarUrl: null };
         case 'apple': {
             const payload = decodeJwtPayload(raw.id_token);
             const appleUser = raw.appleUser;
             return {
-                providerId: payload.sub, email: payload.email || null,
+                providerId: payload.sub, email: payload.email || null, emailVerified: isTrue(payload.email_verified),
                 firstName: appleUser?.name?.firstName || null, lastName: appleUser?.name?.lastName || null,
                 name: [appleUser?.name?.firstName, appleUser?.name?.lastName].filter(Boolean).join(' ') || payload.sub,
                 avatarUrl: null,
             };
         }
         case 'linkedin':
-            return { providerId: raw.sub, email: raw.email, firstName: raw.given_name || null, lastName: raw.family_name || null, name: raw.name || [raw.given_name, raw.family_name].filter(Boolean).join(' '), avatarUrl: raw.picture || null };
+            return { providerId: raw.sub, email: raw.email, emailVerified: isTrue(raw.email_verified), firstName: raw.given_name || null, lastName: raw.family_name || null, name: raw.name || [raw.given_name, raw.family_name].filter(Boolean).join(' '), avatarUrl: raw.picture || null };
         default:
             throw new Error(`Unknown provider: ${provider}`);
     }
@@ -162,12 +177,20 @@ export async function fetchUserInfo(providerConfig, accessToken) {
     if (!response.ok) throw new Error(`SSO provider ${providerConfig.name} returned ${response.status} fetching user info`);
     const info = await response.json();
 
-    if (providerConfig.name === 'github' && !info.email && providerConfig.userEmailsUrl) {
+    // GitHub's profile `email` is whatever public address the user chose to show, and carries no
+    // verification status — only the emails endpoint says which address is verified. Always use the
+    // primary verified one; without it there is no trustworthy email at all.
+    if (providerConfig.name === 'github' && providerConfig.userEmailsUrl) {
+        info.email = null;
+        info.email_verified = false;
         const emailRes = await fetch(providerConfig.userEmailsUrl, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
         if (emailRes.ok) {
             const emails = await emailRes.json();
-            const primary = emails.find((e) => e.primary && e.verified);
-            if (primary) info.email = primary.email;
+            const primary = Array.isArray(emails) ? emails.find((e) => e.primary && e.verified) : null;
+            if (primary) {
+                info.email = primary.email;
+                info.email_verified = true;
+            }
         }
     }
     return info;

@@ -115,6 +115,11 @@ export interface IdpConfig {
         maxFailedLoginAttempts?: number;
         accountLockDurationMs?: number;
         bcryptRounds?: number;
+        /**
+         * Per-account limit on wrong email-verification codes/tokens. When used up, every outstanding
+         * code for the account is deleted (the owner requests a new one). Defaults: 5 in 3600s, locked 900s.
+         */
+        verificationCodeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number };
     };
     mfa?: {
         issuerLabel?: string;
@@ -145,7 +150,13 @@ export interface IdpConfig {
     oauthProviders?: {
         google?: { clientId: string; clientSecret: string };
         github?: { clientId: string; clientSecret: string };
-        microsoft?: { clientId: string; clientSecret: string; tenant?: string };
+        /**
+         * `tenant` defaults to `'common'`. With a multi-tenant authority (`common`, `organizations`,
+         * `consumers`) the account's email is NOT trusted — any tenant admin can set it — so a
+         * Microsoft identity can't create or link an account by email. Pin `tenant` to your own
+         * tenant, or set `trustEmail: true` only if you accept that risk.
+         */
+        microsoft?: { clientId: string; clientSecret: string; tenant?: string; trustEmail?: boolean };
         apple?: { clientId: string; teamId: string; keyId: string; privateKeyPem: string };
         linkedin?: { clientId: string; clientSecret: string };
     };
@@ -172,6 +183,12 @@ export interface IdpConfig {
         mfaChallenge?: RateLimitRule;
         refreshToken?: RateLimitRule;
         magicLink?: RateLimitRule;
+        /** POST /register and /register/resend-verification, per IP. Default 10/hour. */
+        register?: RateLimitRule;
+        /** POST /register/verify-email, per IP. Default 20/15min. */
+        emailVerification?: RateLimitRule;
+        /** Verification emails sent to one address (register, re-register, resend). Default 3/hour. */
+        verificationEmailByEmail?: RateLimitRule;
     };
     /**
      * Outbound webhook delivery — additive to `hooks` (in-process callbacks),

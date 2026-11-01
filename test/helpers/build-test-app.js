@@ -53,16 +53,15 @@ export async function buildTestApp(overrides = {}) {
 
     const silentLogger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
-    const state = await initIdentityProvider({
+    // A config error must not leave the replica set running — it keeps the test process alive forever.
+    let state;
+    try {
+        state = await initIdentityProvider({
         issuer: 'https://idp.test.local',
         mongo: { uri: replSet.getUri() },
         cache: { adapter: 'memory' },
         signingKeys: { keys: { 'test-kid-1': { privateKey, publicKey, status: 'ACTIVE' } } },
-        security: {
-            emailHashPepper: 'test-email-pepper-do-not-use-in-prod',
-            tokenHashSecret: 'test-token-hash-secret-do-not-use-in-prod',
-            bcryptRounds: 4, // fast for tests
-        },
+        security: TEST_SECURITY,
         mfa: { issuerLabel: 'TestApp', recoveryCodeCount: 5, encryptionKey: TEST_MFA_KEY },
         // Disabled by default so the shared test app (used by every *other*
         // test file) isn't coupled to production-tuned thresholds — a test
@@ -72,7 +71,11 @@ export async function buildTestApp(overrides = {}) {
         logger: silentLogger,
         hooks,
         ...overrides.config,
-    });
+        });
+    } catch (err) {
+        await replSet.stop();
+        throw err;
+    }
 
     const app = express();
     app.use(cookieParserLib());
@@ -155,6 +158,13 @@ export function createCookieJar() {
         },
     };
 }
+
+/** The `security` block every test app uses — spread it when overriding one security setting (a bare `security: {...}` override replaces the whole block, secrets included). */
+export const TEST_SECURITY = Object.freeze({
+    emailHashPepper: 'test-email-pepper-do-not-use-in-prod',
+    tokenHashSecret: 'test-token-hash-secret-do-not-use-in-prod',
+    bcryptRounds: 4, // fast for tests
+});
 
 export function uniqueEmail(prefix = 'test') {
     return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;

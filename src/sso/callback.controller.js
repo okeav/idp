@@ -3,7 +3,7 @@ import { IdpError } from '../errors/idp-error.js';
 import { IDENTITY_STATUS, CACHE_KEY_PREFIXES } from '../config/constants.js';
 import { buildSsoProviders, normalizeUserInfo, exchangeCode, fetchUserInfo } from './providers.js';
 import { auditLog } from '../hooks/index.js';
-import { issueSession, setSessionCookies, resolveClaims } from '../password-auth/controllers.js';
+import { issueSession, setSessionCookies, resolveClaims, mfaChallengeResponse } from '../password-auth/controllers.js';
 
 /**
  * GET/POST /sso/:provider/callback
@@ -59,27 +59,55 @@ export async function ssoCallbackHandler(req, res, next) {
             rawUserInfo = await fetchUserInfo(providerConfig, providerTokens.access_token);
         }
 
-        const userInfo = normalizeUserInfo(provider, rawUserInfo);
+        const userInfo = normalizeUserInfo(provider, rawUserInfo, providerConfig);
         if (!userInfo.email) {
             state.logger?.warn?.({ provider }, 'SSO provider did not return an email address');
-            return res.redirect(`${redirect_uri}?error=email_required`);
+            return res.redirect(withParams(redirect_uri, { error: 'email_required' }));
         }
 
-        let user = await state.storage.userRepository.findByExternalProvider(provider, userInfo.providerId);
+        const users = state.storage.userRepository;
+        let user = await users.findByExternalProvider(provider, userInfo.providerId);
         let isNewUser = false;
         let isNewLink = false;
 
         if (!user) {
-            user = await state.storage.userRepository.findByEmail(userInfo.email);
-            if (user) {
-                await state.storage.userRepository.linkExternalProvider(user.id, { provider, providerId: userInfo.providerId, email: userInfo.email, connectedAt: new Date() });
+            // Matching by email links this provider identity to whoever owns the address here — so the
+            // provider must vouch that the address is verified. Otherwise anyone who can put an
+            // arbitrary email on a provider account (e.g. a Microsoft tenant admin) logs in as its owner.
+            if (!userInfo.emailVerified) {
+                state.logger?.warn?.({ provider }, 'SSO login refused — provider did not assert a verified email');
+                return res.redirect(withParams(redirect_uri, { error: 'email_not_verified' }));
+            }
+
+            const link = { provider, providerId: userInfo.providerId, email: userInfo.email, connectedAt: new Date() };
+            const existing = await users.findByEmail(userInfo.email);
+            if (existing?.status === IDENTITY_STATUS.ACTIVE) {
+                await users.linkExternalProvider(existing.id, link);
+                user = await users.findById(existing.id);
                 isNewLink = true;
+            } else if (existing?.status === IDENTITY_STATUS.PENDING_VERIFICATION) {
+                // The provider just proved ownership of an address someone registered here but never
+                // verified. Whatever password that registration set is not the owner's (it may be an
+                // attacker's pre-registration), so it is discarded as the owner claims the account.
+                await users.updateById(existing.id, {
+                    status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null,
+                    passwordHash: null, mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [],
+                });
+                await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', existing.id);
+                await users.linkExternalProvider(existing.id, link);
+                user = await users.findById(existing.id);
+                isNewLink = true;
+                await auditLog(state.logger, state.hooks, 'SSO_PENDING_ACCOUNT_CLAIMED', { userId: String(user.id), provider });
+            } else if (existing) {
+                // Locked, suspended, deleted …: never attach a new login method to it.
+                state.logger?.warn?.({ userId: existing.id, provider, status: existing.status }, 'SSO login blocked — account not active');
+                return res.redirect(withParams(redirect_uri, { error: 'account_inactive' }));
             } else {
-                user = await state.storage.userRepository.create({
+                user = await users.create({
                     email: userInfo.email.toLowerCase(),
-                    status: IDENTITY_STATUS.ACTIVE, // trusted provider — treated as verified
+                    status: IDENTITY_STATUS.ACTIVE, // the provider verified the address
                     profile: { firstName: userInfo.firstName, lastName: userInfo.lastName, displayName: userInfo.name, avatarUrl: userInfo.avatarUrl },
-                    externalProviders: [{ provider, providerId: userInfo.providerId, email: userInfo.email, connectedAt: new Date() }],
+                    externalProviders: [link],
                 });
                 isNewUser = true;
             }
@@ -87,21 +115,39 @@ export async function ssoCallbackHandler(req, res, next) {
 
         if (user.status !== IDENTITY_STATUS.ACTIVE) {
             state.logger?.warn?.({ userId: user.id, provider, status: user.status }, 'SSO login blocked — account not active');
-            return res.redirect(`${redirect_uri}?error=account_inactive`);
+            return res.redirect(withParams(redirect_uri, { error: 'account_inactive' }));
         }
 
         if (isNewUser) await auditLog(state.logger, state.hooks, 'SSO_REGISTERED', { userId: String(user.id), provider });
         if (isNewLink) await auditLog(state.logger, state.hooks, 'SSO_PROVIDER_LINKED', { userId: String(user.id), provider });
+
+        // SSO is one factor. An account with MFA still has to present it: hand back a challenge (in
+        // the URL fragment, which never reaches a server log or a Referer header) instead of a session.
+        if (user.mfaEnabled) {
+            await auditLog(state.logger, state.hooks, 'SSO_MFA_REQUIRED', { userId: String(user.id), provider });
+            const { mfaChallengeToken, expiresIn } = await mfaChallengeResponse(state, user);
+            return res.redirect(withParams(redirect_uri, { mfa_required: '1', mfa_challenge_token: mfaChallengeToken, expires_in: String(expiresIn) }, { fragment: true }));
+        }
+
         await auditLog(state.logger, state.hooks, 'SSO_LOGIN', { userId: String(user.id), provider });
 
         const claims = await resolveClaims(state, user, { isNewUser, isNewLink, provider, extra });
         const session = await issueSession(state, { user, claims, req });
 
         setSessionCookies(res, state, session);
-        const successUrl = new URL(redirect_uri);
-        successUrl.searchParams.set('ssoLogin', 'success');
-        res.redirect(successUrl.toString());
+        res.redirect(withParams(redirect_uri, { ssoLogin: 'success' }));
     } catch (err) {
         next(err);
     }
+}
+
+/** Adds params to a URL that may already carry a query string (or, with `fragment`, to its fragment). */
+function withParams(uri, params, { fragment = false } = {}) {
+    const url = new URL(uri);
+    if (fragment) {
+        url.hash = new URLSearchParams(params).toString();
+    } else {
+        for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    }
+    return url.toString();
 }

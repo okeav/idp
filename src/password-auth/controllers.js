@@ -3,11 +3,12 @@ import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { IDENTITY_STATUS, COOKIE_NAMES, CACHE_KEY_PREFIXES, SESSION_KINDS } from '../config/constants.js';
 import { sessionKindOf } from '../utils/session-kind.js';
-import { issueAccessToken, hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
+import { issueAccessToken, issueMfaChallengeToken, hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
 import { hashPassword, verifyPassword, compareDummyPassword } from '../utils/password.js';
 import { buildDeviceFingerprint, detectAndNotifyNewDevice } from '../utils/device-fingerprint.js';
 import { auditLog, safeInvokeHook } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { withAttemptBudget } from '../security/attempt-budget.js';
 
 function refreshTokenExpiresAt(state) {
     return new Date(Date.now() + state.config.ttls.refreshToken * 1000);
@@ -84,14 +85,34 @@ export async function registerHandler(req, res, next) {
         const state = getState();
         const { email, password, firstName, lastName, metadata } = req.body;
 
+        await enforceRateLimit(state, `register:ip:${req.ip}`, state.config.rateLimiting.register, { failMode: 'closed' });
+        await enforceRateLimit(state, `verification-email:${state.normalizeEmail(email)}`, state.config.rateLimiting.verificationEmailByEmail, { failMode: 'closed' });
+
+        // Hashed on every path, so timing doesn't leak whether the email was new.
+        const passwordHash = await hashPassword(password, state.config.security.bcryptRounds);
         const existing = await state.storage.userRepository.findByEmail(email);
+
+        if (existing?.status === IDENTITY_STATUS.PENDING_VERIFICATION) {
+            // Nobody has proven they own this address yet, so an earlier registration's password
+            // must not survive: otherwise an attacker pre-registers the victim's email with a
+            // password they know, and the victim — whose own registration was silently accepted —
+            // verifies the address and activates the ATTACKER's password. The newest registrant's
+            // password replaces it, every earlier code/link dies, and a fresh code goes to the inbox.
+            await state.storage.userRepository.updateById(existing.id, {
+                passwordHash,
+                profile: { firstName, lastName },
+            });
+            await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', existing.id);
+            const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, existing.id);
+            await auditLog(state.logger, state.hooks, 'REGISTRATION_RESTARTED', { userId: String(existing.id) });
+            await safeInvokeHook(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
+            return res.status(201).json({ status: 'ok' });
+        }
         if (existing) {
-            // Spend the same wall-clock as the create path so timing doesn't leak whether the email was new.
-            await compareDummyPassword(password);
+            // An active (or otherwise settled) account is never touched by a registration.
             return res.status(201).json({ status: 'ok' });
         }
 
-        const passwordHash = await hashPassword(password, state.config.security.bcryptRounds);
         const user = await state.storage.userRepository.create({
             email,
             passwordHash,
@@ -111,6 +132,9 @@ export async function registerHandler(req, res, next) {
     }
 }
 
+const INVALID_VERIFICATION = () => new IdpError({ code: 'INVALID_OR_EXPIRED_TOKEN', httpStatus: 400, message: 'Invalid or expired verification token' });
+const VERIFICATION_LOCKED = () => new IdpError({ code: 'VERIFICATION_LOCKED', httpStatus: 429, message: 'Too many failed verification attempts — request a new code.' });
+
 async function createEmailVerificationToken(state, userId) {
     const token = generateOpaqueToken(32);
     const tokenHash = hashOpaqueToken(state, token);
@@ -118,7 +142,8 @@ async function createEmailVerificationToken(state, userId) {
     await state.storage.verificationTokenRepository.create('email_verification', {
         user: userId,
         tokenHash,
-        verificationCode,
+        // Stored as an HMAC like every other token — a database read must not yield a usable code.
+        verificationCode: hashOpaqueToken(state, verificationCode),
         expiresAt: new Date(Date.now() + state.config.ttls.emailVerification * 1000),
     });
     return { token, verificationCode };
@@ -129,18 +154,30 @@ export async function verifyEmailHandler(req, res, next) {
         const state = getState();
         const { email, token, code } = req.body;
 
+        await enforceRateLimit(state, `email-verification:ip:${req.ip}`, state.config.rateLimiting.emailVerification, { failMode: 'closed' });
+
+        // One answer for an unknown address, an already-verified one, and a wrong code — none of
+        // them may reveal whether an account exists.
         const user = await state.storage.userRepository.findByEmail(email);
-        if (!user) throw new IdpError({ code: 'USER_NOT_FOUND', httpStatus: 404, message: 'User not found' });
+        if (!user || user.status !== IDENTITY_STATUS.PENDING_VERIFICATION) throw INVALID_VERIFICATION();
 
-        if (user.status !== IDENTITY_STATUS.PENDING_VERIFICATION) {
-            return res.json({ status: 'ok' }); // idempotent — already verified
-        }
-
-        const record = token
-            ? await state.storage.verificationTokenRepository.consumeByHash('email_verification', hashOpaqueToken(state, token), user.id)
-            : await state.storage.verificationTokenRepository.consumeByCode('email_verification', code, user.id);
-
-        if (!record) throw new IdpError({ code: 'INVALID_OR_EXPIRED_TOKEN', httpStatus: 400, message: 'Invalid or expired verification token' });
+        const tokens = state.storage.verificationTokenRepository;
+        await withAttemptBudget(state, `email-verification:${user.id}`, state.config.security.verificationCodeLockout, {
+            lockedError: VERIFICATION_LOCKED,
+            onLocked: async () => {
+                // Budget spent: burn every outstanding code, so guessing has to start over against a
+                // fresh code that only the inbox owner receives.
+                await tokens.deleteAllForUser('email_verification', user.id);
+                await auditLog(state.logger, state.hooks, 'EMAIL_VERIFICATION_LOCKED', { userId: String(user.id) });
+            },
+        }, async () => {
+            const found = token
+                ? await tokens.consumeByHash('email_verification', hashOpaqueToken(state, token), user.id)
+                // Codes issued before 0.4.0 were stored in plain text; they expire within a day.
+                : (await tokens.consumeByCode('email_verification', hashOpaqueToken(state, code), user.id))
+                    ?? (await tokens.consumeByCode('email_verification', code, user.id));
+            if (!found) throw INVALID_VERIFICATION();
+        });
 
         await state.storage.userRepository.updateById(user.id, { status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null });
         await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
@@ -158,12 +195,12 @@ export async function resendVerificationEmailHandler(req, res, next) {
         const state = getState();
         const { email } = req.body;
 
-        const user = await state.storage.userRepository.findByEmail(email);
-        if (!user) return res.json({ status: 'ok' }); // enumeration-safe
+        await enforceRateLimit(state, `register:ip:${req.ip}`, state.config.rateLimiting.register, { failMode: 'closed' });
+        await enforceRateLimit(state, `verification-email:${state.normalizeEmail(email)}`, state.config.rateLimiting.verificationEmailByEmail, { failMode: 'closed' });
 
-        if (user.status !== IDENTITY_STATUS.PENDING_VERIFICATION) {
-            throw new IdpError({ code: 'EMAIL_ALREADY_VERIFIED', httpStatus: 400, message: 'Email is already verified' });
-        }
+        // Same answer for unknown, already-verified and pending addresses (enumeration-safe).
+        const user = await state.storage.userRepository.findByEmail(email);
+        if (!user || user.status !== IDENTITY_STATUS.PENDING_VERIFICATION) return res.json({ status: 'ok' });
 
         await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
         const { token, verificationCode } = await createEmailVerificationToken(state, user.id);
@@ -209,11 +246,7 @@ export async function loginHandler(req, res, next) {
 
         assertUsableStatus(user);
 
-        if (user.mfaEnabled) {
-            const { issueMfaChallengeToken } = await import('../signing/token.service.js');
-            const challengeToken = await issueMfaChallengeToken(state, user.id);
-            return res.json({ mfaRequired: true, mfaChallengeToken: challengeToken, expiresIn: state.config.ttls.mfaChallenge });
-        }
+        if (user.mfaEnabled) return res.json(await mfaChallengeResponse(state, user));
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'password' });
         const session = await issueSession(state, { user, claims, req });
@@ -245,6 +278,15 @@ async function handleFailedLogin(state, user) {
             locale: user.profile?.locale || 'en', when: new Date().toISOString(), failedAttempts, unlocksAt: unlocksAt.toISOString(),
         });
     }
+}
+
+/**
+ * The response every first-factor login (password, magic link, SSO) gives instead of a session when
+ * the account has MFA: a short-lived challenge token to complete at /mfa/verify or /webauthn/mfa/verify.
+ */
+async function mfaChallengeResponse(state, user) {
+    const mfaChallengeToken = await issueMfaChallengeToken(state, user.id);
+    return { mfaRequired: true, mfaChallengeToken, expiresIn: state.config.ttls.mfaChallenge };
 }
 
 function assertUsableStatus(user) {
@@ -545,4 +587,4 @@ export async function revokeAllSessionsHandler(req, res, next) {
     }
 }
 
-export { issueSession, setSessionCookies, resolveClaims, cookieOptions, refreshTokenExpiresAt, assertUsableStatus };
+export { issueSession, setSessionCookies, resolveClaims, cookieOptions, refreshTokenExpiresAt, assertUsableStatus, mfaChallengeResponse };

@@ -1,4 +1,4 @@
-import { DEFAULT_TTL_SECONDS, DEFAULT_RATE_LIMITS, DEFAULT_WEBHOOK_CONFIG, DEFAULT_MFA_LOCKOUT } from './constants.js';
+import { DEFAULT_TTL_SECONDS, DEFAULT_RATE_LIMITS, DEFAULT_WEBHOOK_CONFIG, DEFAULT_MFA_LOCKOUT, DEFAULT_VERIFICATION_CODE_LOCKOUT } from './constants.js';
 
 export function withDefaults(config = {}) {
     if (!config.issuer) throw new Error('config.issuer is required');
@@ -25,6 +25,7 @@ export function withDefaults(config = {}) {
             emailHashPepper: config.security?.emailHashPepper,
             tokenHashSecret: config.security?.tokenHashSecret,
             ...config.security,
+            verificationCodeLockout: { ...DEFAULT_VERIFICATION_CODE_LOCKOUT, ...config.security?.verificationCodeLockout },
         },
         mfa: {
             issuerLabel: 'App',
@@ -58,6 +59,9 @@ export function withDefaults(config = {}) {
             mfaChallenge: { ...DEFAULT_RATE_LIMITS.mfaChallengePerIp, ...config.rateLimiting?.mfaChallenge },
             refreshToken: { ...DEFAULT_RATE_LIMITS.refreshTokenPerIp, ...config.rateLimiting?.refreshToken },
             magicLink: { ...DEFAULT_RATE_LIMITS.magicLinkPerIp, ...config.rateLimiting?.magicLink },
+            register: { ...DEFAULT_RATE_LIMITS.registerPerIp, ...config.rateLimiting?.register },
+            emailVerification: { ...DEFAULT_RATE_LIMITS.emailVerificationPerIp, ...config.rateLimiting?.emailVerification },
+            verificationEmailByEmail: { ...DEFAULT_RATE_LIMITS.verificationEmailPerEmail, ...config.rateLimiting?.verificationEmailByEmail },
         },
         hooks: config.hooks || {},
         webhooks: { ...DEFAULT_WEBHOOK_CONFIG, ...config.webhooks },
