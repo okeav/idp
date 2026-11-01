@@ -1,8 +1,8 @@
 import { getState } from '../config/state.js';
-import { verifyAccessToken } from '../signing/token.service.js';
+import { verifyAccessToken, classifyAccessToken } from '../signing/token.service.js';
 import { isRevoked } from '../cache/index.js';
 import { IdpError } from '../errors/idp-error.js';
-import { CACHE_KEY_PREFIXES, COOKIE_NAMES } from '../config/constants.js';
+import { CACHE_KEY_PREFIXES, COOKIE_NAMES, ACCESS_TOKEN_KINDS } from '../config/constants.js';
 
 function parseBearer(header) {
     if (!header || typeof header !== 'string') return null;
@@ -30,8 +30,18 @@ function parseBearer(header) {
  *   is allowed," not "an invalid token is silently ignored." Needed by
  *   endpoints like `/oauth2/authorize` that behave differently for
  *   logged-in vs anonymous callers rather than requiring auth outright.
+ * @param {Array<'first-party'|'oauth2-user'|'oauth2-client'>} [opts.accept] - which kinds of
+ *   access token are credentials here. Default `['first-party']`: a token this IdP issued to a
+ *   third-party OAuth2 client is never accepted on the IdP's own routes. A resource server that
+ *   serves OAuth2 clients opts in with `accept: ['oauth2-user']` (and/or `'oauth2-client'` for
+ *   client_credentials machine tokens) — then check `req.auth.scopes`.
+ * @param {string|string[]} [opts.audience] - the `aud` a first-party token must carry (default: the issuer).
  */
 export function authContextMiddleware(opts = {}) {
+    const accept = opts.accept ?? [ACCESS_TOKEN_KINDS.FIRST_PARTY];
+    if (!Array.isArray(accept) || accept.length === 0 || accept.some((k) => !Object.values(ACCESS_TOKEN_KINDS).includes(k))) {
+        throw new Error(`authContextMiddleware: opts.accept must be a non-empty array of ${Object.values(ACCESS_TOKEN_KINDS).join(', ')}`);
+    }
     return async function (req, _res, next) {
         try {
             const state = getState();
@@ -44,13 +54,18 @@ export function authContextMiddleware(opts = {}) {
                 throw new IdpError({ code: 'AUTH_REQUIRED', httpStatus: 401, message: 'Authentication is required to access this resource' });
             }
 
-            const payload = await verifyAccessToken(state, token, { issuer: opts.issuer });
+            const payload = await verifyAccessToken(state, token, { issuer: opts.issuer, audience: opts.audience, accept });
             await assertSessionLive(state, payload);
 
+            const kind = classifyAccessToken(payload);
+            const isClientToken = kind === ACCESS_TOKEN_KINDS.OAUTH2_CLIENT;
             req.auth = {
-                userId: payload.sub,
+                // A client_credentials token has no user — never surface the client id as a userId.
+                userId: isClientToken ? undefined : payload.sub,
                 email: payload.email,
                 claims: payload.claims || {},
+                tokenKind: kind,
+                ...(payload.client_id ? { clientId: payload.client_id, scopes: String(payload.scope || '').split(' ').filter(Boolean) } : {}),
                 tokenMeta: { issuedAt: payload.iat, expiresAt: payload.exp, jti: payload.jti },
             };
             next();

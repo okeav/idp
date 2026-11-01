@@ -52,6 +52,19 @@ export const TOKEN_TYPES = Object.freeze({
     MFA_CHALLENGE: 'mfa_challenge',
 });
 
+/** See classifyAccessToken in signing/token.service.js. */
+export const ACCESS_TOKEN_KINDS = Object.freeze({
+    FIRST_PARTY: 'first-party',
+    OAUTH2_USER: 'oauth2-user',
+    OAUTH2_CLIENT: 'oauth2-client',
+});
+
+/** What a session (refresh-token) row belongs to — a first-party login, or an OAuth2 client's grant. */
+export const SESSION_KINDS = Object.freeze({
+    FIRST_PARTY: 'first_party',
+    OAUTH2: 'oauth2',
+});
+
 export const GRANT_TYPES = Object.freeze({
     AUTHORIZATION_CODE: 'authorization_code',
     CLIENT_CREDENTIALS: 'client_credentials',

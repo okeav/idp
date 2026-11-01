@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { getActiveSigningKey, getVerifiableKeys, getPublicKeyByKid } from './key-registry.js';
 import { IdpError } from '../errors/idp-error.js';
-import { TOKEN_TYPES } from '../config/constants.js';
+import { TOKEN_TYPES, ACCESS_TOKEN_KINDS, GRANT_TYPES } from '../config/constants.js';
 
 const ALGORITHM = 'RS256';
 
@@ -40,10 +40,47 @@ export async function issueAccessToken(state, input, opts = {}) {
     return { token, expiresAt: new Date(expiresAt * 1000), kid, jti: payload.jti };
 }
 
+/**
+ * Which party an access token was issued to:
+ * - `first-party`  — this IdP's own login/refresh (and the public `issueAccessToken()` export). No `client_id`.
+ * - `oauth2-user`  — issued to an OAuth2 client on behalf of a user (authorization_code / refresh_token grants).
+ * - `oauth2-client` — a client_credentials machine token; the client itself is the subject, there is no user.
+ */
+export function classifyAccessToken(payload) {
+    if (!payload?.client_id) return ACCESS_TOKEN_KINDS.FIRST_PARTY;
+    if (payload.gty === GRANT_TYPES.CLIENT_CREDENTIALS || payload.sub === payload.client_id) return ACCESS_TOKEN_KINDS.OAUTH2_CLIENT;
+    return ACCESS_TOKEN_KINDS.OAUTH2_USER;
+}
+
+const INVALID_AUDIENCE = (message) => new IdpError({ code: 'INVALID_TOKEN', httpStatus: 401, message });
+
+/**
+ * Verifies signature, issuer, expiry, `type: access_token`, AND which party the token was issued to.
+ *
+ * @param {{ issuer?: string, audience?: string | string[], accept?: Array<'first-party'|'oauth2-user'|'oauth2-client'> }} [opts]
+ *   `accept` defaults to `['first-party']`: an access token minted for a third-party OAuth2 client
+ *   (aud = that client) is NOT a credential for this IdP's own routes — otherwise any relying party a
+ *   user authorized could act as that user here. `audience` is the `aud` a first-party token must carry
+ *   (default: the issuer). OAuth2 tokens must carry `aud === client_id`.
+ */
 export async function verifyAccessToken(state, token, opts = {}) {
     const payload = await verifyWithAnyKey(state, token, { issuer: opts.issuer ?? state.config.issuer });
     if (payload.type !== TOKEN_TYPES.ACCESS) {
         throw new IdpError({ code: 'INVALID_TOKEN', httpStatus: 401, message: 'Token is not an access token' });
+    }
+
+    const accept = opts.accept ?? [ACCESS_TOKEN_KINDS.FIRST_PARTY];
+    const kind = classifyAccessToken(payload);
+    if (!accept.includes(kind)) {
+        throw INVALID_AUDIENCE(`Token kind "${kind}" is not accepted here`);
+    }
+
+    const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    if (kind === ACCESS_TOKEN_KINDS.FIRST_PARTY) {
+        const expected = [].concat(opts.audience ?? state.config.issuer);
+        if (!audiences.some((a) => expected.includes(a))) throw INVALID_AUDIENCE('Token audience is not accepted here');
+    } else if (!audiences.includes(payload.client_id)) {
+        throw INVALID_AUDIENCE('Token audience does not match its client');
     }
     return payload;
 }
@@ -76,7 +113,7 @@ export async function issueIdToken(state, user, audience, nonce) {
     return { token, expiresAt: new Date(expiresAt * 1000), kid, jti: claims.jti };
 }
 
-export async function issueOAuth2AccessToken(state, subject, client, scopes, { sessionless = false } = {}) {
+export async function issueOAuth2AccessToken(state, subject, client, scopes, { sessionless = false, grantType } = {}) {
     const now = Math.floor(Date.now() / 1000);
     const ttl = client.accessTokenTTL || state.config.ttls.accessToken;
     const expiresAt = now + ttl;
@@ -99,6 +136,8 @@ export async function issueOAuth2AccessToken(state, subject, client, scopes, { s
         jti: crypto.randomUUID(),
         iat: now,
         exp: expiresAt,
+        // Marks a machine token (no user) so it can never pass as a user identity — see classifyAccessToken.
+        ...(grantType === GRANT_TYPES.CLIENT_CREDENTIALS ? { gty: GRANT_TYPES.CLIENT_CREDENTIALS } : {}),
         ...(sessionless ? { sessionless: true } : {}),
     };
 

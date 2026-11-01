@@ -1,7 +1,8 @@
 import crypto from 'crypto';
 import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
-import { OAUTH_CLIENT_STATUS, IDENTITY_STATUS, CLIENT_TYPES, GRANT_TYPES, CACHE_KEY_PREFIXES } from '../config/constants.js';
+import { OAUTH_CLIENT_STATUS, IDENTITY_STATUS, CLIENT_TYPES, GRANT_TYPES, CACHE_KEY_PREFIXES, SESSION_KINDS } from '../config/constants.js';
+import { sessionKindOf } from '../utils/session-kind.js';
 import { issueOAuth2AccessToken, issueIdToken, hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
 import { verifyClientSecret } from '../utils/oauth-client-credentials.js';
 import { auditLog } from '../hooks/index.js';
@@ -38,9 +39,11 @@ function assertGrantAllowed(client, grantType) {
 export async function tokenHandler(req, res, next) {
     try {
         const { grant_type } = req.body;
-        if (grant_type === 'authorization_code') return handleAuthorizationCodeGrant(req, res, next);
-        if (grant_type === 'refresh_token') return handleRefreshTokenGrant(req, res, next);
-        if (grant_type === 'client_credentials') return handleClientCredentialsGrant(req, res, next);
+        // `await` matters: without it a rejected grant escapes this try/catch, and on Express 4
+        // (which ignores returned promises) becomes an unhandledRejection that kills the process.
+        if (grant_type === 'authorization_code') return await handleAuthorizationCodeGrant(req, res, next);
+        if (grant_type === 'refresh_token') return await handleRefreshTokenGrant(req, res, next);
+        if (grant_type === 'client_credentials') return await handleClientCredentialsGrant(req, res, next);
         throw new IdpError({ code: 'INVALID_REQUEST', httpStatus: 400, message: `Unsupported grant_type: ${grant_type}` });
     } catch (err) {
         next(err);
@@ -72,7 +75,8 @@ async function handleAuthorizationCodeGrant(req, res) {
 
     await state.storage.sessionRepository.createSession({
         user: user.id, tokenHash: hashOpaqueToken(state, refreshTokenValue), expiresAt: refreshExpiresAt,
-        kid: accessTokenResult.kid, jti: accessTokenResult.jti, ipAddress: req.ip, deviceInfo: req.headers['user-agent'], claims: { clientId: client_id, scopes },
+        kid: accessTokenResult.kid, jti: accessTokenResult.jti, ipAddress: req.ip, deviceInfo: req.headers['user-agent'],
+        kind: SESSION_KINDS.OAUTH2, claims: { clientId: client_id, scopes },
     });
 
     const idToken = scopes.includes('openid') ? await issueIdToken(state, user, client_id, nonce) : null;
@@ -99,6 +103,13 @@ async function handleRefreshTokenGrant(req, res) {
     const tokenHash = hashOpaqueToken(state, refresh_token);
     const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash);
     if (!existing) throw new IdpError({ code: 'INVALID_REFRESH_TOKEN', httpStatus: 400, message: 'Invalid or expired refresh token' });
+    // RFC 6749 §6: a refresh token is bound to the client it was issued to. A first-party login's
+    // refresh token, or another client's, is refused — and stays revoked (consumed above), since
+    // presenting it here means it leaked.
+    if (sessionKindOf(existing) !== SESSION_KINDS.OAUTH2 || existing.claims?.clientId !== client_id) {
+        state.logger?.warn?.({ clientId: client_id }, 'Refresh token presented by a client it was not issued to — refused and revoked');
+        throw new IdpError({ code: 'INVALID_REFRESH_TOKEN', httpStatus: 400, message: 'Invalid or expired refresh token' });
+    }
 
     const user = await state.storage.userRepository.findById(existing.user);
     if (!user || user.status !== IDENTITY_STATUS.ACTIVE) throw new IdpError({ code: 'USER_NOT_ACTIVE', httpStatus: 400, message: 'User account is not active' });
@@ -114,7 +125,8 @@ async function handleRefreshTokenGrant(req, res) {
 
     await state.storage.sessionRepository.createSession({
         user: user.id, tokenHash: hashOpaqueToken(state, newRefreshTokenValue), expiresAt: refreshExpiresAt,
-        kid: accessTokenResult.kid, jti: accessTokenResult.jti, ipAddress: req.ip, deviceInfo: req.headers['user-agent'], claims: existing.claims || {},
+        kid: accessTokenResult.kid, jti: accessTokenResult.jti, ipAddress: req.ip, deviceInfo: req.headers['user-agent'],
+        kind: SESSION_KINDS.OAUTH2, claims: { clientId: client_id, scopes },
     });
 
     if (existing.jti) await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${existing.jti}`, '1', state.config.ttls.revocationCache);
@@ -156,7 +168,7 @@ async function handleClientCredentialsGrant(req, res) {
 
     // No user, no refresh token, no session row — marked sessionless so the
     // per-request session check doesn't refuse it.
-    const accessTokenResult = await issueOAuth2AccessToken(state, { id: client.clientId }, client, requestedScopes, { sessionless: true });
+    const accessTokenResult = await issueOAuth2AccessToken(state, { id: client.clientId }, client, requestedScopes, { sessionless: true, grantType: GRANT_TYPES.CLIENT_CREDENTIALS });
 
     await auditLog(state.logger, state.hooks, 'OAUTH2_TOKEN_ISSUED', { clientId: client_id, grantType: 'client_credentials', scopes: requestedScopes });
 

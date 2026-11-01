@@ -80,9 +80,11 @@ test('OAuth2 authorization-code flow issues an access token with type "access_to
     // Regression test: earlier in this package's history, OAuth2-issued
     // access tokens didn't carry `type: 'access_token'`, so they silently
     // failed authContextMiddleware/verifyAccessToken's type check.
-    const claims = await verifyAccessToken(tokenBody.access_token);
+    const claims = await verifyAccessToken(tokenBody.access_token, { accept: ['oauth2-user'] });
     assert.equal(claims.type, 'access_token');
     assert.equal(claims.claims.clientId, client.clientId);
+    // ...but by default it is NOT a first-party credential (see token-audience.test.js).
+    await assert.rejects(() => verifyAccessToken(tokenBody.access_token), (err) => err.code === 'INVALID_TOKEN');
 });
 
 test('OAuth2 client_credentials grant issues a machine token with type "access_token" (no refresh token, no user involved)', async () => {
@@ -112,10 +114,13 @@ test('OAuth2 client_credentials grant issues a machine token with type "access_t
     assert.equal(tokenBody.refresh_token, undefined, 'client_credentials must not issue a refresh token');
     assert.equal(tokenBody.scope, 'reports.read reports.write');
 
-    const claims = await verifyAccessToken(tokenBody.access_token);
+    const claims = await verifyAccessToken(tokenBody.access_token, { accept: ['oauth2-client'] });
     assert.equal(claims.type, 'access_token');
     assert.equal(claims.sub, client.clientId, 'the client itself is the subject of a client_credentials token');
     assert.equal(claims.claims.clientId, client.clientId);
+    assert.equal(claims.gty, 'client_credentials');
+    await assert.rejects(() => verifyAccessToken(tokenBody.access_token, { accept: ['oauth2-user'] }), (err) => err.code === 'INVALID_TOKEN',
+        'a machine token must never pass as a user token');
 
     // Requesting a scope outside allowedScopes is rejected.
     const overreachRes = await fetch(`${app.baseUrl}/oauth2/token`, {

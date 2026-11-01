@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildTestApp, uniqueEmail } from './helpers/build-test-app.js';
 import { serve, json } from './helpers/serve.js';
-import { initIdentityProvider, issueAccessToken } from '../src/index.js';
+import { initIdentityProvider, issueAccessToken, authContextMiddleware } from '../src/index.js';
 import { setState } from '../src/config/state.js';
 import { CACHE_KEY_PREFIXES } from '../src/config/constants.js';
 
@@ -12,6 +12,14 @@ import { CACHE_KEY_PREFIXES } from '../src/config/constants.js';
 //
 // Two instances here = two initIdentityProvider() states, each with its own
 // in-memory cache and Mongo connection, sharing one database.
+
+/** Runs one middleware against a bare request; resolves with what it set on `req.auth` or passed to `next`. */
+function runMiddleware(mw, headers = {}) {
+    return new Promise((resolve) => {
+        const req = { headers, cookies: {}, originalUrl: '/test' };
+        mw(req, {}, (err) => resolve({ err, auth: req.auth }));
+    });
+}
 
 let app;
 let stateA;
@@ -209,8 +217,18 @@ test('OAuth2 access tokens: authorization-code tokens are revocable through thei
     await fetch(`${app.baseUrl}/oauth2/clients/${client.clientId}/approve`, { method: 'POST', headers: admin });
 
     const cc = await (await fetch(`${instanceA.baseUrl}/oauth2/token`, json({ grant_type: 'client_credentials', client_id: client.clientId, client_secret: client.clientSecret, scope: 'email' }))).json();
-    const introspect = await fetch(`${instanceB.baseUrl}/oauth2/token/introspect`, json({ token: 'x' }, { Authorization: `Bearer ${cc.access_token}` }));
-    assert.equal(introspect.status, 200, 'a client_credentials token has no session and must still authenticate');
+    // A client_credentials token has no session row, so the per-request session check must skip it
+    // — on a route that accepts machine tokens at all (the IdP's own routes don't; see token-audience.test.js).
+    setState(stateB);
+    try {
+        const { err, auth } = await runMiddleware(authContextMiddleware({ accept: ['oauth2-client'] }), { authorization: `Bearer ${cc.access_token}` });
+        assert.equal(err, undefined, 'a client_credentials token has no session and must still authenticate');
+        assert.equal(auth.tokenKind, 'oauth2-client');
+        assert.equal(auth.clientId, client.clientId);
+        assert.equal(auth.userId, undefined, 'a machine token must never surface the client id as a user id');
+    } finally {
+        setState(stateA);
+    }
 
     const user = await registerVerifyLogin(uniqueEmail('oauth-user'));
     const confirm = await fetch(`${instanceA.baseUrl}/oauth2/authorize/confirm`, {

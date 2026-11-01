@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adheres to [Semantic Versioning](https://semver.org/) (pre-1.0: a `MINOR` bump may include
 backwards-incompatible changes, per the [semver spec's rules for 0.y.z](https://semver.org/#spec-item-4)).
 
+## [Unreleased] - 0.4.0
+
+A security release from a full audit of 0.3.0. **Breaking** — see the upgrade notes under each item.
+
+### Security
+
+- **OAuth2 access tokens worked as first-party credentials (Critical).** `verifyAccessToken` and
+  `authContextMiddleware` checked signature, issuer and `type`, but never *who the token was issued
+  to*. A token minted for a third-party OAuth2 client (`aud` = that client) passed on every IdP route,
+  so any relying party a user authorized — even for `openid` alone — could delete the account,
+  register its own passkey (a permanent login), change the password with a known one, or grant itself
+  consent for every scope. Access tokens are now classified as `first-party`, `oauth2-user` or
+  `oauth2-client` (client_credentials, now marked `gty: 'client_credentials'`), and both accept only
+  `first-party` with `aud` = the issuer by default. `/userinfo` accepts only `oauth2-user` tokens.
+  **Upgrade:** a resource server that accepts OAuth2 tokens must opt in with
+  `authContextMiddleware({ accept: ['oauth2-user'] })` (and/or `'oauth2-client'`) and check
+  `req.auth.scopes`. A first-party token minted with a custom `audience` needs
+  `authContextMiddleware({ audience })`. `req.auth.userId` is now `undefined` for client_credentials
+  tokens (it used to be the client id); `req.auth` gains `tokenKind`, `clientId`, `scopes`.
+- **Refresh tokens were interchangeable (High).** A refresh token from an OAuth2 grant was accepted
+  at the first-party `POST /refresh` (minting a first-party session with no client authentication),
+  a first-party refresh token was accepted by the OAuth2 `refresh_token` grant, and any client could
+  redeem another client's refresh token. Session rows now carry `kind: 'first_party' | 'oauth2'`;
+  `/refresh` accepts only `first_party`, and the OAuth2 grant only `oauth2` rows issued to the calling
+  client. A token presented in the wrong place stays revoked. Rows written before 0.4.0 are classified
+  by their stored claims (`{ clientId, scopes[] }` = OAuth2). **Upgrade (custom storage adapters):**
+  persist the new `kind` field on session rows.
+- **One request could crash the process on Express 4 (High).** `POST /oauth2/token` returned the
+  grant handler's promise without awaiting it, so a failed grant (e.g. an unknown `client_id`)
+  escaped the handler's `try/catch`; Express 4 ignores returned promises, so it became an unhandled
+  rejection, which terminates Node ≥ 15. `GET /userinfo` had no error handling at all.
+- **`/userinfo` released email without the `email` scope**, did not require `openid`, and answered for
+  suspended/deleted users. It now requires `openid`, releases `email` / profile claims only for the
+  matching scopes, refuses inactive users, and sends `Cache-Control: no-store`.
+
 ## [0.3.0] - 2026-10-05
 
 A security release. Four issues found while building a platform on 0.2.1, one of them reachable in

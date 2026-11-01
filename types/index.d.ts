@@ -257,13 +257,45 @@ export interface AccessTokenClaims {
     exp: number;
     /** Present (true) on tokens with no session row behind them — see `issueAccessToken`. */
     sessionless?: boolean;
+    /** OAuth2-issued tokens only: the client the token was issued to (also its `aud`). */
+    client_id?: string;
+    /** OAuth2-issued tokens only: space-separated granted scopes. */
+    scope?: string;
+    /** `'client_credentials'` on machine tokens (no user; `sub` is the client id). */
+    gty?: 'client_credentials';
+}
+
+/**
+ * Which party an access token was issued to. `authContextMiddleware` / `verifyAccessToken`
+ * accept only `'first-party'` unless told otherwise — a token this IdP issued to a third-party
+ * OAuth2 client is never a credential for the IdP's own routes.
+ */
+export type AccessTokenKind = 'first-party' | 'oauth2-user' | 'oauth2-client';
+
+export interface VerifyAccessTokenOptions {
+    issuer?: string;
+    /** The `aud` a first-party token must carry. Default: the issuer. */
+    audience?: string | string[];
+    /** Token kinds accepted. Default `['first-party']`. */
+    accept?: AccessTokenKind[];
 }
 
 // Express augmentation — `req.auth` / `req.serviceCaller` after the
 // respective middleware runs; `req.validatedQuery` after validateQuery().
 declare module 'express-serve-static-core' {
     interface Request {
-        auth?: { userId: string; email?: string; claims: Record<string, unknown>; tokenMeta: { issuedAt: number; expiresAt: number; jti: string } };
+        auth?: {
+            /** Undefined for `'oauth2-client'` (client_credentials) tokens — there is no user. */
+            userId?: string;
+            email?: string;
+            claims: Record<string, unknown>;
+            tokenKind: AccessTokenKind;
+            /** OAuth2 tokens only. */
+            clientId?: string;
+            /** OAuth2 tokens only: the granted scopes. */
+            scopes?: string[];
+            tokenMeta: { issuedAt: number; expiresAt: number; jti: string };
+        };
         serviceCaller?: { name: string; scopes?: string[]; region?: string; source: 'token' | 'legacy-secret' };
         validatedQuery?: Record<string, unknown>;
     }
@@ -294,7 +326,7 @@ export const ERROR_CODES: Record<string, string>;
  * token's `jti` yourself.
  */
 export function issueAccessToken(input: { sub: string; email?: string; claims?: Record<string, unknown> }, opts?: { ttlSeconds?: number; audience?: string; sessionless?: boolean }): Promise<IssuedToken>;
-export function verifyAccessToken(token: string, opts?: { issuer?: string }): Promise<AccessTokenClaims>;
+export function verifyAccessToken(token: string, opts?: VerifyAccessTokenOptions): Promise<AccessTokenClaims>;
 export function issueIdToken(user: IdentityUser, audience: string, nonce?: string): Promise<IssuedToken>;
 export function issueOAuth2AccessToken(subject: { id: string }, client: { clientId: string; accessTokenTTL?: number }, scopes: string[], opts?: { sessionless?: boolean }): Promise<IssuedToken>;
 export function issueMfaChallengeToken(subjectId: string): Promise<string>;
@@ -320,7 +352,7 @@ export function verifyServiceTokenRemote(token: string, opts: { expectedAud: str
 
 // ── Middleware ───────────────────────────────────────────────────────────
 
-export function authContextMiddleware(opts?: { issuer?: string; optional?: boolean }): RequestHandler;
+export function authContextMiddleware(opts?: VerifyAccessTokenOptions & { optional?: boolean }): RequestHandler;
 export function serviceContextMiddleware(opts?: { ownServiceName?: string }): RequestHandler;
 export function requireServiceCallerMiddleware(...allowedCallers: string[]): RequestHandler;
 export function validateBody(schema: { parse: (input: unknown) => unknown }): RequestHandler;

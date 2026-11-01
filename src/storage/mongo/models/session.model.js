@@ -20,6 +20,11 @@ export function defineSessionModel(connection) {
             deviceFingerprint: { type: String, default: null, index: true },
             ipAddress: { type: String },
 
+            // 'first_party' (this IdP's own login) or 'oauth2' (an OAuth2 client's grant — `claims.clientId`
+            // names the client). A refresh token is only ever redeemable where it was issued. Null on
+            // rows written before 0.4.0; see utils/session-kind.js for how those are classified.
+            kind: { type: String, enum: ['first_party', 'oauth2', null], default: null },
+
             // Opaque snapshot of whatever the consumer put in the access token's
             // `claims` at the time this session was created — carried here so a
             // refresh can re-mint an access token without an outbound call back

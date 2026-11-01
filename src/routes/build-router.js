@@ -165,7 +165,8 @@ export function buildRouter(opts = {}) {
 
     // OIDC
     if (features.oidc) {
-        router.get('/userinfo', authContextMiddleware(), userinfoHandler);
+        // The one IdP route a relying party calls with the access token it was issued.
+        router.get('/userinfo', authContextMiddleware({ accept: ['oauth2-user'] }), userinfoHandler);
         router.get('/oidc/end-session', authContextMiddleware({ optional: true }), endSessionHandler);
         router.get('/.well-known/openid-configuration', openidConfigurationHandler);
     }

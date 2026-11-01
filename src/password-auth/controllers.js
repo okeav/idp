@@ -1,7 +1,8 @@
 import crypto from 'crypto';
 import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
-import { IDENTITY_STATUS, COOKIE_NAMES, CACHE_KEY_PREFIXES } from '../config/constants.js';
+import { IDENTITY_STATUS, COOKIE_NAMES, CACHE_KEY_PREFIXES, SESSION_KINDS } from '../config/constants.js';
+import { sessionKindOf } from '../utils/session-kind.js';
 import { issueAccessToken, hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
 import { hashPassword, verifyPassword, compareDummyPassword } from '../utils/password.js';
 import { buildDeviceFingerprint, detectAndNotifyNewDevice } from '../utils/device-fingerprint.js';
@@ -56,6 +57,7 @@ async function issueSession(state, { user, claims, req }) {
             ipAddress: req.ip,
             deviceInfo,
             deviceFingerprint,
+            kind: SESSION_KINDS.FIRST_PARTY,
             claims,
         },
         userId: user.id,
@@ -277,6 +279,13 @@ export async function refreshTokenHandler(req, res, next) {
         const tokenHash = hashOpaqueToken(state, refreshTokenValue);
         const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash);
         if (!existing) throw new IdpError({ code: 'INVALID_REFRESH_TOKEN', httpStatus: 401, message: 'Invalid or expired refresh token' });
+        // An OAuth2 client's refresh token is redeemable only at /oauth2/token by that client — never
+        // here, where it would mint a first-party session without client authentication. The row was
+        // just consumed above; it stays revoked, since a client token showing up here means it leaked.
+        if (sessionKindOf(existing) !== SESSION_KINDS.FIRST_PARTY) {
+            state.logger?.warn?.({ userId: String(existing.user) }, 'OAuth2 refresh token presented at /refresh — refused and revoked');
+            throw new IdpError({ code: 'INVALID_REFRESH_TOKEN', httpStatus: 401, message: 'Invalid or expired refresh token' });
+        }
 
         // Default (narrow) select would be enough for the status check alone,
         // but a full user is fetched so resolveAuthContext gets the same
@@ -304,6 +313,7 @@ export async function refreshTokenHandler(req, res, next) {
             ipAddress: req.ip,
             deviceInfo,
             deviceFingerprint: buildDeviceFingerprint(deviceInfo),
+            kind: SESSION_KINDS.FIRST_PARTY,
             claims,
         });
 
