@@ -40,7 +40,7 @@ export function serviceContextMiddleware(opts = {}) {
 
             if (bearer && (mode === 'token' || mode === 'both')) {
                 try {
-                    const lookup = localKeyLookup(state.storage.serviceKeyRepository);
+                    const lookup = localKeyLookup(state.storage.serviceKeyRepository, { rotationGraceSeconds: state.config.serviceMesh?.rotationGraceSeconds });
                     const payload = await verifyServiceTokenWith(bearer, { expectedAud: ownName }, lookup);
                     req.serviceCaller = { name: payload.iss, scopes: payload.scope ? payload.scope.split(' ') : [], region: payload.region, source: 'token' };
                     return next();

@@ -1,4 +1,5 @@
 import { getState } from '../config/state.js';
+import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { IdpError } from '../errors/idp-error.js';
 import { IDENTITY_STATUS } from '../config/constants.js';
 import { hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
@@ -71,6 +72,7 @@ export async function requestMagicLinkHandler(req, res, next) {
 export async function verifyMagicLinkHandler(req, res, next) {
     try {
         const state = getState();
+        assertTrustedOrigin(state, req); // sets session cookies — refuse login CSRF (see middleware/csrf.js)
         const { token } = req.body;
 
         const record = await state.storage.verificationTokenRepository.consumeByHash('magic_link', hashOpaqueToken(state, token));
@@ -87,7 +89,7 @@ export async function verifyMagicLinkHandler(req, res, next) {
             // discarded instead (the owner can set one through password reset).
             user = await state.storage.userRepository.updateById(user.id, {
                 status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null,
-                passwordHash: null, mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [],
+                passwordHash: null, registrationContested: false, mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [],
             });
             await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
         } else {

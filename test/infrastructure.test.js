@@ -129,17 +129,19 @@ test('MemoryCacheAdapter is bounded: when full, expired entries go first, then t
     }
 });
 
-test('MemoryRateLimiter is bounded: when full it refuses NEW keys (fail-closed) instead of evicting counters', async () => {
+test('MemoryRateLimiter is bounded: when full it evicts the oldest counter below its limit, never an exhausted one', async () => {
     const limiter = new MemoryRateLimiter({ maxKeys: 2 });
     try {
         const rule = { max: 3, windowSeconds: 60 };
-        await limiter.increment('victim-ip', rule);
+        for (let i = 0; i < 3; i += 1) await limiter.increment('blocked-ip', rule); // exhausted
         await limiter.increment('a', rule);
-        await assert.rejects(limiter.increment('flood-1', rule), /full/);
-        // Existing counters keep counting — flooding new keys can't reset anyone's limit.
-        await limiter.increment('victim-ip', rule);
-        await limiter.increment('victim-ip', rule);
-        assert.equal((await limiter.increment('victim-ip', rule)).allowed, false);
+        // Full: a new key still gets a counter (a flood of keys must not 503 every new client)...
+        assert.equal((await limiter.increment('flood-1', rule)).allowed, true);
+        // ...made by evicting 'a', not the exhausted counter — flooding can't lift a block.
+        assert.equal((await limiter.increment('blocked-ip', rule)).allowed, false);
+        // With every counter exhausted there is nothing safe to evict: a new key is refused.
+        for (let i = 0; i < 2; i += 1) await limiter.increment('flood-1', rule);
+        await assert.rejects(limiter.increment('flood-2', rule), /full/);
     } finally {
         limiter.close();
     }

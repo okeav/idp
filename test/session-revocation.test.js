@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTestApp, uniqueEmail } from './helpers/build-test-app.js';
+import { buildTestApp, uniqueEmail, waitForHookCall } from './helpers/build-test-app.js';
 import { serve, json } from './helpers/serve.js';
 import { authorizeCode, exchangeCode } from './helpers/oauth.js';
 import { initIdentityProvider, issueAccessToken, authContextMiddleware } from '../src/index.js';
@@ -91,7 +91,7 @@ test('after a password reset, existing access tokens are refused on the other in
     const session = await registerVerifyLogin(email);
 
     await fetch(`${instanceA.baseUrl}/password/forgot`, json({ email }));
-    const { resetToken } = app.hookCalls.onPasswordResetRequested.find((c) => c.email === email);
+    const { resetToken } = await waitForHookCall(app, 'onPasswordResetRequested', (c) => c.email === email);
     const reset = await fetch(`${instanceA.baseUrl}/password/reset`, json({ email, token: resetToken, newPassword: 'N3w!Passw0rdX' }));
     assert.equal(reset.status, 200, await reset.text());
 

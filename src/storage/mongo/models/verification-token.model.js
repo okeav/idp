@@ -14,6 +14,7 @@ export function defineVerificationTokenModel(connection) {
             user: { type: mongoose.Schema.Types.ObjectId, ref: 'IdpIdentityUser', required: true, index: true },
             tokenHash: { type: String, required: true },
             verificationCode: { type: String }, // email_verification only — short numeric code as an alternative to the link token
+            passwordHash: { type: String, default: null }, // email_verification only — the password this registration activates
             expiresAt: { type: Date, required: true },
             usedAt: { type: Date, default: null },
         },

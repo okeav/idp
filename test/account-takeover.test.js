@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generate as generateTotp } from 'otplib';
-import { buildTestApp, withTemporaryApp, uniqueEmail, TEST_SECURITY, freshTotp } from './helpers/build-test-app.js';
+import { buildTestApp, withTemporaryApp, uniqueEmail, TEST_SECURITY, freshTotp, waitForHookCall } from './helpers/build-test-app.js';
 import { json } from './helpers/serve.js';
 
 // Account-takeover paths found in the 0.3.0 audit:
@@ -42,7 +42,7 @@ async function enableMfa(accessToken) {
     return secret;
 }
 
-test('pre-registration: the victim registering a pending address replaces the attacker\'s password and gets a fresh code', async () => {
+test('pre-registration (attacker first): the victim activates their own password; the attacker\'s code is useless to them', async () => {
     const email = uniqueEmail('prereg');
     assert.equal((await post('/register', { email, password: attackerPassword })).status, 201);
     const attackersCode = lastCodeFor(email).verificationCode;
@@ -52,12 +52,55 @@ test('pre-registration: the victim registering a pending address replaces the at
     const victimsCode = lastCodeFor(email).verificationCode;
     assert.notEqual(victimsCode, attackersCode, 'a fresh code is sent for the new registration');
 
-    // The code issued for the attacker's registration is dead.
-    assert.equal((await post('/register/verify-email', { email, code: attackersCode })).status, 400);
-    assert.equal((await post('/register/verify-email', { email, code: victimsCode })).status, 200);
+    // Two registrations competed for the address: a code alone no longer verifies, and the code of
+    // the attacker's registration (also in the victim's inbox) does not go with the victim's password.
+    const bare = await post('/register/verify-email', { email, code: victimsCode });
+    assert.equal(bare.status, 400);
+    assert.equal((await bare.json()).error, 'REGISTRATION_PASSWORD_REQUIRED');
+    assert.equal((await post('/register/verify-email', { email, code: attackersCode, password: victimPassword })).status, 400);
+    assert.equal((await post('/register/verify-email', { email, code: victimsCode, password: victimPassword })).status, 200, 'refused attempts did not burn the code');
 
     assert.equal((await post('/login', { email, password: attackerPassword })).status, 401, 'the attacker\'s password must not survive');
     assert.equal((await post('/login', { email, password: victimPassword })).status, 200);
+});
+
+test('pre-registration (victim first): re-registering right after the victim does not hand the attacker the account', async () => {
+    const email = uniqueEmail('prereg-vf');
+    // The attacker plants a registration; while it is pending, login with its password says nothing.
+    await post('/register', { email, password: attackerPassword });
+    const plantedRight = await post('/login', { email, password: attackerPassword });
+    const plantedWrong = await post('/login', { email, password: 'Wr0ng!Passw0rd' });
+    assert.equal(plantedRight.status, 401);
+    assert.deepEqual(await plantedRight.json(), await plantedWrong.json(), 'no "pending" oracle for the right password');
+
+    await post('/register', { email, password: victimPassword });
+    const victimsCode = lastCodeFor(email).verificationCode;
+    // The attacker re-registers immediately: the newest email in the victim's inbox is the attacker's.
+    await post('/register', { email, password: attackerPassword });
+    const newestCode = lastCodeFor(email).verificationCode;
+
+    // The victim, entering the newest code with their password, does not activate the attacker's.
+    assert.equal((await post('/register/verify-email', { email, code: newestCode, password: victimPassword })).status, 400);
+    // Their own registration's code still works.
+    assert.equal((await post('/register/verify-email', { email, code: victimsCode, password: victimPassword })).status, 200);
+    assert.equal((await post('/login', { email, password: attackerPassword })).status, 401);
+    assert.equal((await post('/login', { email, password: victimPassword })).status, 200);
+});
+
+test('a single registration still verifies with the code alone', async () => {
+    const email = uniqueEmail('single-reg');
+    await post('/register', { email, password: victimPassword });
+    assert.equal((await post('/register/verify-email', { email, code: lastCodeFor(email).verificationCode })).status, 200);
+    assert.equal((await post('/login', { email, password: victimPassword })).status, 200);
+});
+
+test('the stored (HMAC) form of a verification code is not accepted as the code', async () => {
+    const email = uniqueEmail('hmac-code');
+    await post('/register', { email, password: victimPassword });
+    const user = await app.state.storage.userRepository.findByEmail(email);
+    const row = await app.state.storage.connection.model('IdpVerificationToken').findOne({ user: user.id, kind: 'email_verification' }).lean();
+    assert.ok(row.verificationCode && !/^\d{6}$/.test(row.verificationCode), 'stored hashed');
+    assert.equal((await post('/register/verify-email', { email, code: row.verificationCode })).status, 400);
 });
 
 test('pre-registration: activating a pending account by magic link discards the password set before ownership was proven', async () => {
@@ -169,8 +212,9 @@ test('verify-email brute force: the code dies after the attempt budget, even for
         // After the lock lifts, the old code is still dead — it was burnt. A new one (sent to the inbox) works.
         await new Promise((r) => setTimeout(r, 1100));
         assert.equal((await p('/register/verify-email', { email, code: verificationCode })).status, 400);
+        const sent = temp.hookCalls.onVerificationEmailRequested.filter((c) => c.email === email).length;
         await p('/register/resend-verification', { email });
-        const fresh = lastCodeFor(email, temp).verificationCode;
+        const fresh = (await waitForHookCall(temp, 'onVerificationEmailRequested', (c) => c.email === email, { count: sent + 1 })).verificationCode;
         assert.equal((await p('/register/verify-email', { email, code: fresh })).status, 200);
     });
 });

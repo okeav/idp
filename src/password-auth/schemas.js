@@ -31,7 +31,10 @@ export const registerSchema = z.object({
 export const verifyEmailSchema = z.object({
     email: email(),
     token: z.string().optional(),
-    code: z.string().optional(),
+    code: z.string().max(128).optional(),
+    // Required (checked against the registration the code belongs to) only when the address was
+    // registered more than once before verification — see REGISTRATION_PASSWORD_REQUIRED.
+    password: z.string().min(1).max(1024).optional(),
 }).strict().refine((v) => v.token || v.code, { message: 'Either token or code is required' });
 
 export const resendVerificationSchema = z.object({ email: email() }).strict();

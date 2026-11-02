@@ -18,6 +18,7 @@ export function defineServiceKeyModel(connection) {
             region: { type: String, default: 'global' },
             registeredAt: { type: Date, default: () => new Date() },
             lastSeenAt: { type: Date, default: () => new Date() },
+            statusChangedAt: { type: Date, default: () => new Date() }, // bounds how long a ROTATING key verifies
         },
         { timestamps: true, versionKey: false }
     );

@@ -64,18 +64,21 @@ test('a per-service bootstrap secret registers exactly its own name', async () =
 
 test('the shared bootstrap secret cannot replace an existing service\'s key (no impersonation)', async () => {
     const attacker = rsa();
-    const res = await register('billing', attacker.publicKey, SHARED);
-    assert.equal(res.status, 409);
-    assert.equal((await res.json()).error, 'SERVICE_NAME_TAKEN');
+    // billing has its own secret: the shared one can't register that name at all.
+    assert.equal((await register('billing', attacker.publicKey, SHARED)).status, 403);
 
     // A token signed with the attacker's key isn't accepted as billing.
     const forged = mint(attacker.privateKey, 'billing:attacker');
     assert.equal((await ping({ Authorization: `Bearer ${forged}` })).status, 401);
 
-    // It can still register a brand-new name, and re-registering the same key is idempotent.
+    // It can register a brand-new name, and re-registering the same key is idempotent...
     const k = rsa();
     assert.equal((await register('reports', k.publicKey, SHARED)).status, 201);
     assert.equal((await register('reports', k.publicKey, SHARED)).status, 201);
+    // ...but not replace that name's key once it has one.
+    const res = await register('reports', attacker.publicKey, SHARED);
+    assert.equal(res.status, 409);
+    assert.equal((await res.json()).error, 'SERVICE_NAME_TAKEN');
 });
 
 test('a valid service token passes; the caller allowlist is enforced', async () => {

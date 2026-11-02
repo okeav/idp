@@ -145,6 +145,8 @@ export interface IdpConfig {
          * code for the account is deleted (the owner requests a new one). Defaults: 5 in 3600s, locked 900s.
          */
         verificationCodeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number };
+        /** Per-account limit on wrong current passwords at /password/change. Defaults: 5 in 3600s, locked 3600s. */
+        passwordChangeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number };
     };
     mfa?: {
         issuerLabel?: string;
@@ -213,7 +215,7 @@ export interface IdpConfig {
     serviceMesh?: {
         /** One registration credential per service (preferred): `{ billing: '<secret>', ... }`. Proves which service registers, and lets it rotate its key. */
         bootstrapSecrets?: Record<string, string>;
-        /** Legacy shared registration secret: can register a NEW name only, never replace an existing service's key. */
+        /** Legacy shared registration secret: can register a NEW name only (never one listed in bootstrapSecrets), never replace an existing service's key. */
         bootstrapSecret?: string;
         /** Names allowed to register at all. */
         allowedServiceNames?: string[];
@@ -223,6 +225,8 @@ export interface IdpConfig {
         sharedSecret?: string;
         /** Let requireServiceCallerMiddleware accept shared-secret callers (their name is unverified). Default false. */
         allowLegacySecretCallers?: boolean;
+        /** How long a rotated-away (ROTATING) service key still verifies, in seconds. Default 3600. */
+        rotationGraceSeconds?: number;
     };
     rateLimiting?: {
         /** Set false to disable entirely — e.g. you already rate-limit at a gateway/CDN layer. Default true. */

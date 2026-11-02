@@ -1,7 +1,8 @@
 import { generateAuthenticationOptions } from '@simplewebauthn/server';
 import { getState } from '../config/state.js';
+import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { IdpError } from '../errors/idp-error.js';
-import { IDENTITY_STATUS } from '../config/constants.js';
+import { isActiveAccount } from '../utils/account-status.js';
 import { getWebauthnConfig } from './config.js';
 import { storeChallenge, consumeChallenge } from './challenge-store.js';
 import { auditLog } from '../hooks/index.js';
@@ -64,6 +65,7 @@ export async function generateMfaWebauthnChallengeOptionsHandler(req, res, next)
 export async function verifyMfaWebauthnChallengeHandler(req, res, next) {
     try {
         const state = getState();
+        assertTrustedOrigin(state, req); // sets session cookies — refuse login CSRF (see middleware/csrf.js)
         const { mfaChallengeToken, response } = req.body;
 
         await enforceRateLimit(state, `mfa-challenge:ip:${ipKey(req.ip)}`, state.config.rateLimiting.mfaChallenge, { failMode: 'closed' });
@@ -71,7 +73,7 @@ export async function verifyMfaWebauthnChallengeHandler(req, res, next) {
         const challenge = verifyChallengeToken(state, mfaChallengeToken);
         const userId = challenge.sub;
         const user = await state.storage.userRepository.findById(userId);
-        if (!user || user.status !== IDENTITY_STATUS.ACTIVE) {
+        if (!isActiveAccount(user)) {
             throw new IdpError({ code: 'USER_NOT_ACTIVE', httpStatus: 403, message: 'User account is not active' });
         }
         assertChallengeCurrent(user, challenge);

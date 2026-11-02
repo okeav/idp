@@ -4,6 +4,7 @@ import { IdpError } from '../errors/idp-error.js';
 import { KEY_STATUS } from '../config/constants.js';
 import { deriveKid } from './verify-service-token.js';
 import { auditLog } from '../hooks/index.js';
+import { isKeyPublishable } from './key-status.js';
 
 export const SERVICE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const MIN_RSA_BITS = 2048;
@@ -50,10 +51,13 @@ function parsePublicKey(publicKeyB64) {
  * - A per-service bootstrap secret (`serviceMesh.bootstrapSecrets`) authorizes exactly its own name,
  *   and may register a new key for it (rotation): the previous keys move to ROTATING (still
  *   verifiable, so in-flight tokens keep working) and are retired on the next rotation.
- * - The shared `serviceMesh.bootstrapSecret` may only register a name that has no key yet: it
- *   proves "some participating service", not which one, so it must not be able to replace another
- *   service's key and impersonate it. Rotate such a service with a per-service secret, or revoke its
- *   key with `revokeServiceKey()` first.
+ * - The shared `serviceMesh.bootstrapSecret` may only register a name that has no key yet, and never
+ *   a name that has its own per-service secret: it proves "some participating service", not which
+ *   one, so it must not be able to replace — or, once a key is revoked, claim — another service's
+ *   name and impersonate it. Rotate such a service with a per-service secret, or revoke its key with
+ *   `revokeServiceKey()` first.
+ * - A revoked key is never accepted again (409 SERVICE_KEY_REVOKED): the service must generate a new one.
+ * - A rotated-away (ROTATING) key keeps verifying for `serviceMesh.rotationGraceSeconds` only.
  * - `serviceMesh.allowedServiceNames`, when set, limits which names can register at all.
  */
 export async function registerServiceKeyHandler(req, res, next) {
@@ -73,10 +77,21 @@ export async function registerServiceKeyHandler(req, res, next) {
         if (!auth || (!auth.shared && auth.serviceName !== name)) {
             throw new IdpError({ code: 'UNAUTHENTICATED', httpStatus: 401, message: 'Bootstrap credential does not cover this service name' });
         }
+        const perService = state.config.serviceMesh?.bootstrapSecrets;
+        if (auth.shared && perService && Object.hasOwn(perService, name)) {
+            await auditLog(state.logger, state.hooks, 'SERVICE_KEY_REGISTRATION_REFUSED', { name, reason: 'name_has_own_secret' });
+            throw new IdpError({ code: 'FORBIDDEN', httpStatus: 403, message: `Service '${name}' registers with its own bootstrap secret, not the shared one` });
+        }
 
         const publicKeyPem = parsePublicKey(publicKeyB64);
         const kid = deriveKid(name, publicKeyPem);
         const repo = state.storage.serviceKeyRepository;
+        const revoked = () => new IdpError({ code: 'SERVICE_KEY_REVOKED', httpStatus: 409, message: 'This key was revoked — generate a new key pair' });
+        // Checked before a rotation demotes the current key (upsertByKid refuses it again, atomically).
+        if (typeof repo.findByKid === 'function' && (await repo.findByKid(kid))?.status === KEY_STATUS.REVOKED) {
+            await auditLog(state.logger, state.hooks, 'SERVICE_KEY_REGISTRATION_REFUSED', { name, kid, reason: 'key_revoked' });
+            throw revoked();
+        }
         const existing = (await repo.listPublishable()).filter((k) => k.name === name);
         const sameKey = existing.some((k) => k.kid === kid);
 
@@ -92,6 +107,7 @@ export async function registerServiceKeyHandler(req, res, next) {
         }
 
         const saved = await repo.upsertByKid({ kid, name, publicKey: Buffer.from(publicKeyPem, 'utf8').toString('base64'), region });
+        if (!saved) throw revoked();
 
         await auditLog(state.logger, state.hooks, 'SERVICE_KEY_REGISTERED', { name, kid: saved.kid, rotated: existing.length > 0 && !sameKey });
         res.status(201).json({ kid: saved.kid, name: saved.name });
@@ -119,8 +135,9 @@ export async function getServicesJwksHandler(req, res, next) {
     try {
         const state = getState();
         const docs = await state.storage.serviceKeyRepository.listPublishable();
+        const grace = state.config.serviceMesh?.rotationGraceSeconds;
         const keys = [];
-        for (const doc of docs) {
+        for (const doc of docs.filter((d) => isKeyPublishable(d, grace))) {
             try {
                 const key = crypto.createPublicKey(Buffer.from(doc.publicKey, 'base64').toString('utf8'));
                 // Never publish anything but an RSA public key (rows written before 0.4.0 weren't validated).

@@ -20,6 +20,9 @@ export function defineIdentityUserModel(connection, { hashEmail }) {
             // Set (before the rows are revoked) by every "revoke all of this user's sessions" — a refresh
             // racing it re-checks this, so it can't leave a session alive.
             sessionsRevokedAt: { type: Date, default: null },
+            // Set when a still-unverified address is registered again: verifying then needs the password
+            // bound to the code (see registerHandler).
+            registrationContested: { type: Boolean, default: false },
             failedLoginAttempts: { type: Number, default: 0 },
             lockUntil: { type: Date, default: null },
 

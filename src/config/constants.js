@@ -142,6 +142,15 @@ export const DEFAULT_VERIFICATION_CODE_LOCKOUT = Object.freeze({
     lockSeconds: 15 * 60,
 });
 
+// Per-ACCOUNT limit on wrong current passwords at /password/change. That endpoint is reached with a
+// session, not a password, so without a limit anyone holding a stolen access token could guess the
+// password there at bcrypt speed — no lockout, nothing to lose — and keep it after the token expires.
+export const DEFAULT_PASSWORD_CHANGE_LOCKOUT = Object.freeze({
+    maxFailedAttempts: 5,
+    windowSeconds: 60 * 60,
+    lockSeconds: 60 * 60,
+});
+
 // Per-ACCOUNT limit on failed second-factor attempts (TOTP, recovery codes,
 // WebAuthn-as-MFA, and the codes that confirm/disable MFA), counted in
 // storage so it holds across instances. Distinct from the per-IP

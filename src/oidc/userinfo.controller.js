@@ -1,5 +1,6 @@
 import { getState } from '../config/state.js';
 import { IDENTITY_STATUS } from '../config/constants.js';
+import { isActiveAccount } from '../utils/account-status.js';
 
 function invalidToken(res, description) {
     return res.status(401).set('WWW-Authenticate', 'Bearer error="invalid_token"').json({ error: 'invalid_token', error_description: description });
@@ -21,7 +22,7 @@ export async function userinfoHandler(req, res, next) {
 
         const state = getState();
         const user = await state.storage.userRepository.findById(req.auth.userId);
-        if (!user || user.status !== IDENTITY_STATUS.ACTIVE) return invalidToken(res, 'User not found');
+        if (!isActiveAccount(user)) return invalidToken(res, 'User not found');
 
         const claims = { sub: String(user.id) };
 

@@ -87,10 +87,14 @@
  * @property {() => Promise<{deletedCount: number}>} [pruneExpired]
  *
  * @typedef {Object} ServiceKeyRepository
- * @property {(input: {kid, name, publicKey, region}) => Promise<object>} upsertByKid
+ * @property {(input: {kid, name, publicKey, region}) => Promise<object|null>} upsertByKid - must return null
+ *   (and change nothing) for a kid that is REVOKED — a revoked key is never re-activated
+ * @property {(kid: string) => Promise<object|null>} [findByKid] - a key by kid whatever its status (lets a
+ *   rotation refuse a revoked key before demoting the current one)
  * @property {() => Promise<object[]>} listPublishable
  * @property {(kid: string) => Promise<object|null>} [findPublishableByKid] - indexed single-key read (verification)
- * @property {(kid: string, status: string) => Promise<object|null>} setStatusByKid - ROTATING / RETIRED / REVOKED
+ * @property {(kid: string, status: string) => Promise<object|null>} setStatusByKid - ROTATING / RETIRED / REVOKED;
+ *   should record `statusChangedAt` (a ROTATING key verifies for `serviceMesh.rotationGraceSeconds` after it)
  *
  * @typedef {Object} CredentialRepository
  * WebAuthn/passkey credentials — one document per registered authenticator.

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { generateAuthenticationOptions } from '@simplewebauthn/server';
 import { getState } from '../config/state.js';
+import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { IdpError } from '../errors/idp-error.js';
 import { getWebauthnConfig } from './config.js';
 import { storeChallenge, consumeChallenge } from './challenge-store.js';
@@ -82,6 +83,7 @@ function decoyCredentialId(state, email) {
 export async function verifyAuthenticationHandler(req, res, next) {
     try {
         const state = getState();
+        assertTrustedOrigin(state, req); // sets session cookies — refuse login CSRF (see middleware/csrf.js)
         await enforceRateLimit(state, `webauthn-authn:ip:${ipKey(req.ip)}`, state.config.rateLimiting.webauthnAuthentication, { failMode: 'closed' });
         const { response } = req.body;
 

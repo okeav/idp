@@ -1,4 +1,4 @@
-import { DEFAULT_TTL_SECONDS, DEFAULT_RATE_LIMITS, DEFAULT_WEBHOOK_CONFIG, DEFAULT_MFA_LOCKOUT, DEFAULT_VERIFICATION_CODE_LOCKOUT } from './constants.js';
+import { DEFAULT_TTL_SECONDS, DEFAULT_RATE_LIMITS, DEFAULT_WEBHOOK_CONFIG, DEFAULT_MFA_LOCKOUT, DEFAULT_VERIFICATION_CODE_LOCKOUT, DEFAULT_PASSWORD_CHANGE_LOCKOUT } from './constants.js';
 
 export function withDefaults(config = {}) {
     if (!config.issuer) throw new Error('config.issuer is required');
@@ -34,6 +34,7 @@ export function withDefaults(config = {}) {
             tokenHashSecret: config.security?.tokenHashSecret,
             ...config.security,
             verificationCodeLockout: { ...DEFAULT_VERIFICATION_CODE_LOCKOUT, ...config.security?.verificationCodeLockout },
+            passwordChangeLockout: { ...DEFAULT_PASSWORD_CHANGE_LOCKOUT, ...config.security?.passwordChangeLockout },
         },
         mfa: {
             issuerLabel: 'App',
@@ -57,7 +58,8 @@ export function withDefaults(config = {}) {
         sso: config.sso || {},
         // requirePkce: 'all' (default) or 'public' — see oauth2/authorize.controller.js.
         oauth2: { requirePkce: 'all', ...config.oauth2 },
-        serviceMesh: { tokenMode: 'token', ...config.serviceMesh },
+        // rotationGraceSeconds: how long a replaced (ROTATING) service key still verifies — see service-mesh/key-status.js.
+        serviceMesh: { tokenMode: 'token', rotationGraceSeconds: 60 * 60, ...config.serviceMesh },
         rateLimiting: {
             enabled: true,
             adapter: 'memory',

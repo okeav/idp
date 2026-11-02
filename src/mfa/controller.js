@@ -1,8 +1,9 @@
 import crypto from 'crypto';
 import { generateSecret, generateURI, verify as verifyTotp } from 'otplib';
 import { getState } from '../config/state.js';
+import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { IdpError } from '../errors/idp-error.js';
-import { IDENTITY_STATUS } from '../config/constants.js';
+import { isActiveAccount } from '../utils/account-status.js';
 import { verifyPassword } from '../utils/password.js';
 import { hashOpaqueToken, verifyMfaChallengeToken as verifyMfaChallengeTokenJwt } from '../signing/token.service.js';
 import { auditLog } from '../hooks/index.js';
@@ -233,6 +234,7 @@ export async function regenerateRecoveryCodesHandler(req, res, next) {
 export async function verifyMfaChallengeHandler(req, res, next) {
     try {
         const state = getState();
+        assertTrustedOrigin(state, req); // sets session cookies — refuse login CSRF (see middleware/csrf.js)
         const { mfaChallengeToken, code } = req.body;
 
         await enforceRateLimit(state, `mfa-challenge:ip:${ipKey(req.ip)}`, state.config.rateLimiting.mfaChallenge, { failMode: 'closed' });
@@ -240,7 +242,7 @@ export async function verifyMfaChallengeHandler(req, res, next) {
         const challenge = verifyChallengeToken(state, mfaChallengeToken);
         const userId = challenge.sub;
         const user = await state.storage.userRepository.findById(userId, { select: '+mfaSecret +mfaRecoveryCodes' });
-        if (!user || user.status !== IDENTITY_STATUS.ACTIVE) throw new IdpError({ code: 'USER_NOT_ACTIVE', httpStatus: 403, message: 'User account is not active' });
+        if (!isActiveAccount(user)) throw new IdpError({ code: 'USER_NOT_ACTIVE', httpStatus: 403, message: 'User account is not active' });
         if (!user.mfaEnabled) throw INVALID_CHALLENGE();
         assertChallengeCurrent(user, challenge);
 

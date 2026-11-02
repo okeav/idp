@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTestApp, withTemporaryApp, uniqueEmail } from './helpers/build-test-app.js';
+import { buildTestApp, withTemporaryApp, uniqueEmail, waitForHookCall } from './helpers/build-test-app.js';
 import { json } from './helpers/serve.js';
 import { authorizeCode, exchangeCode } from './helpers/oauth.js';
 import { revokeAllUserSessions } from '../src/utils/session-family.js';
@@ -178,7 +178,7 @@ test('a locked account answers the same for the right and a wrong password; a pa
     assert.deepEqual(await right.json(), await wrong.json());
 
     await post('/password/forgot', { email: u.email });
-    const { resetToken } = app.hookCalls.onPasswordResetRequested.filter((c) => c.email === u.email).at(-1);
+    const { resetToken } = await waitForHookCall(app, 'onPasswordResetRequested', (c) => c.email === u.email);
     assert.equal((await post('/password/reset', { email: u.email, token: resetToken, newPassword: 'N3w!Passw0rd' })).status, 200);
     assert.equal((await post('/login', { email: u.email, password: 'N3w!Passw0rd' })).status, 200);
 });
@@ -186,18 +186,21 @@ test('a locked account answers the same for the right and a wrong password; a pa
 test('password reset: a newer link invalidates older ones; deleted accounts get none', async () => {
     const u = await user();
     await post('/password/forgot', { email: u.email });
-    const first = app.hookCalls.onPasswordResetRequested.filter((c) => c.email === u.email).at(-1).resetToken;
+    const first = (await waitForHookCall(app, 'onPasswordResetRequested', (c) => c.email === u.email)).resetToken;
     await post('/password/forgot', { email: u.email });
-    const second = app.hookCalls.onPasswordResetRequested.filter((c) => c.email === u.email).at(-1).resetToken;
+    const second = (await waitForHookCall(app, 'onPasswordResetRequested', (c) => c.email === u.email, { count: 2 })).resetToken;
     assert.notEqual(first, second);
     assert.equal((await post('/password/reset', { email: u.email, token: first, newPassword: 'N3w!Passw0rd' })).status, 400);
     assert.equal((await post('/password/reset', { email: u.email, token: second, newPassword: 'N3w!Passw0rd' })).status, 200);
 
     const gone = await user();
     await app.state.storage.userRepository.updateById(gone.userId, { status: 'DELETED' });
-    const before = app.hookCalls.onPasswordResetRequested.length;
     assert.equal((await post('/password/forgot', { email: gone.email })).status, 200);
-    assert.equal(app.hookCalls.onPasswordResetRequested.length, before);
+    // The request's work runs after the response: let a later request for a live account finish first.
+    const live = await user();
+    await post('/password/forgot', { email: live.email });
+    await waitForHookCall(app, 'onPasswordResetRequested', (c) => c.email === live.email);
+    assert.equal(app.hookCalls.onPasswordResetRequested.filter((c) => c.email === gone.email).length, 0);
 });
 
 test('password-reset requests are rate limited per address', async () => {

@@ -11,6 +11,7 @@ import { createMongoStorage } from '../storage/mongo/index.js';
 import { makeHashEmail, normalizeEmail } from '../utils/email-hash.js';
 import { createMfaSecretCipher, assertMfaSecretConfig } from '../mfa/secrets.js';
 import { MemoryAttemptCounterRepository } from '../mfa/memory-attempt-counter.js';
+import { prepareDummyHash } from '../utils/password.js';
 
 /**
  * Wires storage, cache, signing keys, hooks, and logger, and stores the
@@ -28,6 +29,7 @@ export async function initIdentityProvider(config) {
     const resolved = withDefaults(config);
 
     assertSecurityConfig(resolved.security);
+    await prepareDummyHash(resolved.security.bcryptRounds);
     assertRateLimitRules(resolved.rateLimiting);
 
     const logger = config.logger || createConsoleLogger();
@@ -38,12 +40,15 @@ export async function initIdentityProvider(config) {
     assertMfaSecretConfig(resolved.mfa, mfaCipher, logger);
     assertLockoutConfig('mfa.lockout', resolved.mfa.lockout);
     assertLockoutConfig('security.verificationCodeLockout', resolved.security.verificationCodeLockout);
+    assertLockoutConfig('security.passwordChangeLockout', resolved.security.passwordChangeLockout);
     assertSsoConfig(resolved);
     if (!Number.isInteger(resolved.hookTimeoutMs) || resolved.hookTimeoutMs < 1) throw new Error(`config.hookTimeoutMs must be a positive integer (got ${resolved.hookTimeoutMs})`);
     setHookTimeout(resolved.hookTimeoutMs);
     if (!['all', 'public'].includes(resolved.oauth2.requirePkce)) {
         throw new Error("config.oauth2.requirePkce must be 'all' or 'public'");
     }
+    const grace = resolved.serviceMesh.rotationGraceSeconds;
+    if (!Number.isInteger(grace) || grace < 0) throw new Error(`config.serviceMesh.rotationGraceSeconds must be an integer >= 0 (got ${grace})`);
     for (const [name, min] of [['recentAuthMaxAgeSeconds', 1], ['absoluteLifetimeSeconds', 1], ['refreshReuseGraceSeconds', 0]]) {
         const value = resolved.session[name];
         if (!Number.isInteger(value) || value < min) throw new Error(`config.session.${name} must be an integer >= ${min} (got ${value})`);

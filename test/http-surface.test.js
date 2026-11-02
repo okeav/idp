@@ -123,12 +123,14 @@ test('CSRF: same-origin requests, the issuer\'s own origin, non-browser clients 
     assert.equal((await fetch(`${app.baseUrl}/me`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${a.accessToken}`, Origin: 'https://evil.example.com' }, body: '{"firstName":"Ok"}' })).status, 200, 'a Bearer header is never attached by a browser on its own');
 });
 
-test('CSRF: the refresh cookie is held to the same rule; a refresh token in the body is not', async () => {
+test('CSRF: /refresh is held to the same rule — with the cookie, and with a token in the body (it sets session cookies)', async () => {
     const u = await user();
     const viaCookie = await fetch(`${app.baseUrl}/refresh`, { method: 'POST', headers: { Cookie: `refresh_token=${u.cookies.refresh_token}`, Origin: 'https://evil.example.com' } });
     assert.equal(viaCookie.status, 403);
+    // A forged form could post the ATTACKER's refresh token and sign the victim in as the attacker.
     const viaBody = await post('/refresh', { refreshToken: u.refreshToken }, { Origin: 'https://evil.example.com' });
-    assert.equal(viaBody.status, 200);
+    assert.equal(viaBody.status, 403);
+    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 200, 'non-browser clients are unaffected');
 });
 
 test('/refresh validates its body (a non-string token was a 500)', async () => {

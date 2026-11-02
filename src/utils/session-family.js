@@ -40,6 +40,16 @@ async function markRevokedInCache(state, jtis) {
 }
 
 /**
+ * The live (unrevoked, unexpired) row for a refresh token, read WITHOUT consuming it — so a refresh
+ * can run every check before it commits. The consume that follows is still the atomic gate.
+ */
+export async function peekRefreshRow(state, tokenHash) {
+    const row = await state.storage.sessionRepository.findByRefreshTokenHash(tokenHash);
+    if (!row || row.revokedAt || !(new Date(row.expiresAt) > new Date())) return null;
+    return row;
+}
+
+/**
  * Called when a refresh token didn't redeem. If it is one that was already rotated — and not within
  * the short `session.refreshReuseGraceSeconds` (two tabs refreshing at once) — revokes its family.
  */

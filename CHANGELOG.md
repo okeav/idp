@@ -59,10 +59,20 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
 - **Pre-registration account takeover (High).** An attacker could register the victim's email with a
   password of their choosing; when the account was later activated — by the victim verifying their
   "own" registration (a repeat registration was silently accepted, keeping the first password), by a
-  magic link, or through SSO — the attacker's password worked. Now: registering an address that is
-  still pending replaces its password and invalidates earlier codes before sending a fresh one;
-  activation by magic link or SSO discards any password (and MFA state) set before the address was
-  proven. SSO never attaches a login method to a locked/suspended/deleted account.
+  magic link, or through SSO — the attacker's password worked. And with the order reversed, an
+  attacker who re-registered right after the victim got the newest email in the victim's inbox to
+  activate the attacker's password. Now each verification code is bound to the password of the
+  registration that sent it; once an address has been registered more than once before verification,
+  `/register/verify-email` also needs that password (`{ email, code, password }`; without it, or
+  with the wrong one, 400 `REGISTRATION_PASSWORD_REQUIRED` and the code stays usable), so the inbox
+  owner activates their own password and another registration's code is useless to them. Login on a
+  pending account answers 401 `INVALID_CREDENTIALS` whatever the password (a distinct "pending"
+  answer told the planted password's owner when someone else registered). The stored HMAC of a code
+  is no longer accepted as the code (the pre-0.4.0 plain-text fallback applies to 6 digits only).
+  Activation by magic link or SSO discards any password (and MFA state) set before the address was
+  proven. SSO never attaches a login method to a locked/suspended/deleted account. **Upgrade:** let
+  your verify-email page send the password when it gets `REGISTRATION_PASSWORD_REQUIRED`; don't rely
+  on login answering `PENDING_VERIFICATION`.
 - **SSO login CSRF, no PKCE, no nonce (Medium).** The SSO `state` was only a cache key, so an
   attacker could start a login with their own provider account and have a victim's browser finish
   it, signing the victim into the attacker's account. `GET /sso/:provider` now also sets a
@@ -95,8 +105,12 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   cookie, or the refresh cookie at `/refresh` and `/logout`) must now come from the issuer's origin
   or one of `cookies.trustedOrigins` (or be `Sec-Fetch-Site: same-origin`); otherwise 403
   `CSRF_ORIGIN_REJECTED`. Requests without `Origin`/`Sec-Fetch-Site` (non-browser clients) and
-  Bearer-authenticated requests are unaffected. **Upgrade:** list your frontends' origins in
-  `cookies.trustedOrigins` (`IDP_COOKIE_TRUSTED_ORIGINS`) if they use cookie sessions.
+  Bearer-authenticated requests are unaffected. The endpoints that *set* session cookies —
+  `/login`, `/refresh`, `/mfa/verify`, `/magic-link/verify`, `/webauthn/authentication/verify`,
+  `/webauthn/mfa/verify` — apply the same check to every browser request (login CSRF: a form on a
+  sibling origin signing the victim into the attacker's account). **Upgrade:** list your frontends'
+  origins in `cookies.trustedOrigins` (`IDP_COOKIE_TRUSTED_ORIGINS`) if they call these endpoints
+  from another origin, cookies or not.
 - **Errors leaked internals.** The error handler shown in the README echoed every error's message
   — database errors naming collections, indexes and values; body-parser errors echoing the request
   body — and `IdpError` had no `status`, so Express's default handler answered 500 for every
@@ -106,7 +120,8 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   validates its body (a non-string token was a 500). **Upgrade:** mount `idpErrorHandler()` after
   the router, or apply the same rule in your own handler.
 - **Token-bearing responses were cacheable.** Every response from the router is now
-  `Cache-Control: no-store`, except the discovery and JWKS documents (now `public, max-age=300`).
+  `Cache-Control: no-store`, except the public documents: JWKS and `/keys/:kid` (`public,
+  max-age=300`), discovery (`ttls.discoveryCache`, default 3600 s) and the services JWKS (60 s).
 - **Self-registration could write `metadata`.** `POST /register` stored a user-supplied object on
   the account and handed it to `resolveAuthContext` — any app that kept a role or tenant there
   granted it to whoever registered. It is now ignored unless `registration.acceptMetadata: true`.
@@ -142,8 +157,10 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   status, or whose private key doesn't match the public key; and a key set with nothing to sign with.
   **Upgrade:** check your secrets and keys meet these before deploying.
 - **Unbounded in-memory stores.** `MemoryCacheAdapter` holds at most `maxEntries` (100k; expired
-  then oldest evicted); `MemoryRateLimiter` at most `maxKeys` (500k) — when full it refuses *new* keys
-  (fail-closed sites answer 503) rather than evicting counters an attacker could flush.
+  then oldest evicted); `MemoryRateLimiter` at most `maxKeys` (500k) — when full it evicts the oldest
+  counters that haven't reached their limit (never an exhausted one, which would release a block),
+  and refuses a new key (503 at fail-closed sites) only if every counter is exhausted. Refusing new
+  keys outright let a flood of distinct keys deny every new client.
 - **Rate-limit keys.** IPv6 clients are keyed by their /64 (one host is routinely given a whole
   /64, which made per-IP limits per *address* meaningless); IPv4-mapped addresses as IPv4.
   Per-address keys use the email's keyed hash instead of the plain address, so Redis and logs no
@@ -183,7 +200,14 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   `serviceMesh.allowedServiceNames` restricts names; new `revokeServiceKey(kid)`. Keys must be RSA
   public keys of ≥ 2048 bits (a private key PEM used to be accepted and *served*); names must match
   `^[a-z0-9][a-z0-9-]{0,62}$`. Secrets are compared in constant time and registration is rate
-  limited (`rateLimiting.serviceKeyRegistration`). **Upgrade:** prefer `bootstrapSecrets`.
+  limited (`rateLimiting.serviceKeyRegistration`). The shared secret cannot register a name listed in
+  `bootstrapSecrets` at all (403) — once that service's key was revoked, it could otherwise claim the
+  name. A revoked key stays revoked: re-registering it (as every service does at boot) answers 409
+  `SERVICE_KEY_REVOKED` instead of re-activating it. A rotated-away key verifies only for
+  `serviceMesh.rotationGraceSeconds` (default 3600), not until some later rotation retires it.
+  **Upgrade:** prefer `bootstrapSecrets`; a service whose key was revoked must generate a new pair.
+  Custom storage: `upsertByKid` must return null for a REVOKED kid; `setStatusByKid` should record
+  `statusChangedAt`; optional `findByKid`.
 - **`tokenMode: 'both'` let a shared-secret caller claim any name (Medium).** The default is now
   `'token'` (also in `configFromEnv`). `requireServiceCallerMiddleware` refuses shared-secret callers
   (their `x-service-name` is unverified) unless `serviceMesh.allowLegacySecretCallers: true`. A
@@ -284,9 +308,35 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   re-checks it after writing its successor.
 - **The `onNewDeviceLogin` alert never fired:** the check ran after the login's own session row was
   written, so the device was always "known". It now runs before.
+- **Five anonymous wrong passwords locked an account out of everything (High).** The failed-password
+  lockout set the account's status to LOCKED, which refresh, magic link, passkeys, SSO, MFA and the
+  OAuth2 grants all refused — and `/refresh` burned the session's token before refusing. An account
+  with no password (SSO / magic link only) stayed locked for good, since only a password login lifted
+  it. The lockout is now a property of password login only (`lockUntil`); the status stays ACTIVE,
+  every other method and existing sessions keep working, and accounts without a password are never
+  counted. Rows locked before 0.4.0 (status LOCKED with a `lockUntil`) are treated the same and
+  normalised on the next sign-in; a LOCKED status *without* `lockUntil` is an administrative lock and
+  still blocks every method (a password reset no longer lifts it).
 - **A locked account told right passwords from wrong ones** (423 vs 401), turning the lockout into
   an oracle. While locked, every password gets the same 401 `INVALID_CREDENTIALS`; a password reset
   lifts the lock.
+- **A failed refresh burned the refresh token.** `/refresh` and the OAuth2 refresh grant consumed the
+  token first, so any refusal or error after that (an inactive account, a throwing
+  `resolveAuthContext`) destroyed it, and the client's retry was then treated as token reuse. All
+  checks now run before the atomic consume.
+- **`/password/change` was an unlimited password oracle (Medium)** for anyone holding a stolen access
+  token. Wrong current passwords now count against `security.passwordChangeLockout` (5 per hour,
+  locked an hour); the attempt that exhausts it, and every one while locked, answers 429
+  `PASSWORD_CHANGE_LOCKED`.
+- **Login timing told which emails exist.** The dummy bcrypt hash compared for unknown (and
+  passwordless) accounts had a fixed cost of 12, so with any other `bcryptRounds` an unknown email was
+  measurably faster or slower. It is now generated at startup with the configured cost.
+  `/password/forgot` and `/register/resend-verification` now answer before looking anything up (the
+  lookup and writes for a real account were measurable too).
+- **An authorization code outlived the sessions and the consent it came from (Medium).** A code
+  minted shortly before "sign out everywhere" (logout-all, password reset/change, account deletion)
+  or before the user withdrew consent — e.g. with a stolen token — still turned into a fresh
+  long-lived OAuth2 session. Such codes are now refused with `INVALID_GRANT`.
 - **Password reset hygiene.** A new reset request invalidates earlier links, a completed reset
   invalidates every outstanding one, deleted accounts are not sent links, and requests are limited
   per address as well as per IP (`rateLimiting.passwordResetByEmail`).

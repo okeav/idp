@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { IDENTITY_STATUS, CACHE_KEY_PREFIXES } from '../config/constants.js';
+import { isActiveAccount } from '../utils/account-status.js';
 import { buildSsoProviders, normalizeUserInfo, exchangeCode, fetchUserInfo, assertAppleIdToken, decodeJwtPayload } from './providers.js';
 import { ssoBindingCookie } from './binding.js';
 import { auditLog } from '../hooks/index.js';
@@ -102,7 +103,7 @@ export async function ssoCallbackHandler(req, res, next) {
 
             const link = { provider, providerId: userInfo.providerId, email: userInfo.email, connectedAt: new Date() };
             const existing = await users.findByEmail(userInfo.email);
-            if (existing?.status === IDENTITY_STATUS.ACTIVE) {
+            if (isActiveAccount(existing)) {
                 await users.linkExternalProvider(existing.id, link);
                 user = await users.findById(existing.id);
                 isNewLink = true;
@@ -112,7 +113,7 @@ export async function ssoCallbackHandler(req, res, next) {
                 // attacker's pre-registration), so it is discarded as the owner claims the account.
                 await users.updateById(existing.id, {
                     status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null,
-                    passwordHash: null, mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [],
+                    passwordHash: null, registrationContested: false, mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [],
                 });
                 await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', existing.id);
                 await users.linkExternalProvider(existing.id, link);
@@ -134,7 +135,7 @@ export async function ssoCallbackHandler(req, res, next) {
             }
         }
 
-        if (user.status !== IDENTITY_STATUS.ACTIVE) {
+        if (!isActiveAccount(user)) {
             state.logger?.warn?.({ userId: user.id, provider, status: user.status }, 'SSO login blocked — account not active');
             return res.redirect(withParams(redirect_uri, { error: 'account_inactive' }));
         }

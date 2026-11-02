@@ -121,6 +121,21 @@ export async function buildTestApp(overrides = {}) {
  * alongside a file-level shared `app` from `before()` — it restores
  * whatever state was active before the temporary app was created.
  */
+/**
+ * Waits until `app.hookCalls[hookName]` holds at least `count` calls matching `predicate`, and returns
+ * the latest match. For hooks fired by work that runs after the response (password reset, resend of
+ * the verification email — see runAfterResponse).
+ */
+export async function waitForHookCall(app, hookName, predicate = () => true, { count = 1, timeoutMs = 5000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const matches = app.hookCalls[hookName].filter(predicate);
+        if (matches.length >= count) return matches.at(-1);
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${count} ${hookName} call(s)`);
+        await new Promise((r) => setTimeout(r, 10));
+    }
+}
+
 export async function withTemporaryApp(overrides, fn) {
     let previousState = null;
     try {

@@ -72,7 +72,7 @@ test('registering with an already-registered email does not reveal that fact', a
     assert.deepEqual(await first.json(), await second.json());
 });
 
-test('login before verifying email is rejected', async () => {
+test('login before verifying email is rejected — with the same answer as a wrong password', async () => {
     const email = uniqueEmail('unverified');
     const password = 'Str0ng!Passw0rd';
     await fetch(`${app.baseUrl}/register`, {
@@ -84,9 +84,11 @@ test('login before verifying email is rejected', async () => {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
     });
-    assert.equal(loginRes.status, 403);
+    // A distinct "pending" answer for the right password would tell whoever registered the address
+    // whether their password is still the current one (see registerHandler).
+    assert.equal(loginRes.status, 401);
     const body = await loginRes.json();
-    assert.equal(body.error, 'PENDING_VERIFICATION');
+    assert.equal(body.error, 'INVALID_CREDENTIALS');
 });
 
 test('verifyAccessToken succeeds on a token this IDP issued', async () => {

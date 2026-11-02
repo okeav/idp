@@ -9,9 +9,12 @@ import { BaseRateLimiter } from './rate-limiter.js';
 export class MemoryRateLimiter extends BaseRateLimiter {
     /**
      * @param {{ sweepIntervalMs?: number, maxKeys?: number }} [opts] - `maxKeys` bounds memory. When full
-     *   (after sweeping expired windows), a NEW key is refused with an error — which the fail-closed call
-     *   sites turn into 503 — rather than evicting another key: eviction would let an attacker flush
-     *   their own counter by flooding distinct keys.
+     *   (after sweeping expired windows), the oldest counters that have NOT reached their limit are
+     *   evicted to make room. Refusing new keys instead turned a flood of distinct keys (one IPv6 /48
+     *   has 65k /64s) into a 503 for every new client — a global lockout. Evicting an exhausted
+     *   counter would release a block, so those are kept; flushing an unexhausted one gives an attacker
+     *   at most one window's worth of attempts back, once per 500k keys sent. Only when every key is
+     *   exhausted is a new key refused (an error, which fail-closed call sites turn into 503).
      */
     constructor({ sweepIntervalMs = 60_000, maxKeys = 500_000 } = {}) {
         super();
@@ -33,9 +36,10 @@ export class MemoryRateLimiter extends BaseRateLimiter {
         if (!entry || entry.resetAt <= now) {
             if (!entry && this._store.size >= this._maxKeys) {
                 this._sweep();
+                if (this._store.size >= this._maxKeys) this._evictUnexhausted();
                 if (this._store.size >= this._maxKeys) throw new Error('MemoryRateLimiter is full (maxKeys) — refusing to track a new key');
             }
-            entry = { count: 0, resetAt: now + windowSeconds * 1000 };
+            entry = { count: 0, max, resetAt: now + windowSeconds * 1000 };
         }
         entry.count += 1;
         this._store.set(key, entry);
@@ -44,6 +48,18 @@ export class MemoryRateLimiter extends BaseRateLimiter {
 
     async reset(key) {
         this._store.delete(key);
+    }
+
+    /** Drops the oldest counters below their limit — a batch, so a full store isn't scanned per request. */
+    _evictUnexhausted() {
+        let toEvict = Math.max(1, Math.ceil(this._maxKeys / 100));
+        for (const [key, entry] of this._store) {
+            if (toEvict === 0) break;
+            if (entry.count < (entry.max ?? Infinity)) {
+                this._store.delete(key);
+                toEvict -= 1;
+            }
+        }
     }
 
     _sweep() {

@@ -1,14 +1,15 @@
 import crypto from 'crypto';
 import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
-import { IDENTITY_STATUS, GRANT_TYPES, CACHE_KEY_PREFIXES, SESSION_KINDS, ACCESS_TOKEN_KINDS } from '../config/constants.js';
+import { GRANT_TYPES, CACHE_KEY_PREFIXES, SESSION_KINDS, ACCESS_TOKEN_KINDS } from '../config/constants.js';
+import { isActiveAccount } from '../utils/account-status.js';
 import { issueOAuth2AccessToken, issueIdToken, hashOpaqueToken, generateOpaqueToken, verifyAccessToken } from '../signing/token.service.js';
 import { sessionKindOf } from '../utils/session-kind.js';
 import { authenticateClient } from './client-auth.js';
 import { auditLog } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey } from '../rate-limit/keys.js';
-import { familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeFamily, assertChainNotRevoked } from '../utils/session-family.js';
+import { familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeFamily, assertChainNotRevoked, peekRefreshRow } from '../utils/session-family.js';
 
 const INVALID_GRANT = (message) => new IdpError({ code: 'INVALID_GRANT', httpStatus: 400, message });
 
@@ -42,6 +43,25 @@ async function handleCodeReuse(state, codeHash) {
     if (!used) return;
     const revokedSessions = await revokeFamily(state, codeFamilyId(used), 'code_reuse_detected');
     await auditLog(state.logger, state.hooks, 'OAUTH2_CODE_REUSE_DETECTED', { userId: String(used.userId), clientId: used.clientId, revokedSessions });
+}
+
+/**
+ * An unredeemed code is a session waiting to happen, so whatever ended the user's sessions or
+ * withdrew the grant since it was issued must end it too: a code issued before "sign out everywhere"
+ * (logout-all, password reset/change, account deletion), or before the user's consent to this client
+ * was revoked — or revoked and granted again — is refused. Otherwise a code minted with a stolen token
+ * shortly before the victim reset their password still turns into a fresh, long-lived session.
+ */
+async function assertCodeStillAuthorized(state, user, authCode) {
+    const issuedAt = authCode.createdAt ? new Date(authCode.createdAt) : null;
+    const revokedAt = user.sessionsRevokedAt ? new Date(user.sessionsRevokedAt) : null;
+    if (issuedAt && revokedAt && revokedAt >= issuedAt) throw INVALID_GRANT('Authorization code was revoked');
+
+    const consent = await state.storage.consentRepository.find(user.id, authCode.clientId);
+    const live = consent && !(consent.expiresAt && new Date(consent.expiresAt) <= new Date());
+    const covered = live && (authCode.scopes || []).every((s) => (consent.scopes || []).includes(s));
+    const grantedAt = consent?.grantedAt ? new Date(consent.grantedAt) : null;
+    if (!covered || (issuedAt && grantedAt && grantedAt > issuedAt)) throw INVALID_GRANT('Authorization code was revoked');
 }
 
 /** A client must be explicitly registered for the grant it's trying to use — `allowedGrants` isn't decorative. */
@@ -97,7 +117,8 @@ async function handleAuthorizationCodeGrant(req, res) {
     verifyPkce(code_verifier, authCode);
 
     const user = await state.storage.userRepository.findById(authCode.userId);
-    if (!user || user.status !== IDENTITY_STATUS.ACTIVE) throw INVALID_GRANT('User account is not active');
+    if (!isActiveAccount(user)) throw INVALID_GRANT('User account is not active');
+    await assertCodeStillAuthorized(state, user, authCode);
 
     const scopes = authCode.scopes || [];
     const accessTokenResult = await issueOAuth2AccessToken(state, user, client, scopes);
@@ -141,29 +162,37 @@ async function handleRefreshTokenGrant(req, res) {
     const client = await authenticateClient(state, req);
     assertGrantAllowed(client, GRANT_TYPES.REFRESH_TOKEN);
     const tokenHash = hashOpaqueToken(state, refresh_token);
+    // Every check runs before the token is consumed, so a refusal doesn't burn it (see /refresh).
+    const row = await peekRefreshRow(state, tokenHash);
+    if (!row) {
+        await handleRefreshReuse(state, tokenHash);
+        throw INVALID_GRANT('Invalid or expired refresh token');
+    }
+    // RFC 6749 §6: a refresh token is bound to the client it was issued to. A first-party login's
+    // refresh token, or another client's, is refused — and revoked, since presenting it here means
+    // it leaked.
+    if (sessionKindOf(row) !== SESSION_KINDS.OAUTH2 || row.claims?.clientId !== client.clientId) {
+        await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash, { reason: 'misused' });
+        state.logger?.warn?.({ clientId: client.clientId }, 'Refresh token presented by a client it was not issued to — refused and revoked');
+        throw INVALID_GRANT('Invalid or expired refresh token');
+    }
+
+    const user = await state.storage.userRepository.findById(row.user);
+    if (!isActiveAccount(user)) throw INVALID_GRANT('User account is not active');
+
+    // Refreshing must never grant more than the user originally consented to — narrow the
+    // originally-granted scopes to whatever the client is still allowed, don't recompute from scratch.
+    const grantedScopes = row.claims?.scopes || [];
+    const allowedScopes = new Set(client.allowedScopes || []);
+    const scopes = grantedScopes.filter((s) => allowedScopes.has(s));
+    const { familyId, familyCreatedAt } = familyOf(row);
+    if (familyEndsAt(state, familyCreatedAt) <= new Date()) throw INVALID_GRANT('Refresh token has reached its maximum lifetime');
+
     const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash, { reason: 'rotated' });
     if (!existing) {
         await handleRefreshReuse(state, tokenHash);
         throw INVALID_GRANT('Invalid or expired refresh token');
     }
-    // RFC 6749 §6: a refresh token is bound to the client it was issued to. A first-party login's
-    // refresh token, or another client's, is refused — and stays revoked (consumed above), since
-    // presenting it here means it leaked.
-    if (sessionKindOf(existing) !== SESSION_KINDS.OAUTH2 || existing.claims?.clientId !== client.clientId) {
-        state.logger?.warn?.({ clientId: client.clientId }, 'Refresh token presented by a client it was not issued to — refused and revoked');
-        throw INVALID_GRANT('Invalid or expired refresh token');
-    }
-
-    const user = await state.storage.userRepository.findById(existing.user);
-    if (!user || user.status !== IDENTITY_STATUS.ACTIVE) throw INVALID_GRANT('User account is not active');
-
-    // Refreshing must never grant more than the user originally consented to — narrow the
-    // originally-granted scopes to whatever the client is still allowed, don't recompute from scratch.
-    const grantedScopes = existing.claims?.scopes || [];
-    const allowedScopes = new Set(client.allowedScopes || []);
-    const scopes = grantedScopes.filter((s) => allowedScopes.has(s));
-    const { familyId, familyCreatedAt } = familyOf(existing);
-    if (familyEndsAt(state, familyCreatedAt) <= new Date()) throw INVALID_GRANT('Refresh token has reached its maximum lifetime');
 
     const accessTokenResult = await issueOAuth2AccessToken(state, user, client, scopes);
     const newRefreshTokenValue = generateOpaqueToken();
