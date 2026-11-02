@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { KEY_STATUS } from '../config/constants.js';
 
 /**
@@ -24,8 +25,46 @@ export function buildKeyRegistry(keysConfig = {}) {
             publicKeyPem: resolveKeyMaterial(entry.publicKey),
             status: entry.status || KEY_STATUS.ACTIVE,
         };
+        assertUsableKey(kid, registry[kid]);
     }
     return registry;
+}
+
+/** Startup check: the IdP must be able to sign — at least one ACTIVE (or ROTATING) key with its private key. */
+export function assertCanSign(registry) {
+    if (!Object.values(registry).some((k) => k.privateKeyPem && [KEY_STATUS.ACTIVE, KEY_STATUS.ROTATING].includes(k.status))) {
+        throw new Error('config.signingKeys: at least one ACTIVE (or ROTATING) key needs a privateKey to sign with');
+    }
+}
+
+const MIN_RSA_BITS = 2048;
+
+/**
+ * Fails at startup — not at the first login — on a signing key that can't work or isn't safe: an
+ * unparseable PEM, a non-RSA key (tokens are RS256), one under 2048 bits, an unknown status, or a
+ * private key that doesn't belong to its public key.
+ */
+function assertUsableKey(kid, { privateKeyPem, publicKeyPem, status }) {
+    const where = `config.signingKeys.keys["${kid}"]`;
+    if (!Object.values(KEY_STATUS).includes(status)) throw new Error(`${where}.status must be one of ${Object.values(KEY_STATUS).join(', ')}`);
+    let publicKey;
+    try {
+        publicKey = crypto.createPublicKey(publicKeyPem);
+    } catch {
+        throw new Error(`${where}.publicKey is not a valid public key (PEM, or base64-encoded PEM)`);
+    }
+    if (publicKey.asymmetricKeyType !== 'rsa') throw new Error(`${where} must be an RSA key (tokens are signed RS256)`);
+    if ((publicKey.asymmetricKeyDetails?.modulusLength ?? 0) < MIN_RSA_BITS) throw new Error(`${where} must be at least ${MIN_RSA_BITS} bits`);
+    if (!privateKeyPem) return;
+    let privateKey;
+    try {
+        privateKey = crypto.createPrivateKey(privateKeyPem);
+    } catch {
+        throw new Error(`${where}.privateKey is not a valid private key (PEM, or base64-encoded PEM)`);
+    }
+    const probe = Buffer.from(`idp-key-check:${kid}`);
+    const signature = crypto.sign('sha256', probe, privateKey);
+    if (!crypto.verify('sha256', probe, publicKey, signature)) throw new Error(`${where}: privateKey and publicKey are not a pair`);
 }
 
 const PUBLISHABLE_STATUSES = [KEY_STATUS.ACTIVE, KEY_STATUS.ROTATING];

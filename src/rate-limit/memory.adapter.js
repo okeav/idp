@@ -7,8 +7,15 @@ import { BaseRateLimiter } from './rate-limiter.js';
  * instance would enforce its own independent limit).
  */
 export class MemoryRateLimiter extends BaseRateLimiter {
-    constructor({ sweepIntervalMs = 60_000 } = {}) {
+    /**
+     * @param {{ sweepIntervalMs?: number, maxKeys?: number }} [opts] - `maxKeys` bounds memory. When full
+     *   (after sweeping expired windows), a NEW key is refused with an error — which the fail-closed call
+     *   sites turn into 503 — rather than evicting another key: eviction would let an attacker flush
+     *   their own counter by flooding distinct keys.
+     */
+    constructor({ sweepIntervalMs = 60_000, maxKeys = 500_000 } = {}) {
         super();
+        this._maxKeys = maxKeys;
         this._store = new Map(); // key -> { count, resetAt }
         this._sweepInterval = setInterval(() => this._sweep(), sweepIntervalMs);
         this._sweepInterval.unref?.();
@@ -24,6 +31,10 @@ export class MemoryRateLimiter extends BaseRateLimiter {
         const now = Date.now();
         let entry = this._store.get(key);
         if (!entry || entry.resetAt <= now) {
+            if (!entry && this._store.size >= this._maxKeys) {
+                this._sweep();
+                if (this._store.size >= this._maxKeys) throw new Error('MemoryRateLimiter is full (maxKeys) — refusing to track a new key');
+            }
             entry = { count: 0, resetAt: now + windowSeconds * 1000 };
         }
         entry.count += 1;

@@ -63,7 +63,8 @@ export class RedisCacheAdapter extends BaseCacheAdapter {
  * Constructs an ioredis client and wraps it. Dynamically imports `ioredis`
  * so it's never required unless this factory is actually called.
  */
-export async function createRedisCacheAdapter({ host, port, password, db = 0, keepAliveMs = 10_000 } = {}) {
+export async function createRedisCacheAdapter({ host, port, username, password, db = 0, tls, keepAliveMs = 10_000 } = {}) {
+    if (!host) throw new Error('Cache adapter "redis" needs config.cache.redis.host');
     let IORedis;
     try {
         ({ default: IORedis } = await import('ioredis'));
@@ -77,8 +78,12 @@ export async function createRedisCacheAdapter({ host, port, password, db = 0, ke
     const redis = new IORedis({
         host,
         port,
+        username,
         password,
         db,
+        // Managed Redis (and anything off the local network) should be reached over TLS: pass
+        // `tls: true` or ioredis TLS options.
+        ...(tls ? { tls: tls === true ? {} : tls } : {}),
         lazyConnect: true,
         maxRetriesPerRequest: 3,
         keepAlive: keepAliveMs,

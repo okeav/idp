@@ -61,6 +61,9 @@ export function defineIdentityUserModel(connection, { hashEmail }) {
     );
 
     schema.index({ status: 1 });
+    // findByEmail matches `emailHash` OR `email` (rows from before the blind index): without this index
+    // the `email` branch of that $or scans the whole collection on every login.
+    schema.index({ email: 1 });
     schema.index({ lockUntil: 1 }, { sparse: true });
 
     schema.pre('save', function () {

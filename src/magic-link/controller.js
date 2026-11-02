@@ -4,6 +4,7 @@ import { IDENTITY_STATUS } from '../config/constants.js';
 import { hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
 import { auditLog, auditLogDetached, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { ipKey } from '../rate-limit/keys.js';
 import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus, mfaChallengeResponse } from '../password-auth/controllers.js';
 
 /**
@@ -23,7 +24,7 @@ export async function requestMagicLinkHandler(req, res, next) {
         const state = getState();
         const { email } = req.body;
 
-        await enforceRateLimit(state, `magic-link:ip:${req.ip}`, state.config.rateLimiting.magicLink, { failMode: 'closed' });
+        await enforceRateLimit(state, `magic-link:ip:${ipKey(req.ip)}`, state.config.rateLimiting.magicLink, { failMode: 'closed' });
 
         let user = await state.storage.userRepository.findByEmail(email);
         let isNewUser = false;

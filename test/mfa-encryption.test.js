@@ -292,7 +292,7 @@ async function tryInit(mfa) {
             issuer: 'https://startup.test.local',
             storage: { factory: async () => fakeStorage() },
             signingKeys: { keys: { k: { privateKey, publicKey, status: 'ACTIVE' } } },
-            security: { emailHashPepper: 'p', tokenHashSecret: 's' },
+            security: { emailHashPepper: 'p'.repeat(32), tokenHashSecret: 's'.repeat(32) },
             logger: { info() {}, warn: (_o, msg) => warnings.push(msg), error() {}, debug() {} },
             ...(mfa === undefined ? {} : { mfa }),
         });

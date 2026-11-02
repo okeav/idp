@@ -19,8 +19,8 @@ function baseConfig(overrides = {}) {
         issuer: 'https://storage-seam.test.local',
         signingKeys: { keys: { 'seam-test-kid': { privateKey, publicKey, status: 'ACTIVE' } } },
         security: {
-            emailHashPepper: 'seam-test-pepper',
-            tokenHashSecret: 'seam-test-token-secret',
+            emailHashPepper: 'seam-test-pepper-0123456789abcdef',
+            tokenHashSecret: 'seam-test-token-secret-0123456789ab',
         },
         mfa: { encryptionKey: Buffer.alloc(32, 3).toString('base64') },
         logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },

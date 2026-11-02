@@ -8,6 +8,7 @@ import { auditLog } from '../hooks/index.js';
 import { verifyStoredCredentialAssertion } from './shared.js';
 import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus } from '../password-auth/controllers.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { ipKey } from '../rate-limit/keys.js';
 
 /**
  * Primary/passwordless login — no prior session or password required. This
@@ -49,7 +50,7 @@ const VERIFICATION_FAILED = (message = 'WebAuthn assertion verification failed')
 export async function generateAuthenticationOptionsHandler(req, res, next) {
     try {
         const state = getState();
-        await enforceRateLimit(state, `webauthn-authn:ip:${req.ip}`, state.config.rateLimiting.webauthnAuthentication, { failMode: 'closed' });
+        await enforceRateLimit(state, `webauthn-authn:ip:${ipKey(req.ip)}`, state.config.rateLimiting.webauthnAuthentication, { failMode: 'closed' });
         const { rpID } = getWebauthnConfig(state);
         const { email } = req.body || {};
 
@@ -81,7 +82,7 @@ function decoyCredentialId(state, email) {
 export async function verifyAuthenticationHandler(req, res, next) {
     try {
         const state = getState();
-        await enforceRateLimit(state, `webauthn-authn:ip:${req.ip}`, state.config.rateLimiting.webauthnAuthentication, { failMode: 'closed' });
+        await enforceRateLimit(state, `webauthn-authn:ip:${ipKey(req.ip)}`, state.config.rateLimiting.webauthnAuthentication, { failMode: 'closed' });
         const { response } = req.body;
 
         const challenge = decodeChallengeFromResponse(response);

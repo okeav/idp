@@ -5,6 +5,7 @@ import { CACHE_KEY_PREFIXES } from '../config/constants.js';
 import { buildSsoProviders, isAllowedRedirectUri } from './providers.js';
 import { auditLog } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { ipKey } from '../rate-limit/keys.js';
 import { ssoBindingCookie } from './binding.js';
 
 const RESERVED_QUERY_KEYS = new Set(['redirect_uri']);
@@ -44,7 +45,7 @@ const sha256b64url = (s) => crypto.createHash('sha256').update(s).digest('base64
 export async function initiateSsoHandler(req, res, next) {
     try {
         const state = getState();
-        await enforceRateLimit(state, `sso-initiate:ip:${req.ip}`, state.config.rateLimiting.ssoInitiate, { failMode: 'closed' });
+        await enforceRateLimit(state, `sso-initiate:ip:${ipKey(req.ip)}`, state.config.rateLimiting.ssoInitiate, { failMode: 'closed' });
 
         const { provider } = req.params;
         const q = req.validatedQuery || req.query;

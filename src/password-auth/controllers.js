@@ -9,6 +9,7 @@ import { buildDeviceFingerprint, notifyNewDevice } from '../utils/device-fingerp
 import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked } from '../utils/session-family.js';
 import { auditLog, auditLogDetached, safeInvokeHook, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { ipKey, emailKey } from '../rate-limit/keys.js';
 import { withAttemptBudget } from '../security/attempt-budget.js';
 
 function cookieOptions(state) {
@@ -111,8 +112,8 @@ export async function registerHandler(req, res, next) {
         const state = getState();
         const { email, password, firstName, lastName, metadata } = req.body;
 
-        await enforceRateLimit(state, `register:ip:${req.ip}`, state.config.rateLimiting.register, { failMode: 'closed' });
-        await enforceRateLimit(state, `verification-email:${state.normalizeEmail(email)}`, state.config.rateLimiting.verificationEmailByEmail, { failMode: 'closed' });
+        await enforceRateLimit(state, `register:ip:${ipKey(req.ip)}`, state.config.rateLimiting.register, { failMode: 'closed' });
+        await enforceRateLimit(state, `verification-email:${emailKey(state, email)}`, state.config.rateLimiting.verificationEmailByEmail, { failMode: 'closed' });
 
         // Hashed on every path, so timing doesn't leak whether the email was new.
         const passwordHash = await hashPassword(password, state.config.security.bcryptRounds);
@@ -180,7 +181,7 @@ export async function verifyEmailHandler(req, res, next) {
         const state = getState();
         const { email, token, code } = req.body;
 
-        await enforceRateLimit(state, `email-verification:ip:${req.ip}`, state.config.rateLimiting.emailVerification, { failMode: 'closed' });
+        await enforceRateLimit(state, `email-verification:ip:${ipKey(req.ip)}`, state.config.rateLimiting.emailVerification, { failMode: 'closed' });
 
         // One answer for an unknown address, an already-verified one, and a wrong code — none of
         // them may reveal whether an account exists.
@@ -221,8 +222,8 @@ export async function resendVerificationEmailHandler(req, res, next) {
         const state = getState();
         const { email } = req.body;
 
-        await enforceRateLimit(state, `register:ip:${req.ip}`, state.config.rateLimiting.register, { failMode: 'closed' });
-        await enforceRateLimit(state, `verification-email:${state.normalizeEmail(email)}`, state.config.rateLimiting.verificationEmailByEmail, { failMode: 'closed' });
+        await enforceRateLimit(state, `register:ip:${ipKey(req.ip)}`, state.config.rateLimiting.register, { failMode: 'closed' });
+        await enforceRateLimit(state, `verification-email:${emailKey(state, email)}`, state.config.rateLimiting.verificationEmailByEmail, { failMode: 'closed' });
 
         // Same answer for unknown, already-verified and pending addresses (enumeration-safe).
         const user = await state.storage.userRepository.findByEmail(email);
@@ -249,8 +250,8 @@ export async function loginHandler(req, res, next) {
         const state = getState();
         const { email, password } = req.body;
 
-        await enforceRateLimit(state, `login:ip:${req.ip}`, state.config.rateLimiting.login, { failMode: 'closed' });
-        await enforceRateLimit(state, `login:email:${state.normalizeEmail(email)}`, state.config.rateLimiting.loginByEmail, { failMode: 'closed' });
+        await enforceRateLimit(state, `login:ip:${ipKey(req.ip)}`, state.config.rateLimiting.login, { failMode: 'closed' });
+        await enforceRateLimit(state, `login:email:${emailKey(state, email)}`, state.config.rateLimiting.loginByEmail, { failMode: 'closed' });
 
         let user = await state.storage.userRepository.findByEmail(email, { select: '+passwordHash' });
 
@@ -347,7 +348,7 @@ function assertUsableStatus(user) {
 export async function refreshTokenHandler(req, res, next) {
     try {
         const state = getState();
-        await enforceRateLimit(state, `refresh:ip:${req.ip}`, state.config.rateLimiting.refreshToken);
+        await enforceRateLimit(state, `refresh:ip:${ipKey(req.ip)}`, state.config.rateLimiting.refreshToken);
 
         const refreshTokenValue = req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN] || req.body?.refreshToken;
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required' });
@@ -460,9 +461,9 @@ export async function forgotPasswordHandler(req, res, next) {
         const state = getState();
         const { email } = req.body;
 
-        await enforceRateLimit(state, `password-reset:ip:${req.ip}`, state.config.rateLimiting.passwordReset, { failMode: 'closed' });
+        await enforceRateLimit(state, `password-reset:ip:${ipKey(req.ip)}`, state.config.rateLimiting.passwordReset, { failMode: 'closed' });
         // Per address too: per-IP alone lets a distributed sender flood one inbox.
-        await enforceRateLimit(state, `password-reset:email:${state.normalizeEmail(email)}`, state.config.rateLimiting.passwordResetByEmail, { failMode: 'closed' });
+        await enforceRateLimit(state, `password-reset:email:${emailKey(state, email)}`, state.config.rateLimiting.passwordResetByEmail, { failMode: 'closed' });
 
         const user = await state.storage.userRepository.findByEmail(email);
         if (!user || user.status === IDENTITY_STATUS.DELETED) return res.json({ status: 'ok' }); // enumeration-safe

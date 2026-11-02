@@ -76,7 +76,7 @@ export interface IdpConfig {
     cache?: {
         adapter?: 'memory' | 'redis';
         keyPrefix?: string;
-        redis?: { host: string; port: number; password?: string; db?: number; keepAliveMs?: number };
+        redis?: { host: string; port: number; username?: string; password?: string; db?: number; tls?: boolean | Record<string, unknown>; keepAliveMs?: number };
     };
     signingKeys: { keys: Record<string, SigningKeyEntry> };
     cookies?: { secure?: boolean; sameSite?: 'lax' | 'strict' | 'none'; domain?: string };
@@ -116,11 +116,16 @@ export interface IdpConfig {
         ssoState: number; ssoExchange: number; discoveryCache: number; webauthnChallenge: number;
     }>;
     security: {
+        /** Random, at least 32 characters (checked at startup). Never rotate — it keys the email lookup index. */
         emailHashPepper: string;
+        /** Random, at least 32 characters (checked at startup). Keys every stored token hash. */
         tokenHashSecret: string;
         maxFailedLoginAttempts?: number;
         accountLockDurationMs?: number;
+        /** Integer 10-15 (default 12). */
         bcryptRounds?: number;
+        /** Tests only: allow bcryptRounds down to 4. */
+        allowWeakBcryptRounds?: boolean;
         /**
          * Per-account limit on wrong email-verification codes/tokens. When used up, every outstanding
          * code for the account is deleted (the owner requests a new one). Defaults: 5 in 3600s, locked 900s.
@@ -211,7 +216,7 @@ export interface IdpConfig {
         adapter?: 'memory' | 'redis';
         keyPrefix?: string;
         /** Only read if adapter === 'redis'; omit to reuse cache.adapter's Redis connection when that's also 'redis'. */
-        redis?: { host: string; port: number; password?: string; db?: number };
+        redis?: { host: string; port: number; username?: string; password?: string; db?: number; tls?: boolean | Record<string, unknown> };
         login?: RateLimitRule;
         loginByEmail?: RateLimitRule;
         passwordReset?: RateLimitRule;
@@ -537,7 +542,8 @@ export interface CacheAdapter {
     take(key: string): Promise<unknown | null>;
 }
 export class MemoryCacheAdapter implements CacheAdapter {
-    constructor(opts?: { sweepIntervalMs?: number });
+    /** `maxEntries` (default 100000): when full, expired then oldest entries are evicted. */
+    constructor(opts?: { sweepIntervalMs?: number; maxEntries?: number });
     get(key: string): Promise<unknown | null>;
     set(key: string, value: unknown, ttlSeconds?: number): Promise<void>;
     del(key: string): Promise<void>;
@@ -574,7 +580,8 @@ export interface RateLimiter {
     reset(key: string): Promise<void>;
 }
 export class MemoryRateLimiter implements RateLimiter {
-    constructor(opts?: { sweepIntervalMs?: number });
+    /** `maxKeys` (default 500000): when full, a NEW key is refused (an error — fail-closed call sites answer 503). */
+    constructor(opts?: { sweepIntervalMs?: number; maxKeys?: number });
     check(key: string): Promise<RateLimitResult>;
     increment(key: string, opts: { max: number; windowSeconds: number }): Promise<RateLimitResult>;
     reset(key: string): Promise<void>;

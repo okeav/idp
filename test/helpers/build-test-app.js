@@ -167,6 +167,7 @@ export const TEST_SECURITY = Object.freeze({
     emailHashPepper: 'test-email-pepper-do-not-use-in-prod',
     tokenHashSecret: 'test-token-hash-secret-do-not-use-in-prod',
     bcryptRounds: 4, // fast for tests
+    allowWeakBcryptRounds: true,
 });
 
 /**

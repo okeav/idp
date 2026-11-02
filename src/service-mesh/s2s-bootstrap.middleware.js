@@ -2,6 +2,7 @@ import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { safeEqualSecret } from '../utils/safe-equal.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { ipKey } from '../rate-limit/keys.js';
 
 /**
  * Bootstrap gate for `registerServiceKeyHandler`. A service can't mint an S2S JWT before its key is
@@ -15,7 +16,7 @@ import { enforceRateLimit } from '../rate-limit/enforce.js';
 export async function s2sBootstrapMiddleware(req, _res, next) {
     try {
         const state = getState();
-        await enforceRateLimit(state, `s2s-bootstrap:ip:${req.ip}`, state.config.rateLimiting.serviceKeyRegistration, { failMode: 'closed' });
+        await enforceRateLimit(state, `s2s-bootstrap:ip:${ipKey(req.ip)}`, state.config.rateLimiting.serviceKeyRegistration, { failMode: 'closed' });
 
         const presented = req.headers['x-s2s-bootstrap-secret'];
         const name = req.body?.name;

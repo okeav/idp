@@ -14,9 +14,16 @@ import { BaseCacheAdapter } from './cache-adapter.js';
  *      the redirect will spuriously fail.
  */
 export class MemoryCacheAdapter extends BaseCacheAdapter {
-    constructor({ sweepIntervalMs = 60_000 } = {}) {
+    /**
+     * @param {{ sweepIntervalMs?: number, maxEntries?: number }} [opts] - `maxEntries` bounds memory: when
+     *   full, expired entries are swept and then the oldest entries evicted. (Revocation is decided by the
+     *   session store when `session.verifyOnEachRequest` is on, so an evicted marker costs a fast path,
+     *   not a revocation.)
+     */
+    constructor({ sweepIntervalMs = 60_000, maxEntries = 100_000 } = {}) {
         super();
-        this._store = new Map(); // key -> { value, expiresAt: number|null }
+        this._maxEntries = maxEntries;
+        this._store = new Map(); // key -> { value, expiresAt: number|null } — insertion order = age
         this._sweepInterval = setInterval(() => this._sweep(), sweepIntervalMs);
         this._sweepInterval.unref?.();
     }
@@ -33,7 +40,16 @@ export class MemoryCacheAdapter extends BaseCacheAdapter {
 
     async set(key, value, ttlSeconds) {
         const expiresAt = ttlSeconds ? Date.now() + ttlSeconds * 1000 : null;
+        this._store.delete(key); // re-inserting moves the key to the "newest" end
+        if (this._store.size >= this._maxEntries) this._makeRoom();
         this._store.set(key, { value, expiresAt });
+    }
+
+    _makeRoom() {
+        this._sweep();
+        while (this._store.size >= this._maxEntries) {
+            this._store.delete(this._store.keys().next().value);
+        }
     }
 
     async del(key) {

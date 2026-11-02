@@ -7,6 +7,7 @@ import { sessionKindOf } from '../utils/session-kind.js';
 import { authenticateClient } from './client-auth.js';
 import { auditLog } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { ipKey } from '../rate-limit/keys.js';
 import { familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeFamily, assertChainNotRevoked } from '../utils/session-family.js';
 
 const INVALID_GRANT = (message) => new IdpError({ code: 'INVALID_GRANT', httpStatus: 400, message });
@@ -57,7 +58,7 @@ function noStore(res) {
 }
 
 async function limitTokenEndpoint(state, req) {
-    await enforceRateLimit(state, `oauth2-token:ip:${req.ip}`, state.config.rateLimiting.oauth2Token, { failMode: 'closed' });
+    await enforceRateLimit(state, `oauth2-token:ip:${ipKey(req.ip)}`, state.config.rateLimiting.oauth2Token, { failMode: 'closed' });
 }
 
 /** POST /oauth2/token */

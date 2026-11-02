@@ -7,9 +7,37 @@
  *
  * @param {NodeJS.ProcessEnv} [env]
  */
+const TRUE_VALUES = new Set(['true', '1', 'yes', 'on']);
+const FALSE_VALUES = new Set(['false', '0', 'no', 'off']);
+
+/**
+ * Strict parsing: an unset or blank variable means "use the default"; anything else must be a
+ * recognisable value or startup fails. Before 0.4.0 only the exact string "true" was true, so
+ * `IDP_COOKIE_SECURE=1` (or a blank `IDP_COOKIE_SECURE=`) silently turned secure cookies OFF, and a
+ * non-numeric `IDP_MAX_FAILED_LOGIN_ATTEMPTS` became NaN, disabling account lockout.
+ */
+function parseBool(env, name, fallback) {
+    const raw = env[name];
+    if (raw === undefined || raw.trim() === '') return fallback;
+    const v = raw.trim().toLowerCase();
+    if (TRUE_VALUES.has(v)) return true;
+    if (FALSE_VALUES.has(v)) return false;
+    throw new Error(`${name} must be true/false (or 1/0, yes/no, on/off) — got "${raw}"`);
+}
+
+function parseInteger(env, name, fallback, { min = 0 } = {}) {
+    const raw = env[name];
+    if (raw === undefined || raw.trim() === '') return fallback;
+    const n = Number(raw.trim());
+    if (!Number.isInteger(n) || n < min) throw new Error(`${name} must be an integer >= ${min} — got "${raw}"`);
+    return n;
+}
+
+const list = (raw) => (raw || '').split(',').map((x) => x.trim()).filter(Boolean);
+
 export function configFromEnv(env = process.env) {
-    const bool = (v, fallback) => (v === undefined ? fallback : v === 'true');
-    const num = (v, fallback) => (v === undefined || v === '' ? fallback : Number(v));
+    const bool = (name, fallback) => parseBool(env, name, fallback);
+    const int = (name, fallback, opts) => parseInteger(env, name, fallback, opts);
 
     const signingKeys = { keys: {} };
     if (env.IDP_SIGNING_KEY_CURRENT_KID) {
@@ -33,50 +61,63 @@ export function configFromEnv(env = process.env) {
         cache: {
             adapter: env.IDP_CACHE_ADAPTER || 'memory',
             keyPrefix: env.IDP_CACHE_KEY_PREFIX || 'idp:',
-            redis: { host: env.IDP_REDIS_HOST, port: num(env.IDP_REDIS_PORT, 6379), password: env.IDP_REDIS_PASSWORD || undefined },
+            redis: { host: env.IDP_REDIS_HOST, port: int('IDP_REDIS_PORT', 6379, { min: 1 }), username: env.IDP_REDIS_USERNAME || undefined, password: env.IDP_REDIS_PASSWORD || undefined, tls: bool('IDP_REDIS_TLS', false) },
         },
         signingKeys,
         cookies: {
-            secure: bool(env.IDP_COOKIE_SECURE, env.NODE_ENV !== 'development'),
+            secure: bool('IDP_COOKIE_SECURE', env.NODE_ENV !== 'development'),
             sameSite: env.IDP_COOKIE_SAME_SITE || 'lax',
             domain: env.IDP_COOKIE_DOMAIN || undefined,
         },
         security: {
-            maxFailedLoginAttempts: num(env.IDP_MAX_FAILED_LOGIN_ATTEMPTS, 5),
-            accountLockDurationMs: num(env.IDP_ACCOUNT_LOCK_DURATION_MS, 30 * 60 * 1000),
-            bcryptRounds: num(env.IDP_BCRYPT_ROUNDS, 12),
+            maxFailedLoginAttempts: int('IDP_MAX_FAILED_LOGIN_ATTEMPTS', 5, { min: 1 }),
+            accountLockDurationMs: int('IDP_ACCOUNT_LOCK_DURATION_MS', 30 * 60 * 1000, { min: 1000 }),
+            bcryptRounds: int('IDP_BCRYPT_ROUNDS', 12, { min: 10 }),
             emailHashPepper: env.IDP_EMAIL_HASH_PEPPER,
             tokenHashSecret: env.IDP_TOKEN_HASH_SECRET,
         },
         mfa: {
             issuerLabel: env.IDP_MFA_ISSUER_LABEL || 'App',
-            recoveryCodeCount: num(env.IDP_MFA_RECOVERY_CODE_COUNT, 10),
-            enabled: bool(env.IDP_MFA_ENABLED, true),
+            recoveryCodeCount: int('IDP_MFA_RECOVERY_CODE_COUNT', 10, { min: 1 }),
+            enabled: bool('IDP_MFA_ENABLED', true),
             encryptionKey: env.IDP_MFA_ENCRYPTION_KEY || undefined,
             previousEncryptionKeys: (env.IDP_MFA_PREVIOUS_ENCRYPTION_KEYS || '').split(',').map((k) => k.trim()).filter(Boolean),
-            requireEncrypted: bool(env.IDP_MFA_REQUIRE_ENCRYPTED, false),
-            allowPlaintext: bool(env.IDP_MFA_ALLOW_PLAINTEXT, false),
+            requireEncrypted: bool('IDP_MFA_REQUIRE_ENCRYPTED', false),
+            allowPlaintext: bool('IDP_MFA_ALLOW_PLAINTEXT', false),
         },
         session: {
-            verifyOnEachRequest: bool(env.IDP_SESSION_VERIFY_ON_EACH_REQUEST, true),
+            verifyOnEachRequest: bool('IDP_SESSION_VERIFY_ON_EACH_REQUEST', true),
         },
         oauthProviders: {
             google: env.IDP_SSO_GOOGLE_CLIENT_ID ? { clientId: env.IDP_SSO_GOOGLE_CLIENT_ID, clientSecret: env.IDP_SSO_GOOGLE_CLIENT_SECRET } : undefined,
-            microsoft: env.IDP_SSO_MICROSOFT_CLIENT_ID ? { clientId: env.IDP_SSO_MICROSOFT_CLIENT_ID, clientSecret: env.IDP_SSO_MICROSOFT_CLIENT_SECRET, tenant: env.IDP_SSO_MICROSOFT_TENANT || 'common' } : undefined,
+            microsoft: env.IDP_SSO_MICROSOFT_CLIENT_ID ? { clientId: env.IDP_SSO_MICROSOFT_CLIENT_ID, clientSecret: env.IDP_SSO_MICROSOFT_CLIENT_SECRET, tenant: env.IDP_SSO_MICROSOFT_TENANT || 'common', trustEmail: bool('IDP_SSO_MICROSOFT_TRUST_EMAIL', false) } : undefined,
             github: env.IDP_SSO_GITHUB_CLIENT_ID ? { clientId: env.IDP_SSO_GITHUB_CLIENT_ID, clientSecret: env.IDP_SSO_GITHUB_CLIENT_SECRET } : undefined,
             apple: env.IDP_SSO_APPLE_CLIENT_ID ? { clientId: env.IDP_SSO_APPLE_CLIENT_ID, teamId: env.IDP_SSO_APPLE_TEAM_ID, keyId: env.IDP_SSO_APPLE_KEY_ID, privateKeyPem: env.IDP_SSO_APPLE_PRIVATE_KEY_B64 } : undefined,
             linkedin: env.IDP_SSO_LINKEDIN_CLIENT_ID ? { clientId: env.IDP_SSO_LINKEDIN_CLIENT_ID, clientSecret: env.IDP_SSO_LINKEDIN_CLIENT_SECRET } : undefined,
         },
+        sso: {
+            baseCallbackUrl: env.IDP_SSO_BASE_CALLBACK_URL || undefined,
+            allowedRedirectOrigins: list(env.IDP_SSO_ALLOWED_REDIRECT_ORIGINS),
+        },
         serviceMesh: {
-            bootstrapSecret: env.IDP_S2S_BOOTSTRAP_SECRET,
+            bootstrapSecret: env.IDP_S2S_BOOTSTRAP_SECRET || undefined,
+            // "billing=secret1,orders=secret2"
+            bootstrapSecrets: env.IDP_S2S_BOOTSTRAP_SECRETS
+                ? Object.fromEntries(list(env.IDP_S2S_BOOTSTRAP_SECRETS).map((pair) => {
+                    const i = pair.indexOf('=');
+                    if (i < 1) throw new Error('IDP_S2S_BOOTSTRAP_SECRETS must be name=secret pairs, comma-separated');
+                    return [pair.slice(0, i), pair.slice(i + 1)];
+                }))
+                : undefined,
             tokenMode: env.IDP_S2S_TOKEN_MODE || 'token',
+            ownServiceName: env.IDP_S2S_OWN_SERVICE_NAME || undefined,
         },
         rateLimiting: {
-            enabled: bool(env.IDP_RATE_LIMIT_ENABLED, true),
+            enabled: bool('IDP_RATE_LIMIT_ENABLED', true),
             adapter: env.IDP_RATE_LIMIT_ADAPTER || 'memory',
         },
         magicLink: {
-            allowSignupViaMagicLink: bool(env.IDP_MAGIC_LINK_ALLOW_SIGNUP, true),
+            allowSignupViaMagicLink: bool('IDP_MAGIC_LINK_ALLOW_SIGNUP', true),
         },
         // Only wired if IDP_WEBAUTHN_RP_ID is set — WebAuthn is fully opt-in
         // and deployment-specific (rpID must be the frontend's registrable

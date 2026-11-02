@@ -72,6 +72,34 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   with `error=provider_error`). Google, Microsoft and GitHub exchanges use PKCE (S256); Apple's
   `id_token` must carry this login's `nonce` and the right `iss`/`aud`/`exp`. **Upgrade:** mount
   `cookie-parser` before the router (already needed for cookie sessions).
+- **`configFromEnv` silently turned protections off (Medium).** Only the exact string `"true"` was
+  true, so `IDP_COOKIE_SECURE=` (blank), `=1` or `=TRUE` meant insecure cookies (likewise rate
+  limiting, per-request session checks), and a non-numeric `IDP_MAX_FAILED_LOGIN_ATTEMPTS` became
+  `NaN`, disabling account lockout. Booleans now accept true/false, 1/0, yes/no, on/off (any case);
+  a blank variable means the default; anything unrecognised fails startup. New variables:
+  `IDP_SSO_BASE_CALLBACK_URL`, `IDP_SSO_ALLOWED_REDIRECT_ORIGINS`, `IDP_SSO_MICROSOFT_TRUST_EMAIL`,
+  `IDP_S2S_BOOTSTRAP_SECRETS` (`name=secret,…`), `IDP_S2S_OWN_SERVICE_NAME`, `IDP_REDIS_USERNAME`,
+  `IDP_REDIS_TLS`.
+- **Weak configuration was accepted at startup.** `initIdentityProvider()` now refuses:
+  `emailHashPepper`/`tokenHashSecret` under 32 characters; `bcryptRounds` outside 10–15
+  (`security.allowWeakBcryptRounds` allows ≥ 4, for tests); non-integer lockout settings and
+  rate-limit rules; signing keys that aren't RSA, are under 2048 bits, are unparseable, have an unknown
+  status, or whose private key doesn't match the public key; and a key set with nothing to sign with.
+  **Upgrade:** check your secrets and keys meet these before deploying.
+- **Unbounded in-memory stores.** `MemoryCacheAdapter` holds at most `maxEntries` (100k; expired
+  then oldest evicted); `MemoryRateLimiter` at most `maxKeys` (500k) — when full it refuses *new* keys
+  (fail-closed sites answer 503) rather than evicting counters an attacker could flush.
+- **Rate-limit keys.** IPv6 clients are keyed by their /64 (one host is routinely given a whole
+  /64, which made per-IP limits per *address* meaningless); IPv4-mapped addresses as IPv4.
+  Per-address keys use the email's keyed hash instead of the plain address, so Redis and logs no
+  longer hold emails. **Note:** `req.ip` is only as trustworthy as Express's `trust proxy` — set it
+  to your proxy hop count or subnet, never `true`.
+- **Redis.** The rate-limit script sets an expiry whenever a key has none (a failed `EXPIRE` could
+  leave a key — and its owner — limited forever) and rounds windows to whole seconds. Both Redis
+  adapters accept `username` and `tls`; the limiter no longer silently connects to localhost when
+  configured for Redis without a host.
+- **Every email lookup scanned the user collection** (the legacy `email` branch of the lookup's
+  `$or` had no index). `email` is now indexed.
 - **Webhooks carried login credentials to every endpoint (High).** `onPasswordResetRequested`,
   `onMagicLinkRequested` and `onVerificationEmailRequested` payloads — live reset tokens, magic-link
   tokens, verification codes — were POSTed to every configured endpoint, so anyone with access to

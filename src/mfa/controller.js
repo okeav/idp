@@ -8,6 +8,7 @@ import { hashOpaqueToken, verifyMfaChallengeToken as verifyMfaChallengeTokenJwt 
 import { auditLog } from '../hooks/index.js';
 import { issueSession, setSessionCookies, resolveClaims } from '../password-auth/controllers.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { ipKey } from '../rate-limit/keys.js';
 import { sealMfaSecret, openMfaSecret } from './secrets.js';
 import { guardMfaAttempt } from './attempt-guard.js';
 import { claimTotpStep, consumeRecoveryCode, claimMfaChallenge } from './factor-store.js';
@@ -231,7 +232,7 @@ export async function verifyMfaChallengeHandler(req, res, next) {
         const state = getState();
         const { mfaChallengeToken, code } = req.body;
 
-        await enforceRateLimit(state, `mfa-challenge:ip:${req.ip}`, state.config.rateLimiting.mfaChallenge, { failMode: 'closed' });
+        await enforceRateLimit(state, `mfa-challenge:ip:${ipKey(req.ip)}`, state.config.rateLimiting.mfaChallenge, { failMode: 'closed' });
 
         const challenge = verifyChallengeToken(state, mfaChallengeToken);
         const userId = challenge.sub;

@@ -2,9 +2,12 @@ import { BaseRateLimiter } from './rate-limiter.js';
 
 // Atomic incr-and-maybe-set-expiry, so a concurrent burst of requests can
 // never race past the check the way a separate INCR + EXPIRE pair could.
+// The expiry is set whenever the key has none (TTL -1), not only on the first
+// increment: if that EXPIRE ever failed after INCR committed, the key would
+// otherwise never expire and its owner would stay limited forever.
 const INCREMENT_SCRIPT = `
 local count = redis.call('INCR', KEYS[1])
-if count == 1 then
+if redis.call('TTL', KEYS[1]) == -1 then
   redis.call('EXPIRE', KEYS[1], ARGV[1])
 end
 local ttl = redis.call('TTL', KEYS[1])
@@ -26,7 +29,7 @@ export class RedisRateLimiter extends BaseRateLimiter {
     }
 
     async increment(key, { max, windowSeconds }) {
-        const [count, ttl] = await this._redis.eval(INCREMENT_SCRIPT, 1, key, windowSeconds);
+        const [count, ttl] = await this._redis.eval(INCREMENT_SCRIPT, 1, key, Math.max(1, Math.ceil(windowSeconds)));
         const resetAt = Date.now() + Math.max(ttl, 0) * 1000;
         return { allowed: count <= max, remaining: Math.max(0, max - count), resetAt };
     }
@@ -44,6 +47,9 @@ export class RedisRateLimiter extends BaseRateLimiter {
  */
 export async function createRedisRateLimiter(opts = {}) {
     if (opts.redis) return new RedisRateLimiter({ redis: opts.redis });
+    if (!opts.host) {
+        throw new Error('Rate limiter adapter "redis" needs config.rateLimiting.redis.host, or config.cache.adapter "redis" to share its connection — refusing to connect to an unconfigured localhost');
+    }
 
     let IORedis;
     try {
@@ -55,7 +61,11 @@ export async function createRedisRateLimiter(opts = {}) {
         );
     }
 
-    const redis = new IORedis({ host: opts.host, port: opts.port, password: opts.password, db: opts.db ?? 0, lazyConnect: true, maxRetriesPerRequest: 3 });
+    const redis = new IORedis({
+        host: opts.host, port: opts.port, username: opts.username, password: opts.password, db: opts.db ?? 0,
+        ...(opts.tls ? { tls: opts.tls === true ? {} : opts.tls } : {}),
+        lazyConnect: true, maxRetriesPerRequest: 3,
+    });
     await redis.connect();
     return new RedisRateLimiter({ redis });
 }

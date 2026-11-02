@@ -8,6 +8,7 @@ import { auditLog } from '../hooks/index.js';
 import { verifyStoredCredentialAssertion } from './shared.js';
 import { issueSession, setSessionCookies, resolveClaims } from '../password-auth/controllers.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { ipKey } from '../rate-limit/keys.js';
 import { guardMfaAttempt } from '../mfa/attempt-guard.js';
 import { verifyChallengeToken, assertChallengeCurrent, spendChallenge } from '../mfa/controller.js';
 
@@ -65,7 +66,7 @@ export async function verifyMfaWebauthnChallengeHandler(req, res, next) {
         const state = getState();
         const { mfaChallengeToken, response } = req.body;
 
-        await enforceRateLimit(state, `mfa-challenge:ip:${req.ip}`, state.config.rateLimiting.mfaChallenge, { failMode: 'closed' });
+        await enforceRateLimit(state, `mfa-challenge:ip:${ipKey(req.ip)}`, state.config.rateLimiting.mfaChallenge, { failMode: 'closed' });
 
         const challenge = verifyChallengeToken(state, mfaChallengeToken);
         const userId = challenge.sub;

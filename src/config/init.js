@@ -6,7 +6,7 @@ import { createCacheAdapter } from '../cache/index.js';
 import { createRateLimiter } from '../rate-limit/index.js';
 import { WebhookDispatcher } from '../webhooks/dispatcher.js';
 import { wrapHooksWithWebhooks } from '../webhooks/wrap-hooks.js';
-import { buildKeyRegistry } from '../signing/key-registry.js';
+import { buildKeyRegistry, assertCanSign } from '../signing/key-registry.js';
 import { createMongoStorage } from '../storage/mongo/index.js';
 import { makeHashEmail, normalizeEmail } from '../utils/email-hash.js';
 import { createMfaSecretCipher, assertMfaSecretConfig } from '../mfa/secrets.js';
@@ -27,8 +27,8 @@ import { MemoryAttemptCounterRepository } from '../mfa/memory-attempt-counter.js
 export async function initIdentityProvider(config) {
     const resolved = withDefaults(config);
 
-    if (!resolved.security.emailHashPepper) throw new Error('config.security.emailHashPepper is required');
-    if (!resolved.security.tokenHashSecret) throw new Error('config.security.tokenHashSecret is required');
+    assertSecurityConfig(resolved.security);
+    assertRateLimitRules(resolved.rateLimiting);
 
     const logger = config.logger || createConsoleLogger();
 
@@ -53,6 +53,7 @@ export async function initIdentityProvider(config) {
     const cache = await createCacheAdapter(resolved.cache);
     const rateLimiter = await createRateLimiter(resolved.rateLimiting, cache.redisClient);
     const signingKeys = buildKeyRegistry(resolved.signingKeys.keys);
+    assertCanSign(signingKeys);
     const hashEmail = makeHashEmail(resolved.security.emailHashPepper);
 
     // Storage is pluggable via `config.storage.factory` — a function with the
@@ -111,6 +112,43 @@ function assertSsoConfig(resolved) {
     try { base = new URL(resolved.sso?.baseCallbackUrl); } catch { base = null; }
     if (!base || !['https:', 'http:'].includes(base.protocol)) {
         throw new Error('config.sso.baseCallbackUrl must be an absolute URL when SSO providers are configured');
+    }
+}
+
+const MIN_SECRET_LENGTH = 32;
+
+/**
+ * The secrets behind every token hash and the email blind index must be real secrets (a short one
+ * can be brute-forced offline from a database dump), and the password-hash cost and lockout numbers
+ * must be numbers — a NaN lockout threshold (e.g. from a mistyped env var) silently disables lockout.
+ */
+function assertSecurityConfig(security) {
+    for (const name of ['emailHashPepper', 'tokenHashSecret']) {
+        const value = security[name];
+        if (!value) throw new Error(`config.security.${name} is required`);
+        if (typeof value !== 'string' || value.length < MIN_SECRET_LENGTH) {
+            throw new Error(`config.security.${name} must be a random string of at least ${MIN_SECRET_LENGTH} characters`);
+        }
+    }
+    const minRounds = security.allowWeakBcryptRounds === true ? 4 : 10;
+    if (!Number.isInteger(security.bcryptRounds) || security.bcryptRounds < minRounds || security.bcryptRounds > 15) {
+        throw new Error(`config.security.bcryptRounds must be an integer from ${minRounds} to 15 (got ${security.bcryptRounds})`);
+    }
+    if (!Number.isInteger(security.maxFailedLoginAttempts) || security.maxFailedLoginAttempts < 1) {
+        throw new Error(`config.security.maxFailedLoginAttempts must be a positive integer (got ${security.maxFailedLoginAttempts})`);
+    }
+    if (!Number.isInteger(security.accountLockDurationMs) || security.accountLockDurationMs < 1000) {
+        throw new Error(`config.security.accountLockDurationMs must be an integer of at least 1000 (got ${security.accountLockDurationMs})`);
+    }
+}
+
+/** Every rate-limit rule needs positive integers — a fractional window can leave Redis keys without a TTL. */
+function assertRateLimitRules(rateLimiting) {
+    for (const [name, rule] of Object.entries(rateLimiting)) {
+        if (!rule || typeof rule !== 'object' || Array.isArray(rule) || !('max' in rule || 'windowSeconds' in rule)) continue;
+        if (!Number.isInteger(rule.max) || rule.max < 1 || !Number.isInteger(rule.windowSeconds) || rule.windowSeconds < 1) {
+            throw new Error(`config.rateLimiting.${name} needs positive integer max and windowSeconds (got ${JSON.stringify(rule)})`);
+        }
     }
 }
 
