@@ -58,17 +58,27 @@ function assertMfaFeatureEnabled(state) {
     }
 }
 
+// Crockford base32: no I, L, O, U — nothing to misread when typing a code off paper.
+const RECOVERY_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+/**
+ * 20 characters of base32 = 100 bits, shown as XXXXX-XXXXX-XXXXX-XXXXX. (0.3.0 used 48 bits: with the
+ * database and the HMAC key, every user's codes fell to one offline search.)
+ */
 function generateRecoveryCode() {
-    const part = () => crypto.randomBytes(3).toString('hex').toUpperCase();
-    return `${part()}-${part()}`;
+    const chars = Array.from({ length: 20 }, () => RECOVERY_ALPHABET[crypto.randomInt(RECOVERY_ALPHABET.length)]).join('');
+    return chars.match(/.{5}/g).join('-');
 }
 
-/** Recovery codes are shown as `XXXXXX-XXXXXX` (uppercase hex); accept them however the user types the case/whitespace. */
-const normalizeRecoveryCode = (code) => String(code).trim().toUpperCase();
+/** Accept a code however it's typed: any case, spaces or dashes, and O/I/L for 0/1. */
+const normalizeRecoveryCode = (code) => String(code).toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
 
-function newRecoveryCodes(state) {
+/** Keyed hash of a recovery code, bound to its user — one guess can't be tested against everyone's codes at once. */
+const recoveryCodeHash = (state, userId, code) => hashOpaqueToken(state, `mfa-recovery:${userId}:${normalizeRecoveryCode(code)}`);
+
+function newRecoveryCodes(state, userId) {
     const rawCodes = Array.from({ length: state.config.mfa.recoveryCodeCount }, generateRecoveryCode);
-    return { rawCodes, stored: rawCodes.map((c) => ({ codeHash: hashOpaqueToken(state, c), usedAt: null })) };
+    return { rawCodes, stored: rawCodes.map((c) => ({ codeHash: recoveryCodeHash(state, userId, c), usedAt: null })) };
 }
 
 /** Re-authentication for the routes that weaken or re-issue the second factor: the password (when the account has one). */
@@ -158,7 +168,7 @@ export async function confirmMfaHandler(req, res, next) {
             if (!(await totpAccepted(state, userId, code, secret))) throw invalidCode();
         });
 
-        const { rawCodes, stored } = newRecoveryCodes(state);
+        const { rawCodes, stored } = newRecoveryCodes(state, userId);
         await state.storage.userRepository.updateById(userId, {
             mfaEnabled: true,
             // Re-sealed rather than copied: a temp secret written before
@@ -221,7 +231,7 @@ export async function regenerateRecoveryCodesHandler(req, res, next) {
             if (!(await totpAccepted(state, userId, code, opened?.secret))) throw invalidCode();
         });
 
-        const { rawCodes, stored } = newRecoveryCodes(state);
+        const { rawCodes, stored } = newRecoveryCodes(state, userId);
         await state.storage.userRepository.updateById(userId, { mfaRecoveryCodes: stored });
 
         await auditLog(state.logger, state.hooks, 'MFA_RECOVERY_CODES_REGENERATED', { userId });
@@ -256,7 +266,7 @@ export async function verifyMfaChallengeHandler(req, res, next) {
             const opened = await openMfaSecret(state, user.mfaSecret, userId);
             if (await totpAccepted(state, userId, code, opened?.secret)) return { opened, method: 'totp' };
 
-            const codeHash = hashOpaqueToken(state, normalizeRecoveryCode(code));
+            const codeHash = recoveryCodeHash(state, user.id, code);
             if (await consumeRecoveryCode(state, user, codeHash)) return { opened, method: 'recovery-code' };
 
             throw invalidCode('Invalid MFA code');

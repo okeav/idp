@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { isAcceptableRedirectUri } from './redirect-uri.js';
 
+const httpsUrl = (field) => z.string().max(2048).refine((v) => { try { return new URL(v).protocol === 'https:'; } catch { return false; } }, `${field} must be an https URL`);
+
 // PKCE (RFC 7636): only S256. A challenge is the base64url SHA-256 of the verifier (always 43
 // chars); a verifier is 43–128 unreserved characters. `plain` is refused — it protects nothing
 // once the authorization request is observed (RFC 9700 §2.1.1).
@@ -80,13 +82,16 @@ export const updateOAuthClientSchema = z.object({
     allowedScopes: z.array(z.string()).optional(),
     allowedGrants: z.array(z.enum(['authorization_code', 'client_credentials', 'refresh_token'])).optional(),
     clientType: z.enum(['confidential', 'public']).optional(),
-    accessTokenTTL: z.number().int().positive().optional(),
-    refreshTokenTTL: z.number().int().positive().optional(),
-    idTokenTTL: z.number().int().positive().optional(),
-    logoUrl: z.string().url().optional(),
-    websiteUrl: z.string().url().optional(),
-    privacyPolicyUrl: z.string().url().optional(),
-    termsOfServiceUrl: z.string().url().optional(),
+    // Bounded: an access token can't be revoked once issued (client_credentials tokens have no session),
+    // so a ten-year lifetime is a ten-year credential.
+    accessTokenTTL: z.number().int().positive().max(24 * 60 * 60).optional(),
+    refreshTokenTTL: z.number().int().positive().max(365 * 24 * 60 * 60).optional(),
+    idTokenTTL: z.number().int().positive().max(24 * 60 * 60).optional(),
+    // Shown as links on the consent screen: https only (a `javascript:` URL there runs in the IdP's origin).
+    logoUrl: httpsUrl('logoUrl').optional(),
+    websiteUrl: httpsUrl('websiteUrl').optional(),
+    privacyPolicyUrl: httpsUrl('privacyPolicyUrl').optional(),
+    termsOfServiceUrl: httpsUrl('termsOfServiceUrl').optional(),
     supportEmail: z.string().email().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
 }).strict();

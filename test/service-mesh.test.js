@@ -18,8 +18,8 @@ import { remoteJwksKeyLookup } from '../src/service-mesh/remote-jwks-key-lookup.
 //  - weak/EC/private keys were accepted at registration;
 //  - unknown kids forced a JWKS refetch on every request, with no timeout.
 
-const SECRETS = { billing: 'billing-bootstrap-secret-0001', orders: 'orders-bootstrap-secret-0002' };
-const SHARED = 'shared-bootstrap-secret-0003';
+const SECRETS = { billing: 'billing-bootstrap-secret-0001-0123456789', orders: 'orders-bootstrap-secret-0002-0123456789' };
+const SHARED = 'shared-bootstrap-secret-0003-0123456789';
 let app;
 let probe; // an internal endpoint guarded by serviceContextMiddleware + requireServiceCallerMiddleware('billing')
 
@@ -27,7 +27,7 @@ const rsa = (bits = 2048) => crypto.generateKeyPairSync('rsa', { modulusLength: 
 const b64 = (pem) => Buffer.from(pem, 'utf8').toString('base64');
 
 before(async () => {
-    app = await buildTestApp({ config: { serviceMesh: { bootstrapSecrets: SECRETS, bootstrapSecret: SHARED, ownServiceName: 'idp', sharedSecret: 'legacy-shared-secret' } } });
+    app = await buildTestApp({ config: { serviceMesh: { bootstrapSecrets: SECRETS, bootstrapSecret: SHARED, ownServiceName: 'idp', sharedSecret: 'legacy-shared-secret-0004-0123456789abcdef' } } });
     const p = express();
     p.get('/ping', serviceContextMiddleware(), requireServiceCallerMiddleware('billing'), (req, res) => res.json(req.serviceCaller));
     p.use((err, _req, res, _next) => res.status(err.httpStatus || 500).json({ error: err.code || 'INTERNAL_ERROR' }));
@@ -159,7 +159,7 @@ test('allowedServiceNames limits who can register at all', async () => {
 
 test('tokenMode defaults to "token": the shared secret and x-service-name are ignored', async () => {
     assert.equal(app.state.config.serviceMesh.tokenMode, 'token');
-    const res = await ping({ 'x-internal-service-secret': 'legacy-shared-secret', 'x-service-name': 'billing' });
+    const res = await ping({ 'x-internal-service-secret': 'legacy-shared-secret-0004-0123456789abcdef', 'x-service-name': 'billing' });
     assert.equal(res.status, 401);
 });
 
@@ -167,11 +167,11 @@ test('tokenMode "both": a shared-secret caller is refused by requireServiceCalle
     const mesh = app.state.config.serviceMesh;
     mesh.tokenMode = 'both';
     try {
-        const legacy = await ping({ 'x-internal-service-secret': 'legacy-shared-secret', 'x-service-name': 'billing' });
+        const legacy = await ping({ 'x-internal-service-secret': 'legacy-shared-secret-0004-0123456789abcdef', 'x-service-name': 'billing' });
         assert.equal(legacy.status, 403, 'a self-declared name proves nothing');
 
         mesh.allowLegacySecretCallers = true;
-        assert.equal((await ping({ 'x-internal-service-secret': 'legacy-shared-secret', 'x-service-name': 'billing' })).status, 200);
+        assert.equal((await ping({ 'x-internal-service-secret': 'legacy-shared-secret-0004-0123456789abcdef', 'x-service-name': 'billing' })).status, 200);
         assert.equal((await ping({ 'x-internal-service-secret': 'wrong', 'x-service-name': 'billing' })).status, 401);
     } finally {
         mesh.tokenMode = 'token';
@@ -185,7 +185,7 @@ test('a missing ownServiceName is a configuration error, never a fallback to the
     mesh.ownServiceName = undefined;
     mesh.tokenMode = 'both';
     try {
-        const res = await ping({ Authorization: `Bearer ${mint(billing.privateKey, billing.kid)}`, 'x-internal-service-secret': 'legacy-shared-secret', 'x-service-name': 'billing' });
+        const res = await ping({ Authorization: `Bearer ${mint(billing.privateKey, billing.kid)}`, 'x-internal-service-secret': 'legacy-shared-secret-0004-0123456789abcdef', 'x-service-name': 'billing' });
         assert.equal(res.status, 500);
         assert.equal((await res.json()).error, 'SERVICE_NOT_CONFIGURED');
     } finally {

@@ -103,7 +103,8 @@
  *   rotation refuse a revoked key before demoting the current one)
  * @property {() => Promise<object[]>} listPublishable
  * @property {(kid: string) => Promise<object|null>} [findPublishableByKid] - indexed single-key read (verification)
- * @property {(kid: string, status: string) => Promise<object|null>} setStatusByKid - ROTATING / RETIRED / REVOKED;
+ * @property {(kid: string, status: string, opts?: {expectedStatus?: string}) => Promise<object|null>} setStatusByKid - ROTATING / RETIRED / REVOKED;
+ *   with `expectedStatus`, ATOMICALLY only from that status;
  *   should record `statusChangedAt` (a ROTATING key verifies for `serviceMesh.rotationGraceSeconds` after it)
  *
  * @typedef {Object} CredentialRepository

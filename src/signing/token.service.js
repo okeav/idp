@@ -167,6 +167,7 @@ export async function issueMfaChallengeToken(state, subjectId) {
         sub: String(subjectId),
         type: TOKEN_TYPES.MFA_CHALLENGE,
         iss: state.config.issuer,
+        aud: mfaChallengeAudience(state),
         jti: crypto.randomUUID(),
         iat: now,
         exp: expiresAt,
@@ -175,10 +176,14 @@ export async function issueMfaChallengeToken(state, subjectId) {
     return jwt.sign(claims, key.privateKeyPem, { algorithm: ALGORITHM, keyid: kid });
 }
 
+const mfaChallengeAudience = (state) => `${state.config.issuer}#mfa-challenge`;
+
 export function verifyMfaChallengeToken(state, token) {
     for (const [, key] of getVerifiableKeys(state.signingKeys)) {
         try {
-            const decoded = jwt.verify(token, key.publicKeyPem, { algorithms: [ALGORITHM] });
+            // Issuer and audience pinned: a challenge from another environment sharing a signing key
+            // (or any other token type) is not one of ours.
+            const decoded = jwt.verify(token, key.publicKeyPem, { algorithms: [ALGORITHM], issuer: state.config.issuer, audience: mfaChallengeAudience(state) });
             if (decoded.type !== TOKEN_TYPES.MFA_CHALLENGE) continue;
             return decoded;
         } catch {

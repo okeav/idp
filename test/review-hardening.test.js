@@ -27,8 +27,8 @@ import { dummyHashRounds } from '../src/utils/password.js';
 const ADMIN = { 'x-test-admin': 'yes' };
 const password = 'Str0ng!Passw0rd';
 const redirectUri = 'https://rp.example.com/cb';
-const SECRETS = { billing: 'billing-bootstrap-secret-review-01', orders: 'orders-bootstrap-secret-review-02' };
-const SHARED = 'shared-bootstrap-secret-review-03';
+const SECRETS = { billing: 'billing-bootstrap-secret-review-01-0123456789', orders: 'orders-bootstrap-secret-review-02-0123456789' };
+const SHARED = 'shared-bootstrap-secret-review-03-0123456789';
 let app;
 
 before(async () => {

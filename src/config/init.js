@@ -48,6 +48,7 @@ export async function initIdentityProvider(config) {
         throw new Error("config.oauth2.requirePkce must be 'all' or 'public'");
     }
     assertCookieConfig(resolved.cookies);
+    assertServiceMeshSecrets(resolved.serviceMesh);
     const grace = resolved.serviceMesh.rotationGraceSeconds;
     if (!Number.isInteger(grace) || grace < 0) throw new Error(`config.serviceMesh.rotationGraceSeconds must be an integer >= 0 (got ${grace})`);
     for (const [name, min] of [['recentAuthMaxAgeSeconds', 1], ['absoluteLifetimeSeconds', 1], ['refreshReuseGraceSeconds', 0]]) {
@@ -155,6 +156,22 @@ function assertRateLimitRules(rateLimiting) {
         if (!Number.isInteger(rule.max) || rule.max < 1 || !Number.isInteger(rule.windowSeconds) || rule.windowSeconds < 1) {
             throw new Error(`config.rateLimiting.${name} needs positive integer max and windowSeconds (got ${JSON.stringify(rule)})`);
         }
+    }
+}
+
+/**
+ * Service-mesh secrets gate who may register a service key (and so mint tokens as that service), or —
+ * in tokenMode 'secret'/'both' — who may call as a service: as strong as the token secrets.
+ */
+function assertServiceMeshSecrets(mesh = {}) {
+    const MIN = 32;
+    const weak = (v) => typeof v !== 'string' || v.length < MIN;
+    for (const key of ['bootstrapSecret', 'sharedSecret']) {
+        if (mesh[key] !== undefined && weak(mesh[key])) throw new Error(`config.serviceMesh.${key} must be at least ${MIN} characters`);
+    }
+    for (const [name, secret] of Object.entries(mesh.bootstrapSecrets ?? {})) {
+        if (weak(secret)) throw new Error(`config.serviceMesh.bootstrapSecrets.${name} must be at least ${MIN} characters`);
+        if (secret === mesh.bootstrapSecret) throw new Error(`config.serviceMesh.bootstrapSecrets.${name} must differ from the shared bootstrapSecret`);
     }
 }
 

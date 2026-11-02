@@ -51,11 +51,11 @@ function parsePublicKey(publicKeyB64) {
  * - A per-service bootstrap secret (`serviceMesh.bootstrapSecrets`) authorizes exactly its own name,
  *   and may register a new key for it (rotation): the previous keys move to ROTATING (still
  *   verifiable, so in-flight tokens keep working) and are retired on the next rotation.
- * - The shared `serviceMesh.bootstrapSecret` may only register a name that has no key yet, and never
+ * - The shared `serviceMesh.bootstrapSecret` may only register a name that has no live key, and never
  *   a name that has its own per-service secret: it proves "some participating service", not which
- *   one, so it must not be able to replace — or, once a key is revoked, claim — another service's
- *   name and impersonate it. Rotate such a service with a per-service secret, or revoke its key with
- *   `revokeServiceKey()` first.
+ *   one, so it must not be able to replace another service's key and impersonate it. (A shared-secret
+ *   name whose keys were all revoked can be registered again by a shared-secret holder — that is how
+ *   such a service recovers; give a service its own secret to rule that out.)
  * - A revoked key is never accepted again (409 SERVICE_KEY_REVOKED): the service must generate a new one.
  * - A rotated-away (ROTATING) key keeps verifying for `serviceMesh.rotationGraceSeconds` only.
  * - `serviceMesh.allowedServiceNames`, when set, limits which names can register at all.
@@ -95,19 +95,34 @@ export async function registerServiceKeyHandler(req, res, next) {
         const existing = (await repo.listPublishable()).filter((k) => k.name === name);
         const sameKey = existing.some((k) => k.kid === kid);
 
-        if (existing.length > 0 && !sameKey) {
-            if (auth.shared) {
-                await auditLog(state.logger, state.hooks, 'SERVICE_KEY_REGISTRATION_REFUSED', { name, kid, reason: 'name_taken' });
-                throw new IdpError({ code: 'SERVICE_NAME_TAKEN', httpStatus: 409, message: `Service '${name}' already has a key; rotating it needs that service's own bootstrap secret` });
-            }
-            // Per-service rotation: retire keys already rotating, demote the active ones.
-            for (const k of existing) {
-                await repo.setStatusByKid(k.kid, k.status === KEY_STATUS.ROTATING ? KEY_STATUS.RETIRED : KEY_STATUS.ROTATING);
-            }
-        }
+        const nameTaken = async () => {
+            await auditLog(state.logger, state.hooks, 'SERVICE_KEY_REGISTRATION_REFUSED', { name, kid, reason: 'name_taken' });
+            return new IdpError({ code: 'SERVICE_NAME_TAKEN', httpStatus: 409, message: `Service '${name}' already has a key; rotating it needs that service's own bootstrap secret` });
+        };
+        if (existing.length > 0 && !sameKey && auth.shared) throw await nameTaken();
 
+        // The new key goes in first: a registration refused here (a revoked kid) must not have demoted
+        // the service's current key already.
         const saved = await repo.upsertByKid({ kid, name, publicKey: Buffer.from(publicKeyPem, 'utf8').toString('base64'), region });
         if (!saved) throw revoked();
+
+        if (existing.length > 0 && !sameKey) {
+            // Per-service rotation: retire keys already rotating, demote the active ones — each only from
+            // the status just read, so a key revoked meanwhile stays revoked.
+            for (const k of existing) {
+                await repo.setStatusByKid(k.kid, k.status === KEY_STATUS.ROTATING ? KEY_STATUS.RETIRED : KEY_STATUS.ROTATING, { expectedStatus: k.status });
+            }
+        }
+        if (auth.shared && existing.length === 0) {
+            // Concurrent first registrations of one new name with the shared secret all saw "no key yet".
+            // Exactly one keeps it — the earliest registered (then lowest kid); the others revoke their own.
+            const rivals = (await repo.listPublishable()).filter((k) => k.name === name && k.status === KEY_STATUS.ACTIVE);
+            const winner = rivals.sort((a, b) => (new Date(a.registeredAt) - new Date(b.registeredAt)) || String(a.kid).localeCompare(String(b.kid)))[0];
+            if (winner && winner.kid !== kid) {
+                await repo.setStatusByKid(kid, KEY_STATUS.REVOKED);
+                throw await nameTaken();
+            }
+        }
 
         await auditLog(state.logger, state.hooks, 'SERVICE_KEY_REGISTERED', { name, kid: saved.kid, rotated: existing.length > 0 && !sameKey });
         res.status(201).json({ kid: saved.kid, name: saved.name });

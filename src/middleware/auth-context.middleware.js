@@ -2,7 +2,7 @@ import { getState } from '../config/state.js';
 import { verifyAccessToken, classifyAccessToken } from '../signing/token.service.js';
 import { isRevoked } from '../cache/index.js';
 import { IdpError } from '../errors/idp-error.js';
-import { CACHE_KEY_PREFIXES, COOKIE_NAMES, ACCESS_TOKEN_KINDS } from '../config/constants.js';
+import { CACHE_KEY_PREFIXES, COOKIE_NAMES, ACCESS_TOKEN_KINDS, GRANT_TYPES, OAUTH_CLIENT_STATUS } from '../config/constants.js';
 import { readSessionCookie } from '../utils/cookies.js';
 import { assertTrustedOrigin } from './csrf.js';
 
@@ -62,6 +62,7 @@ export function authContextMiddleware(opts = {}) {
             if (token === cookieToken) assertTrustedOrigin(state, req);
             const payload = await verifyAccessToken(state, token, { issuer: opts.issuer, audience: opts.audience, accept });
             await assertSessionLive(state, payload);
+            await assertClientStillActive(state, payload);
 
             const kind = classifyAccessToken(payload);
             const isClientToken = kind === ACCESS_TOKEN_KINDS.OAUTH2_CLIENT;
@@ -94,6 +95,16 @@ const REVOKED = () => new IdpError({ code: 'TOKEN_REVOKED', httpStatus: 401, mes
  * public `issueAccessToken()` export — neither has a session row) skip the
  * storage check; they were never tied to a session to revoke.
  */
+/**
+ * A client_credentials token has no session row to revoke, so it is checked against its client: a
+ * deactivated (or deleted) client's machine tokens stop working at once, not when they expire.
+ */
+async function assertClientStillActive(state, payload) {
+    if (payload.gty !== GRANT_TYPES.CLIENT_CREDENTIALS) return;
+    const client = await state.storage.oauthClientRepository.findByClientId(payload.client_id);
+    if (!client || client.status !== OAUTH_CLIENT_STATUS.ACTIVE) throw REVOKED();
+}
+
 async function assertSessionLive(state, payload) {
     const verifyInStorage = state.config.session?.verifyOnEachRequest === true
         && payload.sessionless !== true

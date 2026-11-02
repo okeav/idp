@@ -42,8 +42,11 @@ export class MongoServiceKeyRepository {
     }
 
     /** Sets a key's status (ROTATING / RETIRED / REVOKED). Returns the updated key, or null. */
-    async setStatusByKid(kid, status) {
-        return this.model.findOneAndUpdate({ kid }, { $set: { status, statusChangedAt: new Date() } }, { returnDocument: 'after' });
+    async setStatusByKid(kid, status, { expectedStatus } = {}) {
+        // `expectedStatus`: change only from that status (a rotation must not demote a key that was
+        // revoked between reading and writing it — REVOKED back to ROTATING would re-enable it).
+        const filter = expectedStatus ? { kid, status: expectedStatus } : { kid };
+        return this.model.findOneAndUpdate(filter, { $set: { status, statusChangedAt: new Date() } }, { returnDocument: 'after' });
     }
 
     async listPublishable() {
