@@ -346,9 +346,12 @@ export async function verifyEmailHandler(req, res, next) {
         const pendingUser = user?.status === IDENTITY_STATUS.PENDING_VERIFICATION ? user : null;
         const ticket = token ? null : await presentedTicket(state, email, typeof req.body.ticket === 'string' ? req.body.ticket : readCookie(req, ticketCookie(state)));
         const budgetKey = ticket ? `email-verification:ticket:${ticket.hash}` : `email-verification:${emailKey(state, email)}`;
-        // Inside that budget, every guess also counts toward the address's LIFETIME cap
+        // Inside that budget, every guess also counts toward the address's year-long cap
         // (`maxTotalFailedAttempts`, ticket or not): however long someone keeps registering and guessing,
-        // a code for this address is guessed at most that many times — then only the link works.
+        // codes for this address are guessed at most that many times a year — then only the link works.
+        // The trade-off, deliberately: anyone can spend the cap and switch an address to link-only (for its
+        // registrant too). Exempting the registrant's ticket would also exempt an attacker who registers
+        // the same address, and each such ticket would be guesses beyond any bound.
         const capped = () => withAttemptBudget(state, `email-verification-total:${emailKey(state, email)}`, {
             maxFailedAttempts: state.config.security.verificationCodeLockout.maxTotalFailedAttempts, windowSeconds: CODE_LIFETIME_CAP_SECONDS, lockSeconds: CODE_LIFETIME_CAP_SECONDS,
         }, { lockedError: VERIFICATION_LOCKED }, verify);

@@ -115,7 +115,9 @@ export function readRefreshCookie(state, req) {
     const bindings = new Set(allCookieValues(req, names.binding));
     // A browser holds one host-only binding; several can only be forged (or, with cookies.domain, planted).
     if (bindings.size === 0 || (bindings.size > MAX_BINDINGS(state))) return undefined;
-    const tokens = [...new Set(allCookieValues(req, names.token))].slice(0, MAX_REFRESH_VALUES);
+    // Every token value is considered — planted ones listed first must not crowd out the real one. The
+    // header-size limit bounds the count, and each costs one keyed hash per key.
+    const tokens = [...new Set(allCookieValues(req, names.token))];
     // One keyed hash per token and key, looked up in the set (linear; both values come from the client,
     // so a constant-time comparison protects nothing here).
     const bound = tokens.filter((token) => opaqueTokenHashes(state, token, HASH_PURPOSES.REFRESH_COOKIE_BINDING).some((h) => bindings.has(h)));
@@ -123,6 +125,5 @@ export function readRefreshCookie(state, req) {
     return bound[0];
 }
 
-/** How many refresh-cookie values are considered at all (a real browser sends one or two). */
-const MAX_REFRESH_VALUES = 8;
-const MAX_BINDINGS = (state) => (state.config.cookies?.domain ? MAX_REFRESH_VALUES : 1);
+/** Bindings accepted at all: one host-only cookie (a browser holds one); a few with cookies.domain, where siblings can add theirs. */
+const MAX_BINDINGS = (state) => (state.config.cookies?.domain ? 8 : 1);

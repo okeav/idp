@@ -409,3 +409,10 @@ test('the in-process attempt counter prunes expired entries as it goes', async (
     await counters.recordFailure('last', { max: 5, windowSeconds: 1, lockSeconds: 1 });
     assert.equal(counters._store.size, 1);
 });
+
+test('planted refresh cookies listed first can\'t crowd out the real one', async () => {
+    const victim = await browserLogin();
+    const planted = Array.from({ length: 12 }, (_, i) => `__Secure-refresh_token=p${i}`).join('; ');
+    const res = await post(app.baseUrl, '/session/refresh', {}, { Cookie: `${planted}; ${asCookie(victim)}`, Origin: ISSUER_ORIGIN });
+    assert.equal(res.status, 200);
+});
