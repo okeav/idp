@@ -1,6 +1,7 @@
 import { IdpError } from '../errors/idp-error.js';
 import { OAUTH_CLIENT_STATUS, CLIENT_TYPES } from '../config/constants.js';
-import { verifyClientSecret, isLegacyClientSecretHash, hashClientSecret } from '../utils/oauth-client-credentials.js';
+import { verifyClientSecret, hashClientSecret } from '../utils/oauth-client-credentials.js';
+import { tokenHashKeys, HASH_PURPOSES } from '../signing/token.service.js';
 
 /**
  * One answer for every client-authentication failure — unknown client, inactive client, missing or
@@ -59,11 +60,12 @@ export async function authenticateClient(state, req, { requireConfidential = fal
     if (!client || client.status !== OAUTH_CLIENT_STATUS.ACTIVE) throw INVALID_CLIENT();
 
     if (client.clientType === CLIENT_TYPES.CONFIDENTIAL) {
-        const key = state.config.security.tokenHashSecret;
-        if (!clientSecret || !(await verifyClientSecret(clientSecret, client.clientSecretHash, key))) throw INVALID_CLIENT();
-        if (isLegacyClientSecretHash(client.clientSecretHash)) {
+        const keys = tokenHashKeys(state, HASH_PURPOSES.OAUTH_CLIENT_SECRET);
+        const { valid, upgrade } = clientSecret ? await verifyClientSecret(clientSecret, client.clientSecretHash, keys) : { valid: false };
+        if (!valid) throw INVALID_CLIENT();
+        if (upgrade) {
             try {
-                await repo.updateByClientId(clientId, { clientSecretHash: hashClientSecret(clientSecret, key) });
+                await repo.updateByClientId(clientId, { clientSecretHash: hashClientSecret(clientSecret, keys[0]) });
             } catch (err) {
                 state.logger?.warn?.({ err, clientId }, 'Could not upgrade a legacy client-secret hash (non-fatal)');
             }

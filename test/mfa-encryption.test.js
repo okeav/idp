@@ -6,6 +6,7 @@ import { buildTestApp, uniqueEmail, TEST_MFA_KEY, freshTotp } from './helpers/bu
 import { json } from './helpers/serve.js';
 import { initIdentityProvider, migrateMfaSecrets, AesGcmSecretCipher } from '../src/index.js';
 import { getState, setState } from '../src/config/state.js';
+import { stubStorage } from './helpers/stub-storage.js';
 
 // Issue: mfaSecret / mfaTempSecret were stored in plain text.
 
@@ -275,10 +276,7 @@ test('mfa.requireEncrypted refuses a plain-text secret instead of using it', asy
 // ── Startup validation ──────────────────────────────────────────────────────
 
 function fakeStorage() {
-    return {
-        close: async () => {}, userRepository: {}, sessionRepository: {}, authorizationCodeRepository: {}, consentRepository: {},
-        oauthClientRepository: {}, verificationTokenRepository: {}, serviceKeyRepository: {}, credentialRepository: {},
-    };
+    return stubStorage();
 }
 
 async function tryInit(mfa) {

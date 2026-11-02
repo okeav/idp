@@ -33,6 +33,8 @@ export function withDefaults(config = {}) {
             bcryptRounds: 12,
             emailHashPepper: config.security?.emailHashPepper,
             tokenHashSecret: config.security?.tokenHashSecret,
+            // Earlier tokenHashSecret values, newest first: what was hashed under them still verifies.
+            previousTokenHashSecrets: [],
             ...config.security,
             verificationCodeLockout: { ...DEFAULT_VERIFICATION_CODE_LOCKOUT, ...config.security?.verificationCodeLockout },
             passwordChangeLockout: { ...DEFAULT_PASSWORD_CHANGE_LOCKOUT, ...config.security?.passwordChangeLockout },

@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import { configFromEnv, issueAccessToken } from '../src/index.js';
 import { authorizeCode, exchangeCode, pkcePair } from './helpers/oauth.js';
 import { gate } from './helpers/gate.js';
-import { hashOpaqueToken } from '../src/signing/token.service.js';
+import { hashOpaqueToken, opaqueTokenHashes, HASH_PURPOSES } from '../src/signing/token.service.js';
 import { revokeAllUserSessions, revokeOtherUserSessions } from '../src/utils/session-family.js';
 
 // The "known limitations" of 0.4.0, fixed.
@@ -302,7 +302,7 @@ test('the rotation time the reuse grace period is measured from is the database\
     // token stayed "within the grace period" — and unpunished — for as long as the clocks disagreed.
     const u = await loggedIn();
     await withClockOffset(5 * 60_000, () => post(app.baseUrl, '/refresh', { refreshToken: u.refreshToken }));
-    const row = await app.state.storage.sessionRepository.findByRefreshTokenHash(hashOpaqueToken(app.state, u.refreshToken));
+    const row = await app.state.storage.sessionRepository.findByRefreshTokenHash(hashOpaqueToken(app.state, u.refreshToken, HASH_PURPOSES.REFRESH_TOKEN));
     assert.equal(row.revokeReason, 'rotated');
     assert.ok(Math.abs(new Date(row.revokedAt).getTime() - Date.now()) < 60_000, `revokedAt ${new Date(row.revokedAt).toISOString()}`);
 });
@@ -312,7 +312,7 @@ test('a replay after the grace period revokes the family (grace measured by the 
         const u = await loggedIn(temp);
         const rotated = await (await post(temp.baseUrl, '/refresh', { refreshToken: u.refreshToken })).json();
         assert.equal((await post(temp.baseUrl, '/refresh', { refreshToken: u.refreshToken })).status, 401, 'replay within the grace: refused');
-        assert.ok(await temp.state.storage.sessionRepository.rotatedWithin(hashOpaqueToken(temp.state, u.refreshToken), 1));
+        assert.ok(await temp.state.storage.sessionRepository.rotatedWithin(hashOpaqueToken(temp.state, u.refreshToken, HASH_PURPOSES.REFRESH_TOKEN), 1));
         await new Promise((r) => setTimeout(r, 1500));
         assert.equal((await post(temp.baseUrl, '/refresh', { refreshToken: u.refreshToken })).status, 401, 'the replay');
         assert.equal((await post(temp.baseUrl, '/refresh', { refreshToken: rotated.refreshToken })).status, 401, 'the family was revoked');

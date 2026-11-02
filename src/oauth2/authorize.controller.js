@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { OAUTH_CLIENT_STATUS, CLIENT_TYPES, CACHE_KEY_PREFIXES } from '../config/constants.js';
-import { hashOpaqueToken } from '../signing/token.service.js';
+import { hashOpaqueToken, HASH_PURPOSES } from '../signing/token.service.js';
 import { auditLog } from '../hooks/index.js';
 import { currentSessionEpoch } from '../utils/session-family.js';
 
@@ -44,7 +44,7 @@ async function issueAuthorizationCode(state, { clientId, userId, redirectUri, sc
     const code = crypto.randomBytes(32).toString('hex');
     const sessionEpoch = await currentSessionEpoch(state, userId);
     await state.storage.authorizationCodeRepository.create({
-        code: hashOpaqueToken(state, code),
+        code: hashOpaqueToken(state, code, HASH_PURPOSES.AUTHORIZATION_CODE),
         clientId,
         userId,
         redirectUri,

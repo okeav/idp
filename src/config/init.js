@@ -10,6 +10,7 @@ import { buildKeyRegistry, assertCanSign } from '../signing/key-registry.js';
 import { createMongoStorage } from '../storage/mongo/index.js';
 import { makeHashEmail, normalizeEmail } from '../utils/email-hash.js';
 import { createMfaSecretCipher, assertMfaSecretConfig } from '../mfa/secrets.js';
+import { assertStorageContract } from '../storage/interfaces.js';
 import { MemoryAttemptCounterRepository } from '../mfa/memory-attempt-counter.js';
 import { prepareDummyHash } from '../utils/password.js';
 import { isSecureUrl, isLoopbackHost } from '../utils/url.js';
@@ -78,6 +79,13 @@ export async function initIdentityProvider(config) {
         ? await resolved.storage.factory(resolved, { hashEmail, normalizeEmail })
         : await createMongoStorage(resolved.mongo, { hashEmail, normalizeEmail });
 
+    try {
+        assertStorageContract(storage);
+    } catch (err) {
+        await storage?.close?.().catch(() => {});
+        throw err;
+    }
+
     // Adapters that predate 0.3.0 (or haven't caught up yet) keep working:
     // the MFA lockout falls back to an in-process counter, and per-request
     // session verification falls back to the per-process revocation cache.
@@ -145,6 +153,16 @@ function assertSecurityConfig(security) {
             throw new Error(`config.security.${name} must be a random string of at least ${MIN_SECRET_LENGTH} characters`);
         }
     }
+    const previous = security.previousTokenHashSecrets ?? [];
+    if (!Array.isArray(previous)) throw new Error('config.security.previousTokenHashSecrets must be an array of strings');
+    for (const [i, value] of previous.entries()) {
+        if (typeof value !== 'string' || value.length < MIN_SECRET_LENGTH) {
+            throw new Error(`config.security.previousTokenHashSecrets[${i}] must be a string of at least ${MIN_SECRET_LENGTH} characters`);
+        }
+        if (value === security.tokenHashSecret) throw new Error(`config.security.previousTokenHashSecrets[${i}] is the current tokenHashSecret`);
+        if (value === security.emailHashPepper) throw new Error(`config.security.previousTokenHashSecrets[${i}] must not be the emailHashPepper`);
+    }
+    if (new Set(previous).size !== previous.length) throw new Error('config.security.previousTokenHashSecrets has duplicates');
     const minRounds = security.allowWeakBcryptRounds === true ? 4 : 10;
     if (!Number.isInteger(security.bcryptRounds) || security.bcryptRounds < minRounds || security.bcryptRounds > 15) {
         throw new Error(`config.security.bcryptRounds must be an integer from ${minRounds} to 15 (got ${security.bcryptRounds})`);

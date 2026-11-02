@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { initIdentityProvider } from '../src/index.js';
 import { getState, setState } from '../src/config/state.js';
+import { stubStorage } from './helpers/stub-storage.js';
 
 function generateTestSigningKey() {
     const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
@@ -29,18 +30,7 @@ function baseConfig(overrides = {}) {
 }
 
 function fakeStorage() {
-    return {
-        marker: true,
-        close: async () => {},
-        userRepository: {},
-        sessionRepository: {},
-        authorizationCodeRepository: {},
-        consentRepository: {},
-        oauthClientRepository: {},
-        verificationTokenRepository: {},
-        serviceKeyRepository: {},
-        credentialRepository: {},
-    };
+    return stubStorage({ marker: true });
 }
 
 test('storage seam: an injected config.storage.factory is used instead of the built-in Mongo adapter', async () => {
@@ -77,4 +67,23 @@ test('storage seam: omitting both config.mongo and config.storage.factory still 
             return true;
         }
     );
+});
+
+test('storage seam: an adapter missing a required method is refused at startup, naming it, and closed', async () => {
+    let previousState = null;
+    try { previousState = getState(); } catch { /* nothing initialized yet in this process */ }
+    const storage = stubStorage();
+    delete storage.userRepository.bumpSessionEpoch;
+    delete storage.sessionRepository.rotatedWithin;
+    let closed = false;
+    storage.close = async () => { closed = true; };
+    try {
+        await assert.rejects(
+            initIdentityProvider(baseConfig({ storage: { factory: async () => storage } })),
+            /missing required methods: userRepository\.bumpSessionEpoch, sessionRepository\.rotatedWithin/,
+        );
+        assert.equal(closed, true);
+    } finally {
+        if (previousState) setState(previousState);
+    }
 });

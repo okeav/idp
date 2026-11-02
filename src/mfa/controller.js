@@ -5,7 +5,7 @@ import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { IdpError } from '../errors/idp-error.js';
 import { isActiveAccount } from '../utils/account-status.js';
 import { verifyPassword } from '../utils/password.js';
-import { hashOpaqueToken, verifyMfaChallengeToken as verifyMfaChallengeTokenJwt } from '../signing/token.service.js';
+import { hashOpaqueToken, opaqueTokenHashes, HASH_PURPOSES, verifyMfaChallengeToken as verifyMfaChallengeTokenJwt } from '../signing/token.service.js';
 import { auditLog } from '../hooks/index.js';
 import { issueSession, setSessionCookies, resolveClaims, refreshTokenInBody } from '../password-auth/controllers.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
@@ -74,7 +74,8 @@ function generateRecoveryCode() {
 const normalizeRecoveryCode = (code) => String(code).toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
 
 /** Keyed hash of a recovery code, bound to its user — one guess can't be tested against everyone's codes at once. */
-const recoveryCodeHash = (state, userId, code) => hashOpaqueToken(state, `mfa-recovery:${userId}:${normalizeRecoveryCode(code)}`);
+const recoveryCodeInput = (userId, code) => `${userId}:${normalizeRecoveryCode(code)}`;
+const recoveryCodeHash = (state, userId, code) => hashOpaqueToken(state, recoveryCodeInput(userId, code), HASH_PURPOSES.MFA_RECOVERY_CODE);
 
 function newRecoveryCodes(state, userId) {
     const rawCodes = Array.from({ length: state.config.mfa.recoveryCodeCount }, generateRecoveryCode);
@@ -266,8 +267,10 @@ export async function verifyMfaChallengeHandler(req, res, next) {
             const opened = await openMfaSecret(state, user.mfaSecret, userId);
             if (await totpAccepted(state, userId, code, opened?.secret)) return { opened, method: 'totp' };
 
-            const codeHash = recoveryCodeHash(state, user.id, code);
-            if (await consumeRecoveryCode(state, user, codeHash)) return { opened, method: 'recovery-code' };
+            // Codes generated before a tokenHashSecret rotation are stored under a previous key.
+            for (const codeHash of opaqueTokenHashes(state, recoveryCodeInput(user.id, code), HASH_PURPOSES.MFA_RECOVERY_CODE)) {
+                if (await consumeRecoveryCode(state, user, codeHash)) return { opened, method: 'recovery-code' };
+            }
 
             throw invalidCode('Invalid MFA code');
         });

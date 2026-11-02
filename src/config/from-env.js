@@ -77,6 +77,7 @@ export function configFromEnv(env = process.env) {
             bcryptRounds: int('IDP_BCRYPT_ROUNDS', 12, { min: 10 }),
             emailHashPepper: env.IDP_EMAIL_HASH_PEPPER,
             tokenHashSecret: env.IDP_TOKEN_HASH_SECRET,
+            previousTokenHashSecrets: list(env.IDP_PREVIOUS_TOKEN_HASH_SECRETS),
         },
         mfa: {
             issuerLabel: env.IDP_MFA_ISSUER_LABEL || 'App',

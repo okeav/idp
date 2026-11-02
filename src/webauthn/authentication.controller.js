@@ -8,6 +8,7 @@ import { storeChallenge, consumeChallenge } from './challenge-store.js';
 import { auditLog } from '../hooks/index.js';
 import { verifyStoredCredentialAssertion } from './shared.js';
 import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus, refreshTokenInBody } from '../password-auth/controllers.js';
+import { tokenHashKeys, HASH_PURPOSES } from '../signing/token.service.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey } from '../rate-limit/keys.js';
 
@@ -76,7 +77,7 @@ export async function generateAuthenticationOptionsHandler(req, res, next) {
 }
 
 function decoyCredentialId(state, email) {
-    return crypto.createHmac('sha256', state.config.security.tokenHashSecret).update(`webauthn-decoy:${state.normalizeEmail(email)}`).digest('base64url');
+    return crypto.createHmac('sha256', tokenHashKeys(state, HASH_PURPOSES.WEBAUTHN_DECOY)[0]).update(state.normalizeEmail(email)).digest('base64url');
 }
 
 /** POST /webauthn/authentication/verify — issues a full session through the same resolveAuthContext + issueSession path every other login method uses. */

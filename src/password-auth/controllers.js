@@ -3,10 +3,10 @@ import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { IDENTITY_STATUS, COOKIE_NAMES, CACHE_KEY_PREFIXES, SESSION_KINDS } from '../config/constants.js';
 import { sessionKindOf } from '../utils/session-kind.js';
-import { issueAccessToken, issueMfaChallengeToken, hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
+import { issueAccessToken, issueMfaChallengeToken, hashOpaqueToken, generateOpaqueToken, lookupByTokenHash, HASH_PURPOSES } from '../signing/token.service.js';
 import { hashPassword, verifyPassword, compareDummyPassword } from '../utils/password.js';
 import { buildDeviceFingerprint, notifyNewDevice } from '../utils/device-fingerprint.js';
-import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked, assertFamilyNotRevoked, peekRefreshRow, currentSessionEpoch } from '../utils/session-family.js';
+import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked, assertFamilyNotRevoked, peekRefreshRow, currentSessionEpoch, resolveRefreshTokenHash } from '../utils/session-family.js';
 import { auditLog, auditLogDetached, safeInvokeHook, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey, emailKey } from '../rate-limit/keys.js';
@@ -50,7 +50,7 @@ async function issueSession(state, { user, claims, req }) {
     const familyCreatedAt = new Date(authTime * 1000);
     const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims }, { authTime });
     const refreshTokenValue = generateOpaqueToken();
-    const refreshTokenHash = hashOpaqueToken(state, refreshTokenValue);
+    const refreshTokenHash = hashOpaqueToken(state, refreshTokenValue, HASH_PURPOSES.REFRESH_TOKEN);
     const expiresAt = cappedExpiry(state, familyCreatedAt, state.config.ttls.refreshToken);
 
     // Decided BEFORE this login's own session row exists — afterwards the device is always "known".
@@ -65,7 +65,7 @@ async function issueSession(state, { user, claims, req }) {
 
     const familyId = newFamilyId();
     await state.storage.sessionRepository.createSessionForLogin({
-        accessTokenAudit: { user: user.id, tokenHash: hashOpaqueToken(state, accessToken.token), expiresAt: accessToken.expiresAt, kid: accessToken.kid, jti: accessToken.jti, ipAddress: req.ip, deviceInfo },
+        accessTokenAudit: { user: user.id, tokenHash: hashOpaqueToken(state, accessToken.token, HASH_PURPOSES.ACCESS_TOKEN_AUDIT), expiresAt: accessToken.expiresAt, kid: accessToken.kid, jti: accessToken.jti, ipAddress: req.ip, deviceInfo },
         session: {
             user: user.id,
             tokenHash: refreshTokenHash,
@@ -212,13 +212,13 @@ const boundPasswordHash = (row, user) => row.passwordHash ?? user.passwordHash ?
 /** `passwordHash`: the password of the registration this code verifies — the one it activates. */
 async function createEmailVerificationToken(state, userId, passwordHash) {
     const token = generateOpaqueToken(32);
-    const tokenHash = hashOpaqueToken(state, token);
+    const tokenHash = hashOpaqueToken(state, token, HASH_PURPOSES.EMAIL_VERIFICATION_LINK);
     const verificationCode = crypto.randomInt(100000, 1000000).toString();
     await state.storage.verificationTokenRepository.create('email_verification', {
         user: userId,
         tokenHash,
         // Stored as an HMAC like every other token — a database read must not yield a usable code.
-        verificationCode: hashOpaqueToken(state, verificationCode),
+        verificationCode: hashOpaqueToken(state, verificationCode, HASH_PURPOSES.EMAIL_VERIFICATION_CODE),
         passwordHash: passwordHash ?? null,
         expiresAt: new Date(Date.now() + state.config.ttls.emailVerification * 1000),
     });
@@ -241,8 +241,8 @@ export async function verifyEmailHandler(req, res, next) {
             if (!user || user.status !== IDENTITY_STATUS.PENDING_VERIFICATION) throw INVALID_VERIFICATION();
             // Read, check, THEN consume — a refused attempt never takes the code out of circulation.
             const row = token
-                ? await tokens.findActive('email_verification', { tokenHash: hashOpaqueToken(state, token) }, user.id)
-                : (await tokens.findActive('email_verification', { verificationCode: hashOpaqueToken(state, code) }, user.id))
+                ? (await lookupByTokenHash(state, token, HASH_PURPOSES.EMAIL_VERIFICATION_LINK, (tokenHash) => tokens.findActive('email_verification', { tokenHash }, user.id))).result
+                : (await lookupByTokenHash(state, code, HASH_PURPOSES.EMAIL_VERIFICATION_CODE, (verificationCode) => tokens.findActive('email_verification', { verificationCode }, user.id))).result
                     // Codes issued before 0.4.0 were stored in plain text (they expire within a day). Only
                     // a real 6-digit code is tried that way — never a value read from the database, which
                     // is now the code's HMAC and would otherwise be accepted as-is.
@@ -478,7 +478,7 @@ export async function refreshTokenHandler(req, res, next) {
         // refresh token from a sibling origin would sign the victim's browser into the attacker's account.
         assertTrustedOrigin(state, req);
 
-        const tokenHash = hashOpaqueToken(state, refreshTokenValue);
+        const tokenHash = await resolveRefreshTokenHash(state, refreshTokenValue);
         // Everything that can refuse or fail runs BEFORE the token is consumed: a refusal (an inactive
         // account, a claims hook that throws, the family's end) must not burn it — a burnt token's
         // retry would look like reuse and revoke the whole family.
@@ -522,7 +522,7 @@ export async function refreshTokenHandler(req, res, next) {
         const authTime = existing.authTime ? Math.floor(new Date(existing.authTime).getTime() / 1000) : undefined;
         const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims }, { authTime });
         const newRefreshTokenValue = generateOpaqueToken();
-        const newRefreshTokenHash = hashOpaqueToken(state, newRefreshTokenValue);
+        const newRefreshTokenHash = hashOpaqueToken(state, newRefreshTokenValue, HASH_PURPOSES.REFRESH_TOKEN);
         const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, state.config.ttls.refreshToken);
         const deviceInfo = req.headers['user-agent'] || existing.deviceInfo || '';
 
@@ -565,7 +565,7 @@ export async function logoutHandler(req, res, next) {
         const refreshTokenValue = req.body?.refreshToken || readSessionCookie(state, req, COOKIE_NAMES.REFRESH_TOKEN);
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required to log out' });
 
-        const tokenHash = hashOpaqueToken(state, refreshTokenValue);
+        const tokenHash = await resolveRefreshTokenHash(state, refreshTokenValue);
         const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash, { onlyIfActive: false });
         if (existing?.jti) {
             await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${existing.jti}`, '1', state.config.ttls.revocationCache);
@@ -613,7 +613,7 @@ export async function forgotPasswordHandler(req, res, next) {
             // concurrent requests can't leave several live links).
             const resetToken = generateOpaqueToken(32);
             await state.storage.verificationTokenRepository.replaceForUser('password_reset', user.id, {
-                tokenHash: hashOpaqueToken(state, resetToken),
+                tokenHash: hashOpaqueToken(state, resetToken, HASH_PURPOSES.PASSWORD_RESET),
                 expiresAt: new Date(Date.now() + state.config.ttls.passwordReset * 1000),
             });
 
@@ -634,7 +634,7 @@ export async function resetPasswordHandler(req, res, next) {
         const user = await state.storage.userRepository.findByEmail(email);
         if (!user) throw new IdpError({ code: 'INVALID_OR_EXPIRED_TOKEN', httpStatus: 400, message: 'Invalid or expired token' });
 
-        const record = await state.storage.verificationTokenRepository.consumeByHash('password_reset', hashOpaqueToken(state, token), user.id);
+        const { result: record } = await lookupByTokenHash(state, token, HASH_PURPOSES.PASSWORD_RESET, (hash) => state.storage.verificationTokenRepository.consumeByHash('password_reset', hash, user.id));
         if (!record) throw new IdpError({ code: 'INVALID_OR_EXPIRED_TOKEN', httpStatus: 400, message: 'Invalid or expired token' });
 
         const passwordHash = await hashPassword(newPassword, state.config.security.bcryptRounds);

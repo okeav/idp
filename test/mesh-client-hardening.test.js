@@ -7,7 +7,7 @@ import { buildTestApp, uniqueEmail, freshTotp } from './helpers/build-test-app.j
 import { json } from './helpers/serve.js';
 import { gate } from './helpers/gate.js';
 import { authContextMiddleware, revokeServiceKey } from '../src/index.js';
-import { issueMfaChallengeToken, hashOpaqueToken } from '../src/signing/token.service.js';
+import { issueMfaChallengeToken, hashOpaqueToken, HASH_PURPOSES } from '../src/signing/token.service.js';
 
 // Service-key races, client_credentials tokens outliving their client, client registration limits,
 // recovery-code strength and MFA challenge audience — from the second review.
@@ -132,7 +132,7 @@ test('recovery codes carry 100 bits, are stored bound to their user, and accept 
     for (const c of u.recoveryCodes) assert.match(c, /^[0-9A-HJKMNP-TV-Z]{5}(-[0-9A-HJKMNP-TV-Z]{5}){3}$/);
     const stored = await app.state.storage.userRepository.findById(u.userId, { select: '+mfaRecoveryCodes' });
     const hashes = stored.mfaRecoveryCodes.map((r) => r.codeHash);
-    assert.ok(!hashes.includes(hashOpaqueToken(app.state, u.recoveryCodes[0])), 'not a bare HMAC of the code');
+    assert.ok(!hashes.includes(hashOpaqueToken(app.state, u.recoveryCodes[0], HASH_PURPOSES.MFA_RECOVERY_CODE)), 'not a bare HMAC of the code');
 
     const challenge = (await (await post('/login', { email: u.email, password })).json()).mfaChallengeToken;
     const typed = ` ${u.recoveryCodes[0].toLowerCase().replace(/-/g, ' ')} `;

@@ -2,7 +2,7 @@ import { getState } from '../config/state.js';
 import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { IdpError } from '../errors/idp-error.js';
 import { IDENTITY_STATUS } from '../config/constants.js';
-import { hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
+import { hashOpaqueToken, generateOpaqueToken, lookupByTokenHash, HASH_PURPOSES } from '../signing/token.service.js';
 import { auditLog, auditLogDetached, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey, emailKey } from '../rate-limit/keys.js';
@@ -45,7 +45,7 @@ export async function requestMagicLinkHandler(req, res, next) {
         // Only the newest link works: requesting another replaces the earlier one (atomically).
         const token = generateOpaqueToken(32);
         await state.storage.verificationTokenRepository.replaceForUser('magic_link', user.id, {
-            tokenHash: hashOpaqueToken(state, token),
+            tokenHash: hashOpaqueToken(state, token, HASH_PURPOSES.MAGIC_LINK),
             expiresAt: new Date(Date.now() + state.config.ttls.magicLink * 1000),
         });
 
@@ -73,7 +73,7 @@ export async function verifyMagicLinkHandler(req, res, next) {
         assertTrustedOrigin(state, req); // sets session cookies — refuse login CSRF (see middleware/csrf.js)
         const { token } = req.body;
 
-        const record = await state.storage.verificationTokenRepository.consumeByHash('magic_link', hashOpaqueToken(state, token));
+        const { result: record } = await lookupByTokenHash(state, token, HASH_PURPOSES.MAGIC_LINK, (hash) => state.storage.verificationTokenRepository.consumeByHash('magic_link', hash));
         if (!record) throw new IdpError({ code: 'INVALID_OR_EXPIRED_TOKEN', httpStatus: 400, message: 'Invalid or expired magic link' });
 
         let user = await state.storage.userRepository.findById(record.user);

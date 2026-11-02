@@ -119,7 +119,7 @@ test('revoking one session refuses its access token on the other instance, and l
 
     const sessions = await (await fetch(`${instanceA.baseUrl}/me/sessions`, { headers: { Authorization: `Bearer ${keep.accessToken}` } })).json();
     const killRow = await stateA.storage.sessionRepository.findByRefreshTokenHash(
-        (await import('../src/signing/token.service.js')).hashOpaqueToken(stateA, kill.refreshToken),
+        (await import('../src/signing/token.service.js')).hashOpaqueToken(stateA, kill.refreshToken, 'refresh-token'),
     );
     assert.ok(sessions.some((s) => String(s.id) === String(killRow.id)));
     const del = await fetch(`${instanceA.baseUrl}/me/sessions/${killRow.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${keep.accessToken}` } });

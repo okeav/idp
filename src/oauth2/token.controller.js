@@ -3,13 +3,13 @@ import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { GRANT_TYPES, CACHE_KEY_PREFIXES, SESSION_KINDS, ACCESS_TOKEN_KINDS } from '../config/constants.js';
 import { isActiveAccount } from '../utils/account-status.js';
-import { issueOAuth2AccessToken, issueIdToken, hashOpaqueToken, generateOpaqueToken, verifyAccessToken, clientTtl } from '../signing/token.service.js';
+import { issueOAuth2AccessToken, issueIdToken, hashOpaqueToken, generateOpaqueToken, verifyAccessToken, clientTtl, lookupByTokenHash, opaqueTokenHashes, HASH_PURPOSES } from '../signing/token.service.js';
 import { sessionKindOf } from '../utils/session-kind.js';
 import { authenticateClient } from './client-auth.js';
 import { auditLog } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey } from '../rate-limit/keys.js';
-import { familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeFamily, assertChainNotRevoked, assertFamilyNotRevoked, peekRefreshRow } from '../utils/session-family.js';
+import { familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeFamily, assertChainNotRevoked, assertFamilyNotRevoked, peekRefreshRow, resolveRefreshTokenHash } from '../utils/session-family.js';
 
 const INVALID_GRANT = (message) => new IdpError({ code: 'INVALID_GRANT', httpStatus: 400, message });
 
@@ -131,10 +131,9 @@ async function handleAuthorizationCodeGrant(req, res) {
 
     const client = await authenticateClient(state, req);
     assertGrantAllowed(client, GRANT_TYPES.AUTHORIZATION_CODE);
-    const codeHash = hashOpaqueToken(state, code);
-    const authCode = await state.storage.authorizationCodeRepository.consumeByCodeHash(codeHash);
+    const { result: authCode, hash: codeHash } = await lookupByTokenHash(state, code, HASH_PURPOSES.AUTHORIZATION_CODE, (hash) => state.storage.authorizationCodeRepository.consumeByCodeHash(hash));
     if (!authCode) {
-        await handleCodeReuse(state, codeHash);
+        for (const hash of opaqueTokenHashes(state, code, HASH_PURPOSES.AUTHORIZATION_CODE)) await handleCodeReuse(state, hash);
         throw INVALID_GRANT('Invalid or expired authorization code');
     }
     if (authCode.clientId !== client.clientId) throw INVALID_GRANT('Authorization code was issued to another client');
@@ -151,7 +150,7 @@ async function handleAuthorizationCodeGrant(req, res) {
     const familyCreatedAt = new Date();
     const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, clientTtl(client, 'refreshTokenTTL', state.config.ttls.refreshToken));
 
-    const refreshTokenHash = hashOpaqueToken(state, refreshTokenValue);
+    const refreshTokenHash = hashOpaqueToken(state, refreshTokenValue, HASH_PURPOSES.REFRESH_TOKEN);
     await state.storage.sessionRepository.createSession({
         user: user.id, tokenHash: refreshTokenHash, expiresAt: refreshExpiresAt,
         kid: accessTokenResult.kid, jti: accessTokenResult.jti, ipAddress: req.ip, deviceInfo: req.headers['user-agent'],
@@ -190,7 +189,7 @@ async function handleRefreshTokenGrant(req, res) {
 
     const client = await authenticateClient(state, req);
     assertGrantAllowed(client, GRANT_TYPES.REFRESH_TOKEN);
-    const tokenHash = hashOpaqueToken(state, refresh_token);
+    const tokenHash = await resolveRefreshTokenHash(state, refresh_token);
     // Every check runs before the token is consumed, so a refusal doesn't burn it (see /refresh).
     const row = await peekRefreshRow(state, tokenHash);
     if (!row) {
@@ -225,7 +224,7 @@ async function handleRefreshTokenGrant(req, res) {
 
     const accessTokenResult = await issueOAuth2AccessToken(state, user, client, scopes);
     const newRefreshTokenValue = generateOpaqueToken();
-    const newTokenHash = hashOpaqueToken(state, newRefreshTokenValue);
+    const newTokenHash = hashOpaqueToken(state, newRefreshTokenValue, HASH_PURPOSES.REFRESH_TOKEN);
     const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, clientTtl(client, 'refreshTokenTTL', state.config.ttls.refreshToken));
 
     await state.storage.sessionRepository.createSession({
@@ -303,7 +302,7 @@ async function findClientSession(state, client, token) {
         const session = await sessions.findByJti(payload.jti);
         return session ? { payload, session } : null;
     }
-    const session = await sessions.findByRefreshTokenHash(hashOpaqueToken(state, token));
+    const { result: session } = await lookupByTokenHash(state, token, HASH_PURPOSES.REFRESH_TOKEN, (hash) => sessions.findByRefreshTokenHash(hash));
     if (!session || sessionKindOf(session) !== SESSION_KINDS.OAUTH2 || session.claims?.clientId !== client.clientId) return null;
     return { payload: null, session };
 }
@@ -323,7 +322,7 @@ export async function revokeTokenHandler(req, res, next) {
         if (found?.session && !found.session.revokedAt) {
             const sessions = state.storage.sessionRepository;
             if (found.payload) await sessions.revokeById(found.session.id, found.session.user);
-            else await sessions.revokeByRefreshTokenHash(hashOpaqueToken(state, req.body.token), { onlyIfActive: false });
+            else await sessions.revokeByRefreshTokenHash(await resolveRefreshTokenHash(state, req.body.token), { onlyIfActive: false });
             if (found.session.jti) await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${found.session.jti}`, '1', state.config.ttls.revocationCache);
             await auditLog(state.logger, state.hooks, 'OAUTH2_TOKEN_REVOKED', { clientId: client.clientId, userId: String(found.session.user) });
         }

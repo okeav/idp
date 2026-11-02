@@ -251,10 +251,74 @@ async function verifyWithAnyKey(state, token, { issuer } = {}) {
     }
 }
 
-// ── Opaque-token hashing (refresh tokens, password-reset / email-verification tokens) ──
+// ── Opaque-token hashing (refresh tokens, codes, links, recovery codes, client secrets) ──
 
-export function hashOpaqueToken(state, rawToken) {
-    return crypto.createHmac('sha256', state.config.security.tokenHashSecret).update(rawToken).digest('hex');
+/**
+ * What a keyed hash is for. Each purpose gets its own key, derived from `security.tokenHashSecret`
+ * (HKDF-SHA256, the purpose as `info`): a hash made for one purpose never verifies as another, and
+ * no stored hash is keyed by the secret itself.
+ */
+export const HASH_PURPOSES = Object.freeze({
+    REFRESH_TOKEN: 'refresh-token',
+    AUTHORIZATION_CODE: 'authorization-code',
+    EMAIL_VERIFICATION_LINK: 'email-verification-link',
+    EMAIL_VERIFICATION_CODE: 'email-verification-code',
+    PASSWORD_RESET: 'password-reset',
+    MAGIC_LINK: 'magic-link',
+    MFA_RECOVERY_CODE: 'mfa-recovery-code',
+    OAUTH_CLIENT_SECRET: 'oauth-client-secret',
+    ACCESS_TOKEN_AUDIT: 'access-token-audit',
+    WEBAUTHN_DECOY: 'webauthn-decoy',
+});
+const PURPOSES = new Set(Object.values(HASH_PURPOSES));
+const HKDF_SALT = 'okeav/idp-core token-hash v1';
+const derivedKeys = new Map();
+
+function derivedKey(secret, purpose) {
+    const id = `${purpose}\u0000${secret}`;
+    let key = derivedKeys.get(id);
+    if (!key) {
+        key = Buffer.from(crypto.hkdfSync('sha256', secret, HKDF_SALT, purpose, 32));
+        derivedKeys.set(id, key);
+    }
+    return key;
+}
+
+/**
+ * The keys for `purpose`: the current one (from `security.tokenHashSecret`) first, then one per
+ * `security.previousTokenHashSecrets` — so the secret can be rotated: new hashes use the current key,
+ * while everything stored under a previous one still verifies until it expires or is replaced.
+ */
+export function tokenHashKeys(state, purpose) {
+    if (!PURPOSES.has(purpose)) throw new Error(`Unknown token-hash purpose: ${purpose}`);
+    const { tokenHashSecret, previousTokenHashSecrets = [] } = state.config.security;
+    return [tokenHashSecret, ...previousTokenHashSecrets].map((secret) => derivedKey(secret, purpose));
+}
+
+const hmacHex = (key, value) => crypto.createHmac('sha256', key).update(String(value)).digest('hex');
+
+/** The hash to STORE for `rawToken` — always under the current key. */
+export function hashOpaqueToken(state, rawToken, purpose) {
+    return hmacHex(tokenHashKeys(state, purpose)[0], rawToken);
+}
+
+/** Every hash `rawToken` may be stored under: the current key's first, then each previous key's. */
+export function opaqueTokenHashes(state, rawToken, purpose) {
+    return tokenHashKeys(state, purpose).map((key) => hmacHex(key, rawToken));
+}
+
+/**
+ * Looks `rawToken` up under each of its candidate hashes (opaqueTokenHashes), in order, until
+ * `lookup(hash)` returns something. Resolves `{ result, hash }` — the hash that matched, or (no match)
+ * the current one with a null result. With no previous secrets this is a single lookup.
+ */
+export async function lookupByTokenHash(state, rawToken, purpose, lookup) {
+    const hashes = opaqueTokenHashes(state, rawToken, purpose);
+    for (const hash of hashes) {
+        const result = await lookup(hash);
+        if (result) return { result, hash };
+    }
+    return { result: null, hash: hashes[0] };
 }
 
 export function generateOpaqueToken(byteLength = 64) {

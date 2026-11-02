@@ -24,6 +24,10 @@
  * @property {(id: string, patch: object, opts?: object) => Promise<object|null>} updateById
  * @property {(id: string, status: string, patch: object) => Promise<object|null>} updateByIdIfStatus - ATOMIC: apply
  *   `patch` only while the user's status is still `status`; null if it changed (registration/activation races)
+ * @property {(id: string, opts?: {exceptFamily?: string|null}) => Promise<number|null>} bumpSessionEpoch - ATOMIC:
+ *   increment the user's `sessionEpoch` (a number, default 0, returned on every user read) and record
+ *   `sessionsRevokedExceptFamily = exceptFamily` and `sessionsRevokedAt`; resolve the new epoch. "Revoke all sessions"
+ *   is ordered by this counter, never by comparing app-server clocks.
  * @property {(id: string) => Promise<object|null>} [incrementFailedLoginAttempts] - unused since 0.4.0 (the password
  *   lockout lives in the attempt counters, key `password-login:<userId>`); kept for older callers
  * @property {(id: string, step: number) => Promise<boolean>} [claimTotpStep] - ATOMIC: set `mfaLastTotpStep = step`
@@ -48,6 +52,11 @@
  * @property {(hash: string, opts?: {onlyIfActive?: boolean, reason?: string}) => Promise<object|null>} revokeByRefreshTokenHash -
  *   ATOMIC consume; resolves the row as it was BEFORE revocation. Must persist `reason` as `revokeReason`
  *   ('rotated' on refresh) — that is how a replayed rotated token is recognised.
+ * @property {(hash: string, seconds: number) => Promise<boolean>} rotatedWithin - whether the row was revoked with
+ *   reason 'rotated' less than `seconds` ago, measured by ONE clock — the database's (so `revokeByRefreshTokenHash`
+ *   must write `revokedAt` from that same clock)
+ * @property {(familyId: string, epoch: number) => Promise<void>} raiseFamilyEpoch - set `sessionEpoch` to at least
+ *   `epoch` on every row of the family. Rows also persist `sessionEpoch` as given on create.
  * @property {(familyId: string) => Promise<boolean>} isFamilyLive - whether the family has a live (unrevoked,
  *   unexpired) row
  * @property {(familyId: string) => Promise<boolean>} isFamilyRevoked - whether revokeFamily ran for this family
@@ -68,6 +77,7 @@
  * @property {() => Promise<{deletedCount: number}>} [pruneExpired] - optional, for adapters without native TTL
  *
  * @typedef {Object} AuthorizationCodeRepository
+ * Codes also carry `sessionEpoch` and `consentVersion` (numbers) — persist them as given.
  * @property {(input: object) => Promise<void>} create
  * @property {(hash: string) => Promise<object|null>} consumeByCodeHash
  * @property {(hash: string) => Promise<object|null>} [findUsedByCodeHash] - an already-redeemed code (for reuse
@@ -75,7 +85,9 @@
  * @property {() => Promise<{deletedCount: number}>} [pruneExpired]
  *
  * @typedef {Object} ConsentRepository
- * @property {(userId: string, clientId: string, scopes: string[]) => Promise<object>} upsert
+ * Every consent has a `version` (number, default 0) that `upsert` and `revoke` both increment atomically.
+ * @property {(userId: string, clientId: string, scopes: string[]) => Promise<object>} upsert - resolves the consent
+ *   AFTER the write (with its new `version`)
  * @property {(userId: string, clientId: string) => Promise<object|null>} find
  * @property {(userId: string) => Promise<object[]>} listForUser
  * @property {(userId: string, clientId: string) => Promise<void>} revoke
@@ -141,4 +153,29 @@
  * @property {(key: string) => Promise<void>} reset
  * @property {() => Promise<{deletedCount: number}>} [pruneExpired]
  */
-export {};
+
+/**
+ * The methods idp-core calls without checking for them first — an adapter missing one is refused at
+ * startup (initIdentityProvider) instead of failing in the middle of a login. Everything else in the
+ * typedefs above marked optional (`[name]`) is feature-detected.
+ */
+export const REQUIRED_STORAGE_METHODS = Object.freeze({
+    userRepository: ['create', 'findById', 'findByEmail', 'findByExternalProvider', 'updateById', 'updateByIdIfStatus', 'bumpSessionEpoch', 'linkExternalProvider', 'deleteById', 'countAll', 'findMany'],
+    sessionRepository: ['createSession', 'createSessionForLogin', 'findByRefreshTokenHash', 'revokeByRefreshTokenHash', 'rotatedWithin', 'raiseFamilyEpoch', 'isFamilyLive', 'isFamilyRevoked', 'revokeById', 'revokeAllForUser', 'listActiveForUser', 'listHistoryForUser', 'existsForDevice'],
+    authorizationCodeRepository: ['create', 'consumeByCodeHash'],
+    consentRepository: ['upsert', 'find', 'listForUser', 'revoke'],
+    oauthClientRepository: ['create', 'findByClientId', 'findBySlug', 'updateByClientId', 'listMany', 'countAll'],
+    verificationTokenRepository: ['create', 'consumeByHash', 'consumeByCode', 'findActive', 'clearCodes', 'replaceForUser', 'deleteAllForUser'],
+    serviceKeyRepository: ['upsertByKid', 'listPublishable', 'setStatusByKid'],
+    credentialRepository: ['create', 'findByCredentialId', 'findByUserId', 'updateCounter', 'deleteByCredentialId', 'countForUser'],
+});
+
+/** Throws naming every required method the adapter's `storage` object lacks. */
+export function assertStorageContract(storage) {
+    const missing = [];
+    for (const [repo, methods] of Object.entries(REQUIRED_STORAGE_METHODS)) {
+        for (const m of methods) if (typeof storage?.[repo]?.[m] !== 'function') missing.push(`${repo}.${m}`);
+    }
+    if (typeof storage?.close !== 'function') missing.push('close');
+    if (missing.length) throw new Error(`Storage adapter is missing required methods: ${missing.join(', ')} — see src/storage/interfaces.js`);
+}

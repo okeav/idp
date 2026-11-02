@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { IdpError } from '../errors/idp-error.js';
 import { CACHE_KEY_PREFIXES } from '../config/constants.js';
 import { auditLog } from '../hooks/index.js';
+import { HASH_PURPOSES, hashOpaqueToken, lookupByTokenHash } from '../signing/token.service.js';
 
 /**
  * Refresh-token families (RFC 9700 §4.14.2). A login — or an OAuth2 authorization code — starts a
@@ -37,6 +38,16 @@ async function markRevokedInCache(state, jtis) {
     for (const jti of jtis || []) {
         await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${jti}`, '1', state.config.ttls.revocationCache);
     }
+}
+
+/**
+ * The hash a refresh token's row is stored under: the current key's, or — after
+ * `security.tokenHashSecret` was rotated — a previous key's. Everything after uses that one hash.
+ */
+export async function resolveRefreshTokenHash(state, rawToken) {
+    if (!state.config.security.previousTokenHashSecrets?.length) return hashOpaqueToken(state, rawToken, HASH_PURPOSES.REFRESH_TOKEN);
+    const sessions = state.storage.sessionRepository;
+    return (await lookupByTokenHash(state, rawToken, HASH_PURPOSES.REFRESH_TOKEN, (hash) => sessions.findByRefreshTokenHash(hash))).hash;
 }
 
 /**
