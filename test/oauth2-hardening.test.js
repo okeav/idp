@@ -310,9 +310,9 @@ test('end-session: only a real ID token is a hint, and it ends only that client\
     assert.equal(mismatch.status, 400);
 });
 
-test('end-session with the browser\'s IdP session ends that session and clears its cookies', async () => {
+test('end-session with the browser\'s IdP session, once confirmed (POST), ends that session and clears its cookies', async () => {
     const u = await user();
-    const res = await fetch(`${app.baseUrl}/oidc/end-session`, { headers: { Cookie: `__Host-access_token=${u.accessToken}` } });
+    const res = await fetch(`${app.baseUrl}/oidc/end-session`, { method: 'POST', headers: { Cookie: `__Host-access_token=${u.accessToken}` } });
     assert.equal(res.status, 200);
     assert.ok(res.headers.getSetCookie().some((c) => c.startsWith('__Host-access_token=;')));
     assert.equal((await fetch(`${app.baseUrl}/me`, { headers: bearer(u.accessToken) })).status, 401);

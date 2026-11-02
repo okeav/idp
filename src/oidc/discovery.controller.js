@@ -28,6 +28,7 @@ export function openidConfigurationHandler(req, res) {
             'name', 'given_name', 'family_name', 'picture', 'locale', 'zoneinfo', 'updated_at',
         ],
         code_challenge_methods_supported: ['S256'],
+        prompt_values_supported: ['none', 'login', 'consent', 'select_account'],
         authorization_response_iss_parameter_supported: true,
         request_parameter_supported: false,
         claims_parameter_supported: false,

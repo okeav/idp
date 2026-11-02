@@ -26,6 +26,9 @@ export const authorizeQuerySchema = z.object({
     scope: z.string().optional(),
     state: z.string().max(2048).optional(),
     nonce: nonce.optional(),
+    // OIDC Core §3.1.2.1 — see authorize.controller.js (resolvePrompt).
+    prompt: z.string().max(100).optional(),
+    max_age: z.string().regex(/^\d{1,10}$/, 'max_age must be a non-negative integer of seconds').optional(),
     ...pkceFields,
 }).refine(pkceMethodRequired, pkceMethodMessage);
 

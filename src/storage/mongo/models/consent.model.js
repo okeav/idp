@@ -11,6 +11,9 @@ export function defineConsentModel(connection) {
             expiresAt: { type: Date, default: null },
             revokedAt: { type: Date, default: null },
             isRevoked: { type: Boolean, default: false },
+            // Incremented on every grant and revocation — a code carries the version it was issued under,
+            // so one issued before the consent changed is refused (a counter: no clock comparison).
+            version: { type: Number, default: 0 },
         },
         { timestamps: true }
     );

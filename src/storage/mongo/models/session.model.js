@@ -37,6 +37,8 @@ export function defineSessionModel(connection) {
             // whole family (theft detection); familyCreatedAt bounds the family's absolute lifetime.
             familyId: { type: String, default: null },
             familyCreatedAt: { type: Date, default: null },
+            // The user's `sessionEpoch` when this chain was authenticated (see identity-user.model.js).
+            sessionEpoch: { type: Number, default: 0 },
 
             // Opaque snapshot of whatever the consumer put in the access token's
             // `claims` at the time this session was created — carried here so a

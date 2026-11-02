@@ -50,6 +50,19 @@ export class MongoUserRepository {
         return this.model.findOneAndUpdate({ _id: id, status }, { $set: patch }, { returnDocument: 'after' });
     }
 
+    /**
+     * "Revoke all sessions": atomically increments `sessionEpoch` (and records which family, if any, is
+     * exempt from this bump). Resolves the new epoch.
+     */
+    async bumpSessionEpoch(id, { exceptFamily = null } = {}) {
+        const doc = await this.model.findByIdAndUpdate(
+            id,
+            { $inc: { sessionEpoch: 1 }, $set: { sessionsRevokedAt: new Date(), sessionsRevokedExceptFamily: exceptFamily } },
+            { returnDocument: 'after', projection: { sessionEpoch: 1 } },
+        );
+        return doc?.sessionEpoch ?? null;
+    }
+
     async incrementFailedLoginAttempts(id) {
         return this.model.findByIdAndUpdate(id, { $inc: { failedLoginAttempts: 1 } }, { returnDocument: 'after' });
     }

@@ -69,7 +69,7 @@ export function configFromEnv(env = process.env) {
             sameSite: env.IDP_COOKIE_SAME_SITE || 'lax',
             domain: env.IDP_COOKIE_DOMAIN || undefined,
             trustedOrigins: list(env.IDP_COOKIE_TRUSTED_ORIGINS),
-            refreshTokenInBody: bool('IDP_COOKIE_REFRESH_TOKEN_IN_BODY', true),
+            refreshTokenInBody: (env.IDP_COOKIE_REFRESH_TOKEN_IN_BODY ?? '').trim().toLowerCase() === 'auto' ? 'auto' : bool('IDP_COOKIE_REFRESH_TOKEN_IN_BODY', 'auto'),
         },
         security: {
             maxFailedLoginAttempts: int('IDP_MAX_FAILED_LOGIN_ATTEMPTS', 5, { min: 1 }),
@@ -84,7 +84,7 @@ export function configFromEnv(env = process.env) {
             enabled: bool('IDP_MFA_ENABLED', true),
             encryptionKey: env.IDP_MFA_ENCRYPTION_KEY || undefined,
             previousEncryptionKeys: (env.IDP_MFA_PREVIOUS_ENCRYPTION_KEYS || '').split(',').map((k) => k.trim()).filter(Boolean),
-            requireEncrypted: bool('IDP_MFA_REQUIRE_ENCRYPTED', false),
+            requireEncrypted: bool('IDP_MFA_REQUIRE_ENCRYPTED', undefined),
             allowPlaintext: bool('IDP_MFA_ALLOW_PLAINTEXT', false),
         },
         session: {

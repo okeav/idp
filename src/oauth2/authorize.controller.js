@@ -4,6 +4,7 @@ import { IdpError } from '../errors/idp-error.js';
 import { OAUTH_CLIENT_STATUS, CLIENT_TYPES, CACHE_KEY_PREFIXES } from '../config/constants.js';
 import { hashOpaqueToken } from '../signing/token.service.js';
 import { auditLog } from '../hooks/index.js';
+import { currentSessionEpoch } from '../utils/session-family.js';
 
 function validateRedirectUri(client, redirectUri) {
     if (!client.redirectUris?.includes(redirectUri)) {
@@ -39,8 +40,9 @@ function assertPkce(state, client, codeChallenge) {
     }
 }
 
-async function issueAuthorizationCode(state, { clientId, userId, redirectUri, scopes, codeChallenge, nonce, authTime, sessionJti }) {
+async function issueAuthorizationCode(state, { clientId, userId, redirectUri, scopes, codeChallenge, nonce, authTime, sessionJti, consentVersion }) {
     const code = crypto.randomBytes(32).toString('hex');
+    const sessionEpoch = await currentSessionEpoch(state, userId);
     await state.storage.authorizationCodeRepository.create({
         code: hashOpaqueToken(state, code),
         clientId,
@@ -54,6 +56,9 @@ async function issueAuthorizationCode(state, { clientId, userId, redirectUri, sc
         // The session that authorized it — revoked before redemption (a sign-out landing while this
         // request was in flight), the code is refused.
         sessionJti: sessionJti ?? null,
+        // Redemption refuses the code if the user's sessions were revoked, or the consent changed, since.
+        sessionEpoch,
+        consentVersion: consentVersion ?? 0,
         expiresAt: new Date(Date.now() + state.config.ttls.authCode * 1000),
         used: false,
     });
@@ -66,6 +71,45 @@ function redirectToClient(res, state, redirectUri, params) {
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) url.searchParams.set(k, v);
     url.searchParams.set('iss', state.config.issuer);
     res.redirect(url.toString());
+}
+
+const PROMPT_VALUES = new Set(['none', 'login', 'consent', 'select_account']);
+
+/**
+ * How long a login still counts as "just now" for `prompt=login` / `max_age=0`: the user signs in
+ * on the IdP's page, which then repeats the authorize request — that repeat must find the new login
+ * fresh, not ask for another one.
+ */
+export const FRESH_LOGIN_SECONDS = 60;
+
+/**
+ * `prompt` and `max_age` (OIDC Core §3.1.2.1). Unknown prompt values, or `none` with another, are
+ * refused. `select_account` is treated as `login` (there is no account chooser: signing in again is
+ * how the user picks an account). `max_age=0` means `prompt=login`.
+ */
+function resolvePrompt(q) {
+    const values = new Set(String(q.prompt ?? '').split(' ').filter(Boolean));
+    for (const v of values) {
+        if (!PROMPT_VALUES.has(v)) throw new IdpError({ code: 'INVALID_REQUEST', httpStatus: 400, message: `Unsupported prompt value: ${v}` });
+    }
+    if (values.has('none') && values.size > 1) throw new IdpError({ code: 'INVALID_REQUEST', httpStatus: 400, message: 'prompt=none cannot be combined with other values' });
+    const maxAge = q.max_age === undefined ? undefined : Number(q.max_age);
+    return {
+        none: values.has('none'),
+        login: values.has('login') || values.has('select_account') || maxAge === 0,
+        consent: values.has('consent'),
+        maxAge: maxAge === 0 ? undefined : maxAge,
+    };
+}
+
+/** Why the request needs a (new) login, or null: not signed in, or the login is older than prompt/max_age allow. */
+function loginRequiredReason(req, prompt) {
+    if (!req.auth?.userId) return 'unauthenticated';
+    const authTime = req.auth.tokenMeta?.authTime;
+    const age = Number.isInteger(authTime) ? Math.floor(Date.now() / 1000) - authTime : Infinity;
+    if (prompt.login && !(age <= FRESH_LOGIN_SECONDS)) return 'prompt_login';
+    if (prompt.maxAge !== undefined && !(age <= prompt.maxAge)) return 'max_age';
+    return null;
 }
 
 /** The session behind the request's token — none for a sessionless token (the public issueAccessToken export). */
@@ -102,8 +146,12 @@ export async function authorizeHandler(req, res, next) {
         validateScopes(client, requestedScopes);
         assertPkce(state, client, code_challenge);
 
-        if (!req.auth?.userId) {
-            return res.status(401).json({ action: 'login_required' });
+        const prompt = resolvePrompt(q);
+        const loginReason = loginRequiredReason(req, prompt);
+        if (loginReason) {
+            // prompt=none: the client asked for no UI, so the answer goes back to it (redirect_uri is validated).
+            if (prompt.none) return redirectToClient(res, state, redirect_uri, { error: 'login_required', state: oauthState });
+            return res.status(401).json({ action: 'login_required', reason: loginReason });
         }
 
         const pending = {
@@ -117,7 +165,8 @@ export async function authorizeHandler(req, res, next) {
         const consentedScopes = new Set(consentLive ? existingConsent.scopes || [] : []);
         const missingScopes = requestedScopes.filter((s) => !consentedScopes.has(s));
 
-        if (missingScopes.length > 0) {
+        if (missingScopes.length > 0 || prompt.consent) {
+            if (prompt.none) return redirectToClient(res, state, redirect_uri, { error: 'consent_required', state: oauthState });
             const consentChallenge = crypto.randomBytes(32).toString('base64url');
             await state.cache.set(consentKey(consentChallenge), pending, state.config.ttls.authCode);
             res.set('Cache-Control', 'no-store');
@@ -129,7 +178,7 @@ export async function authorizeHandler(req, res, next) {
             });
         }
 
-        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: sessionJtiOf(req) });
+        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: sessionJtiOf(req), consentVersion: existingConsent.version });
         await auditLog(state.logger, state.hooks, 'OAUTH2_AUTHORIZE', { userId: req.auth.userId, clientId: client_id, scopes: requestedScopes });
         redirectToClient(res, state, redirect_uri, { code, state: oauthState });
     } catch (err) {
@@ -155,8 +204,8 @@ export async function confirmConsentHandler(req, res, next) {
         const state = getState();
         const pending = await takePendingAuthorization(state, req);
 
-        await state.storage.consentRepository.upsert(req.auth.userId, pending.clientId, pending.scopes);
-        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: sessionJtiOf(req) });
+        const consent = await state.storage.consentRepository.upsert(req.auth.userId, pending.clientId, pending.scopes);
+        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: sessionJtiOf(req), consentVersion: consent?.version });
 
         await auditLog(state.logger, state.hooks, 'OAUTH2_CONSENT_GRANTED', { userId: req.auth.userId, clientId: pending.clientId, scopes: pending.scopes });
         redirectToClient(res, state, pending.redirectUri, { code, state: pending.state });

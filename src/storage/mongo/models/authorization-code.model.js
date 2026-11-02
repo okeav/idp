@@ -20,6 +20,10 @@ export function defineAuthorizationCodeModel(connection) {
             usedAt: { type: Date, default: null },
             // The access-token session (jti) that authorized the code: if it is revoked before redemption, so is the code.
             sessionJti: { type: String, default: null },
+            // The user's sessionEpoch and the consent's version when the code was issued: a "sign out
+            // everywhere" or a consent change before redemption refuses it.
+            sessionEpoch: { type: Number, default: 0 },
+            consentVersion: { type: Number, default: null },
             // Set when the code is presented again after redemption — everything it produced is then revoked.
             reuseDetectedAt: { type: Date, default: null },
         },

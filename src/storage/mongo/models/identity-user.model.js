@@ -17,10 +17,14 @@ export function defineIdentityUserModel(connection, { hashEmail }) {
             status: { type: String, enum: Object.values(IDENTITY_STATUS), default: IDENTITY_STATUS.PENDING_VERIFICATION },
             lastLoginAt: { type: Date },
             passwordChangedAt: { type: Date },
-            // Set (before the rows are revoked) by every "revoke all of this user's sessions" — a refresh
-            // racing it re-checks this, so it can't leave a session alive.
+            // Incremented (before the rows are revoked) by every "revoke all of this user's sessions". Each
+            // session row records the epoch its chain was authenticated in; a login or refresh racing a
+            // revocation re-checks it, so it can't leave a session alive. A counter, not a time: the
+            // comparison doesn't depend on the app servers' clocks agreeing.
+            sessionEpoch: { type: Number, default: 0 },
+            // When the last such revocation happened (informational).
             sessionsRevokedAt: { type: Date, default: null },
-            // The one family exempt from `sessionsRevokedAt` (the session that enrolled MFA and signed out the others).
+            // The one family exempt from the latest epoch bump (the session that enrolled MFA and signed out the others).
             sessionsRevokedExceptFamily: { type: String, default: null },
             // Set when a still-unverified address is registered again: verifying then needs the password
             // bound to the code (see registerHandler).

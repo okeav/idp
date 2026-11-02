@@ -6,7 +6,7 @@ import { sessionKindOf } from '../utils/session-kind.js';
 import { issueAccessToken, issueMfaChallengeToken, hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
 import { hashPassword, verifyPassword, compareDummyPassword } from '../utils/password.js';
 import { buildDeviceFingerprint, notifyNewDevice } from '../utils/device-fingerprint.js';
-import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked, assertFamilyNotRevoked, peekRefreshRow } from '../utils/session-family.js';
+import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked, assertFamilyNotRevoked, peekRefreshRow, currentSessionEpoch } from '../utils/session-family.js';
 import { auditLog, auditLogDetached, safeInvokeHook, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey, emailKey } from '../rate-limit/keys.js';
@@ -35,11 +35,12 @@ async function resolveClaims(state, user, ctx) {
 
 /** Builds and persists one full login session (access + refresh token pair) — shared by login, MFA-verify-challenge, and SSO callback. */
 /**
- * `authStartedAt`: when this sign-in began checking credentials (default: now). A "sign out everywhere"
- * at or after it — e.g. a password reset that landed while the old password was being checked — ends
- * the session this call creates.
+ * The session is created in the user's `sessionEpoch` as read when this sign-in loaded the user —
+ * before it checked any credential. A "sign out everywhere" after that read (e.g. a password reset that
+ * landed while the old password was being checked) ends the session this call creates.
  */
-async function issueSession(state, { user, claims, req, authStartedAt = new Date() }) {
+async function issueSession(state, { user, claims, req }) {
+    const sessionEpoch = Number.isInteger(user.sessionEpoch) ? user.sessionEpoch : await currentSessionEpoch(state, user.id);
     const wasFirstLogin = !user.lastLoginAt;
     const deviceInfo = req.headers['user-agent'] || '';
     const deviceFingerprint = buildDeviceFingerprint(deviceInfo);
@@ -82,12 +83,13 @@ async function issueSession(state, { user, claims, req, authStartedAt = new Date
             authTime: familyCreatedAt,
             familyId,
             familyCreatedAt,
+            sessionEpoch,
             claims,
         },
         userId: user.id,
         lastLoginAt: new Date(),
     });
-    await assertChainNotRevoked(state, user.id, authStartedAt, refreshTokenHash, familyId);
+    await assertChainNotRevoked(state, user.id, sessionEpoch, refreshTokenHash, familyId);
 
     if (isNewDevice) {
         notifyNewDevice({ hooks: state.hooks, logger: state.logger, req, user }).catch((err) => {
@@ -117,12 +119,18 @@ function clearSessionCookies(res, state) {
 }
 
 /**
- * The refresh token also appears in login/refresh JSON bodies (for non-browser clients) unless
- * `config.cookies.refreshTokenInBody` is false — set that for browser-only apps, so script on the
- * page (an XSS) can never read the long-lived token the httpOnly cookie is protecting.
+ * Whether the refresh token also appears in a login/refresh JSON body (`config.cookies.refreshTokenInBody`):
+ * - `'auto'` (default) — only for non-browser clients. A browser request (it carries `Sec-Fetch-Site`
+ *   or `Origin`, which page script can't remove) gets the token in its httpOnly cookie only, so script
+ *   on the page (an XSS) never reads the long-lived token the cookie is protecting;
+ * - `true` — always (a browser app that keeps the refresh token itself, e.g. cross-site without cookies);
+ * - `false` — never.
  */
-function refreshTokenInBody(state, value) {
-    return state.config.cookies?.refreshTokenInBody === false ? {} : { refreshToken: value };
+function refreshTokenInBody(state, req, value) {
+    const mode = state.config.cookies?.refreshTokenInBody ?? 'auto';
+    if (mode === false) return {};
+    if (mode === 'auto' && (req.headers?.['sec-fetch-site'] !== undefined || req.headers?.origin !== undefined)) return {};
+    return { refreshToken: value };
 }
 
 function setSessionCookies(res, state, { accessToken, refreshTokenValue, refreshExpiresAt }) {
@@ -331,7 +339,7 @@ export async function loginHandler(req, res, next) {
         await enforceRateLimit(state, `login:ip:${ipKey(req.ip)}`, state.config.rateLimiting.login, { failMode: 'closed' });
         await enforceRateLimit(state, `login:email:${emailKey(state, email)}`, state.config.rateLimiting.loginByEmail, { failMode: 'closed' });
 
-        const authStartedAt = new Date();
+        // Loaded BEFORE the password is checked: its sessionEpoch is the one the new session belongs to.
         const user = await state.storage.userRepository.findByEmail(email, { select: '+passwordHash' });
 
         if (user?.lockUntil && new Date(user.lockUntil) <= new Date()) {
@@ -361,7 +369,7 @@ export async function loginHandler(req, res, next) {
         if (user.mfaEnabled) return res.json(await mfaChallengeResponse(state, user));
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'password' });
-        const session = await issueSession(state, { user, claims, req, authStartedAt });
+        const session = await issueSession(state, { user, claims, req });
 
         await auditLog(state.logger, state.hooks, 'LOGIN', { userId: String(user.id), email });
 
@@ -369,7 +377,7 @@ export async function loginHandler(req, res, next) {
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,
-            ...refreshTokenInBody(state, session.refreshTokenValue),
+            ...refreshTokenInBody(state, req, session.refreshTokenValue),
             refreshTokenExpiresAt: session.refreshExpiresAt,
             userId: String(user.id),
         });
@@ -531,9 +539,10 @@ export async function refreshTokenHandler(req, res, next) {
             authTime: existing.authTime ?? null,
             familyId,
             familyCreatedAt,
+            sessionEpoch: existing.sessionEpoch ?? 0,
             claims,
         });
-        await assertChainNotRevoked(state, user.id, existing.createdAt, newRefreshTokenHash, familyId);
+        await assertChainNotRevoked(state, user.id, existing.sessionEpoch ?? 0, newRefreshTokenHash, familyId);
         await assertFamilyNotRevoked(state, familyId, newRefreshTokenHash);
 
         await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${existing.jti}`, '1', state.config.ttls.revocationCache);
@@ -541,7 +550,7 @@ export async function refreshTokenHandler(req, res, next) {
         await auditLog(state.logger, state.hooks, 'TOKEN_REFRESHED', { userId: String(user.id) });
 
         setSessionCookies(res, state, { accessToken, refreshTokenValue: newRefreshTokenValue, refreshExpiresAt });
-        res.json({ accessToken: accessToken.token, accessTokenExpiresAt: accessToken.expiresAt, ...refreshTokenInBody(state, newRefreshTokenValue), refreshTokenExpiresAt: refreshExpiresAt });
+        res.json({ accessToken: accessToken.token, accessTokenExpiresAt: accessToken.expiresAt, ...refreshTokenInBody(state, req, newRefreshTokenValue), refreshTokenExpiresAt: refreshExpiresAt });
     } catch (err) {
         next(err);
     }

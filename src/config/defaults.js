@@ -12,7 +12,8 @@ export function withDefaults(config = {}) {
     return {
         ...config,
         cache: { adapter: 'memory', keyPrefix: 'idp:', ...config.cache },
-        cookies: { secure: process.env.NODE_ENV !== 'development', sameSite: 'lax', domain: undefined, ...config.cookies },
+        // refreshTokenInBody: 'auto' — the refresh token is in JSON bodies only for non-browser clients.
+        cookies: { secure: process.env.NODE_ENV !== 'development', sameSite: 'lax', domain: undefined, refreshTokenInBody: 'auto', ...config.cookies },
         // verifyOnEachRequest (default true since 0.3.0): authContextMiddleware
         // checks the token's session row in storage on every request, so a
         // logout-all / password reset takes effect on every instance at once.
@@ -43,7 +44,8 @@ export function withDefaults(config = {}) {
             // encryptionKey or secretCipher — is required at startup. See mfa/secrets.js.
             enabled: true,
             allowPlaintext: false,
-            requireEncrypted: false,
+            // requireEncrypted: left unset here — it defaults to true whenever a key or cipher is
+            // configured (see config/init.js), so a plain-text secret is refused rather than used.
             previousEncryptionKeys: [],
             ...config.mfa,
             lockout: { ...DEFAULT_MFA_LOCKOUT, ...config.mfa?.lockout },

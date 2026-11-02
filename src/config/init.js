@@ -38,6 +38,9 @@ export async function initIdentityProvider(config) {
     // MFA secret encryption is validated before anything connects, so a
     // missing key fails the boot rather than the first enrolment.
     const mfaCipher = createMfaSecretCipher(resolved.mfa);
+    // With a key, a plain-text secret (from <= 0.2.x, or written straight into the database) is refused
+    // unless the app explicitly opts back in — run migrateMfaSecrets() to encrypt old ones.
+    if (resolved.mfa.requireEncrypted === undefined) resolved.mfa.requireEncrypted = Boolean(mfaCipher);
     assertMfaSecretConfig(resolved.mfa, mfaCipher, logger);
     assertLockoutConfig('mfa.lockout', resolved.mfa.lockout);
     assertLockoutConfig('security.verificationCodeLockout', resolved.security.verificationCodeLockout);
@@ -212,6 +215,9 @@ function assertCookieConfig(cookies = {}) {
     if (Array.isArray(cookies.trustedOrigins)) cookies.trustedOrigins = cookies.trustedOrigins.map((o) => (typeof o === 'string' && safeOrigin(o) && safeOrigin(o).toLowerCase() === o.toLowerCase() ? safeOrigin(o) : o));
     if (cookies.sameSite !== undefined && !['lax', 'strict', 'none'].includes(cookies.sameSite)) {
         throw new Error(`config.cookies.sameSite must be 'lax', 'strict' or 'none' (got ${JSON.stringify(cookies.sameSite)})`);
+    }
+    if (cookies.refreshTokenInBody !== undefined && ![true, false, 'auto'].includes(cookies.refreshTokenInBody)) {
+        throw new Error(`config.cookies.refreshTokenInBody must be true, false or 'auto' (got ${JSON.stringify(cookies.refreshTokenInBody)})`);
     }
     if (cookies.sameSite === 'none' && cookies.secure === false) throw new Error("config.cookies.sameSite 'none' requires secure cookies (browsers drop SameSite=None without Secure)");
     if (cookies.trustedOrigins !== undefined && (!Array.isArray(cookies.trustedOrigins) || cookies.trustedOrigins.some((o) => typeof o !== 'string' || o !== safeOrigin(o)))) {

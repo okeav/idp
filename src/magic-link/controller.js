@@ -118,7 +118,7 @@ export async function verifyMagicLinkHandler(req, res, next) {
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,
-            ...refreshTokenInBody(state, session.refreshTokenValue),
+            ...refreshTokenInBody(state, req, session.refreshTokenValue),
             refreshTokenExpiresAt: session.refreshExpiresAt,
             userId: String(user.id),
             isNewUser,

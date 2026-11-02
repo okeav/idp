@@ -29,12 +29,30 @@ export class MongoSessionRepository {
         return doc ? withId(doc) : null;
     }
 
-    /** Atomic find+revoke — only one concurrent caller can successfully consume a given refresh token. */
+    /**
+     * Atomic find+revoke — only one concurrent caller can successfully consume a given refresh token.
+     * `revokedAt` comes from the DATABASE clock: rotatedWithin compares it with that same clock.
+     */
     async revokeByRefreshTokenHash(hash, { onlyIfActive = true, reason = 'revoked' } = {}) {
         const filter = onlyIfActive
             ? { tokenHash: hash, revokedAt: null, expiresAt: { $gt: new Date() } }
             : { tokenHash: hash, revokedAt: null };
-        return this.model.findOneAndUpdate(filter, { revokedAt: new Date(), revokeReason: reason }, { returnDocument: 'before' });
+        return this.model.findOneAndUpdate(filter, [{ $set: { revokedAt: '$$NOW', revokeReason: reason } }], { returnDocument: 'before', updatePipeline: true });
+    }
+
+    /** Whether this refresh token was rotated less than `seconds` ago — measured by the database's clock alone. */
+    async rotatedWithin(hash, seconds) {
+        return Boolean(await this.model.exists({
+            tokenHash: hash,
+            revokeReason: 'rotated',
+            $expr: { $gt: ['$revokedAt', { $subtract: ['$$NOW', seconds * 1000] }] },
+        }));
+    }
+
+    /** Raises the recorded `sessionEpoch` of every row of a family to at least `epoch` (the family exempt from a revocation). */
+    async raiseFamilyEpoch(familyId, epoch) {
+        if (!familyId) return;
+        await this.model.updateMany({ familyId }, { $max: { sessionEpoch: epoch } });
     }
 
     /**

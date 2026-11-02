@@ -4,12 +4,17 @@ import { verifyIssuedToken, isIdTokenPayload } from '../signing/token.service.js
 import { OAUTH_CLIENT_STATUS, CACHE_KEY_PREFIXES } from '../config/constants.js';
 import { auditLog } from '../hooks/index.js';
 import { clearSessionCookies } from '../password-auth/controllers.js';
+import { assertTrustedOrigin } from '../middleware/csrf.js';
 
 /**
- * GET /oidc/end-session — RP-initiated logout (OIDC RP-Initiated Logout 1.0).
+ * GET|POST /oidc/end-session — RP-initiated logout (OIDC RP-Initiated Logout 1.0).
  *
- * What it ends is deliberately narrow, because the request is a plain GET any site can trigger:
- * - the browser's own IdP session (the first-party session whose cookie came with the request), and
+ * What it ends is deliberately narrow, because a GET is something any site can trigger:
+ * - the browser's own IdP session (the first-party session whose cookie came with the request) —
+ *   on a GET only with an `id_token_hint` for that same user (the relying party the user signed in
+ *   to asked for it). Without one, a GET ends nothing and answers
+ *   `{ action: 'logout_confirmation_required' }`: the IdP's frontend asks the user, then POSTs the
+ *   same parameters (JSON or form) from a trusted origin (`cookies.trustedOrigins`) to end it;
  * - with an `id_token_hint` AND the browser signed in as that same user, the hinted relying party's
  *   sessions for that user. A hint alone ends nothing: ID tokens travel through URLs and logs, and
  *   whoever holds one must not be able to sign its user out of the relying party.
@@ -24,7 +29,10 @@ import { clearSessionCookies } from '../password-auth/controllers.js';
 export async function endSessionHandler(req, res, next) {
     try {
         const state = getState();
-        const q = req.query;
+        const confirmed = req.method === 'POST';
+        // A POST is the confirmation: it must come from the IdP's own pages (or a trusted frontend).
+        if (confirmed) assertTrustedOrigin(state, req);
+        const q = (confirmed ? req.body : req.query) ?? {};
         const idTokenHint = typeof q.id_token_hint === 'string' ? q.id_token_hint : undefined;
         const postLogoutRedirectUri = typeof q.post_logout_redirect_uri === 'string' ? q.post_logout_redirect_uri : undefined;
         const oidcState = typeof q.state === 'string' ? q.state : undefined;
@@ -50,6 +58,12 @@ export async function endSessionHandler(req, res, next) {
             if (!allowed?.includes(postLogoutRedirectUri)) {
                 throw new IdpError({ code: 'INVALID_REDIRECT_URI', httpStatus: 400, message: 'post_logout_redirect_uri is not registered for this client' });
             }
+        }
+
+        // Signed in, and nothing shows the user asked for this: ask them first.
+        if (req.auth?.userId && !hint && !confirmed) {
+            res.set('Cache-Control', 'no-store');
+            return res.status(200).json({ action: 'logout_confirmation_required' });
         }
 
         const sessions = state.storage.sessionRepository;

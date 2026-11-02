@@ -7,7 +7,7 @@ export class MongoConsentRepository {
     async upsert(userId, clientId, scopes) {
         return this.model.findOneAndUpdate(
             { userId, clientId },
-            { $set: { scopes, grantedAt: new Date(), isRevoked: false, revokedAt: null } },
+            { $set: { scopes, grantedAt: new Date(), isRevoked: false, revokedAt: null }, $inc: { version: 1 } },
             { upsert: true, returnDocument: 'after' }
         );
     }
@@ -25,6 +25,6 @@ export class MongoConsentRepository {
     }
 
     async revoke(userId, clientId) {
-        await this.model.findOneAndUpdate({ userId, clientId }, { $set: { isRevoked: true, revokedAt: new Date() } });
+        await this.model.findOneAndUpdate({ userId, clientId }, { $set: { isRevoked: true, revokedAt: new Date() }, $inc: { version: 1 } });
     }
 }

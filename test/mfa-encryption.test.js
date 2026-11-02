@@ -173,7 +173,7 @@ test('key rotation: old ciphertext still decrypts under previousEncryptionKeys a
     });
 });
 
-test('lazy migration: a legacy plain-text secret still verifies and is encrypted on the next successful verify', async () => {
+test('lazy migration (mfa.requireEncrypted: false): a legacy plain-text secret still verifies and is encrypted on the next successful verify', () => withConfig({ requireEncrypted: false }, async () => {
     const email = uniqueEmail('mfa-legacy');
     const password = 'Str0ng!Passw0rd';
     const { userId } = await registerVerifyLogin(email, password);
@@ -192,9 +192,9 @@ test('lazy migration: a legacy plain-text secret still verifies and is encrypted
     assert.ok(stored.startsWith('v1:'), 'migrated to ciphertext');
     assert.notEqual(stored, secret);
     assert.equal((await mfaLogin(email, password, secret)).status, 200, 'still verifies once encrypted');
-});
+}));
 
-test('confirm encrypts a legacy plain-text mfaTempSecret left over from before the upgrade', async () => {
+test('confirm (mfa.requireEncrypted: false) encrypts a legacy plain-text mfaTempSecret left over from before the upgrade', () => withConfig({ requireEncrypted: false }, async () => {
     const email = uniqueEmail('mfa-legacy-temp');
     const password = 'Str0ng!Passw0rd';
     const { accessToken, userId } = await registerVerifyLogin(email, password);
@@ -206,7 +206,7 @@ test('confirm encrypts a legacy plain-text mfaTempSecret left over from before t
     const stored = await readSecrets(userId);
     assert.ok(stored.mfaSecret.startsWith('v1:'));
     assert.equal(stored.mfaTempSecret, null);
-});
+}));
 
 test('migrateMfaSecrets() encrypts every plain-text secret in one pass; dry run changes nothing; second run is a no-op', async () => {
     const password = 'Str0ng!Passw0rd';
