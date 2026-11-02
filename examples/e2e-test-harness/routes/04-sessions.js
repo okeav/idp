@@ -22,7 +22,7 @@ export function mountSessionsFlow(app, { AUTH_PREFIX }) {
       </div>
 
       <div class="card">
-        <p class="step">Logout (uses the <code>refresh_token</code> cookie automatically — this ends YOUR current browser session, so "list sessions" will 401 right after, which is correct: you have no valid cookie anymore).</p>
+        <p class="step">Logout (uses the refresh-token cookie, <code>__Host-refresh_token</code>, automatically — this ends YOUR current browser session, so "list sessions" will 401 right after, which is correct: you have no valid cookie anymore).</p>
         <button class="danger" onclick="logout()">Logout (this session)</button>
         <pre id="logout-result" class="result"></pre>
       </div>

@@ -5,7 +5,7 @@ export function mountRateLimitFlow(app, { AUTH_PREFIX }) {
         res.send(layout({
             title: '12. Rate limiting',
             body: `
-      <div class="flag">This harness configures a deliberately low <code>rateLimiting.loginByEmail</code> threshold (max 5 per 5 minutes — production defaults are 5 per 15 minutes, see idp-core's README "Rate limiting") so you can trip it in a handful of clicks. Account lockout (<code>maxFailedLoginAttempts</code>) is set very high in this harness specifically so it doesn't interfere with what you're observing here — these are two independent mechanisms.</div>
+      <div class="flag">This harness configures a deliberately low <code>rateLimiting.loginByEmail</code> threshold (max 5 per 5 minutes — production defaults are 5 per 15 minutes, see idp-core's README "Rate limiting") so you can trip it in a handful of clicks. The failed-password lockout (<code>maxFailedLoginAttempts</code>) is set very high in this harness specifically so it doesn't interfere with what you're observing here — these are two independent mechanisms. (When that lockout does trip, it locks <em>password login</em> only — every password, right or wrong, gets <code>401 INVALID_CREDENTIALS</code> until it expires or the password is reset — while refresh, existing sessions, magic link, passkeys, SSO and MFA keep working, and the account's status stays <code>ACTIVE</code>.)</div>
 
       <div class="card">
         <p class="step">Fires sequential wrong-password login attempts against one fixed email. Watch for HTTP 401 (invalid credentials) turning into HTTP 429 (<code>RATE_LIMIT_EXCEEDED</code>) once the threshold trips.</p>

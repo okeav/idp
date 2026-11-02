@@ -66,7 +66,9 @@ protected internal routes alongside it.
 - **`authContextMiddleware()` accepts first-party tokens only** on every IdP route below, except
   `/userinfo`, which accepts only OAuth2 user tokens (`accept: ['oauth2-user']`). Cookie-authenticated
   state-changing requests pass the [CSRF origin check](middleware.md#csrf-origin-check)
-  (`cookies.trustedOrigins`).
+  (`cookies.trustedOrigins`) — and so does every request to the routes that set session cookies
+  (`/login`, `/refresh`, `/mfa/verify`, `/magic-link/verify`, `/webauthn/authentication/verify`,
+  `/webauthn/mfa/verify`), checked inside the handler.
 - **Rate limits** are applied inside the handlers (listed in the *Rate limit* column — the
   `config.rateLimiting` key, then the default). All of them fail **closed** (a limiter backend
   error → 503 `RATE_LIMITER_UNAVAILABLE`) except `refreshToken`. See
@@ -82,16 +84,16 @@ at the application root regardless of prefix — see note below).
 | Method | Path | Middleware | Rate limit |
 |---|---|---|---|
 | POST | `/register` | `validateBody(registerSchema)` | `register` (10/h per IP), `verificationEmailByEmail` (3/h per address) |
-| POST | `/register/verify-email` | `validateBody(verifyEmailSchema)` | `emailVerification` (20/15min per IP); plus `security.verificationCodeLockout` per account |
+| POST | `/register/verify-email` | `validateBody(verifyEmailSchema)` | `emailVerification` (20/15min per IP); plus `security.verificationCodeLockout` per address (6-digit codes only) |
 | POST | `/register/resend-verification` | `validateBody(resendVerificationSchema)` | `register`, `verificationEmailByEmail` |
-| POST | `/login` | `validateBody(loginSchema)` | `login` (10/15min per IP), `loginByEmail` (5/15min per address) |
+| POST | `/login` | `validateBody(loginSchema)` | `login` (10/15min per IP), `loginByEmail` (5/15min per address); plus the password-login lockout per account (`security.maxFailedLoginAttempts`) |
 | POST | `/mfa/verify` | `validateBody(verifyMfaChallengeSchema)` | `mfaChallenge` (5/15min per IP); plus `mfa.lockout` per account |
-| POST | `/refresh` | `validateBody(refreshSchema)` — refresh token from the cookie or the body | `refreshToken` (30/min per IP, fail-open) |
-| POST | `/logout` | `validateBody(logoutSchema)` — `refreshToken` in the body is optional; the `refresh_token` cookie is read when it's omitted | — |
+| POST | `/refresh` | `validateBody(refreshSchema)` — refresh token from the body or the refresh cookie (body wins) | `refreshToken` (30/min per IP, fail-open) |
+| POST | `/logout` | `validateBody(logoutSchema)` — `refreshToken` in the body is optional; the refresh cookie (`__Host-refresh_token`) is read when it's omitted. CSRF origin check on every browser request | — |
 | POST | `/logout/all` | `authContextMiddleware()` | — |
 | POST | `/password/forgot` | `validateBody(forgotPasswordSchema)` | `passwordReset` (3/h per IP), `passwordResetByEmail` (3/h per address) |
 | POST | `/password/reset` | `validateBody(resetPasswordSchema)` | — |
-| POST | `/password/change` | `authContextMiddleware()`, `validateBody(changePasswordSchema)` | — |
+| POST | `/password/change` | `authContextMiddleware()`, `validateBody(changePasswordSchema)` | `security.passwordChangeLockout` per account (wrong current passwords) |
 
 ### Magic link — `features.magicLink`
 | Method | Path | Middleware | Rate limit |
@@ -226,16 +228,17 @@ Rules worth knowing (most body schemas are `.strict()` — unknown keys are a 40
 |---|---|
 | `registerSchema`, `resetPasswordSchema`, `changePasswordSchema` | New passwords: 8–128 characters **and at most 72 bytes of UTF-8** (bcrypt's limit — longer is refused, not truncated), with upper- and lowercase, a number and a special character. `registerSchema.metadata` is accepted but persisted only with `registration.acceptMetadata: true`. |
 | `loginSchema` | `password` is 1–1024 characters, no policy (legacy passwords must still log in). |
+| `verifyEmailSchema` | `{ email, token?, code?, password? }` — `token` or `code` required; `code` at most 128 characters; `password` 1–1024 characters, no policy — needed only for an address registered more than once before verification (else 400 `REGISTRATION_PASSWORD_REQUIRED`). |
 | `refreshSchema`, `logoutSchema` | `{ refreshToken? }` — a string of at most 512 characters; the body may be omitted. |
 | `updateProfileSchema` | `avatarUrl` must be `https`; `locale` a BCP 47 tag; `zoneinfo` an IANA zone name. |
 | `disableMfaSchema`, `regenerateRecoveryCodesSchema` | `{ password?, code }` — `password` is required by the handler only when the account has one; `code` is a current TOTP code. |
-| `verifyMfaChallengeSchema` | `code` up to 32 characters, so a recovery code (`XXXXXX-XXXXXX`) fits. |
+| `verifyMfaChallengeSchema` | `code` 6–32 characters, so a recovery code (`XXXXX-XXXXX-XXXXX-XXXXX`, 23 characters) fits. |
 | `authorizeQuerySchema` | `nonce` (≤ 512 chars) and PKCE: `code_challenge` must be a 43-character base64url S256 value and requires `code_challenge_method=S256` (`plain` is refused). Not `.strict()`. |
 | `confirmAuthorizeSchema`, `denyAuthorizeSchema` | Only `{ consent_challenge }` — the value `/oauth2/authorize` returned. Client, scopes, redirect URI, state, nonce and PKCE come from the stored request, never this body. |
 | `tokenSchema` | `client_id`/`client_secret` optional (they may come as HTTP Basic instead); `code_verifier` 43–128 unreserved characters; `.passthrough()`. |
 | `revokeTokenSchema`, `introspectTokenSchema` | `{ token, token_type_hint?, client_id?, client_secret? }`. |
 | `consentQuerySchema` | `{ client_id }` — a string (`?client_id[$ne]=` is refused). |
-| `registerOAuthClientSchema`, `updateOAuthClientSchema` | `redirectUris`/`postLogoutRedirectUris` must be `https`, `http` to a loopback host, or a reverse-DNS private-use scheme, with no fragment or credentials. |
+| `registerOAuthClientSchema`, `updateOAuthClientSchema` | `redirectUris`/`postLogoutRedirectUris` must be `https`, `http` to a loopback host, or a reverse-DNS private-use scheme, with no fragment or credentials. `updateOAuthClientSchema` also caps `accessTokenTTL` and `idTokenTTL` at 86400 s (24 h) and `refreshTokenTTL` at 31536000 s (1 year), and requires `logoUrl`, `websiteUrl`, `privacyPolicyUrl` and `termsOfServiceUrl` to be `https` URLs (≤ 2048 characters) — they're shown as links on the consent screen. |
 | `authenticationOptionsSchema` | `{ email? }` — ignored unless `webauthn.allowCredentialsByEmail: true`. |
 | `ssoInitiateQuerySchema` | `redirect_uri` (must also be on `sso.allowedRedirectOrigins`, checked by the handler); `.passthrough()` — extra params reach `resolveAuthContext` as `extra`, limited to 10 short strings, and are attacker-controllable. |
 

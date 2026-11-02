@@ -16,7 +16,7 @@ after the router. The exported `idpErrorHandler()` is safe to expose to the inte
 import { buildRouter, idpErrorHandler } from '@okeav/idp-core';
 
 app.use('/auth', buildRouter());
-app.use(idpErrorHandler({ logger })); // after the router; logger is optional
+app.use(idpErrorHandler({ logger })); // after the router; logger is optional (default: the one given to initIdentityProvider)
 ```
 
 **Don't echo `err.message` for every error.** Errors that aren't `IdpError`s (a database driver
@@ -88,31 +88,34 @@ validation list.
 | `RATE_LIMIT_EXCEEDED` | 429 | Generic — thrown by `enforceRateLimit` |
 | `RATE_LIMITER_UNAVAILABLE` | 503 | Generic — rate-limiter backend errored (or `MemoryRateLimiter` is full) on a fail-closed key — every limit except token refresh; see [Rate Limiter Interface](rate-limiter-interface.md) |
 | `FEATURE_DISABLED` | 404 | Generic — `setupMfaHandler`/`confirmMfaHandler` with `config.mfa.enabled: false` |
-| `CSRF_ORIGIN_REJECTED` | 403 | Generic — a state-changing request authenticated by a **cookie** (the session cookie, or the refresh cookie at `/refresh`/`/logout`) came from an `Origin` that is neither the issuer's nor in `cookies.trustedOrigins`; see [Middleware](middleware.md) |
+| `CSRF_ORIGIN_REJECTED` | 403 | Generic — a state-changing request authenticated by the session **cookie**, or any browser request to an endpoint that sets or clears session cookies (`/login`, `/refresh`, `/logout`, `/mfa/verify`, `/magic-link/verify`, `/webauthn/authentication/verify`, `/webauthn/mfa/verify`), came from an `Origin` that is neither the issuer's nor in `cookies.trustedOrigins`; see [Middleware](middleware.md) |
 | `PAYLOAD_TOO_LARGE` | 413 | Generic — only produced by `idpErrorHandler()`, for an oversized body |
+| `COOKIE_CONFLICT` | 400 | Generic — a request carried a session cookie (or an SSO binding cookie) twice, as a cookie planted by a sibling subdomain would make it (possible in practice only with `cookies.domain`, where the names are `__Secure-` rather than `__Host-`). Sign in again; find and remove the planted cookie |
 | `AUTH_REQUIRED` | 401 | AuthN — `authContextMiddleware`, no token presented and not `optional` |
 | `UNAUTHENTICATED` | 401 | AuthN — handler-level check when `req.auth` is missing; also a wrong or non-covering bootstrap secret at `POST /internal/service-keys` |
-| `FORBIDDEN` | 403 | AuthN — `requireServiceCallerMiddleware` (caller not allowed, or a shared-secret caller without `serviceMesh.allowLegacySecretCallers`), or a service name outside `serviceMesh.allowedServiceNames` |
+| `FORBIDDEN` | 403 | AuthN — `requireServiceCallerMiddleware` (caller not allowed, or a shared-secret caller without `serviceMesh.allowLegacySecretCallers`), a service name outside `serviceMesh.allowedServiceNames`, or the shared `bootstrapSecret` registering a name that has its own `bootstrapSecrets` entry |
 | `INVALID_TOKEN` | 401 | AuthN — malformed/unverifiable token, not an access token, or the wrong token kind/audience for the route (e.g. a token issued to a third-party OAuth2 client, presented at a first-party route) |
 | `TOKEN_EXPIRED` | 401 | AuthN |
-| `TOKEN_REVOKED` | 401 | AuthN — presented token's `jti` found in the revocation cache, or (with `session.verifyOnEachRequest`) its session row is missing, revoked, expired, or another user's; also a refresh that raced "log out everywhere" |
+| `TOKEN_REVOKED` | 401 | AuthN — presented token's `jti` found in the revocation cache, or (with `session.verifyOnEachRequest`) its session row is missing, revoked, expired, or another user's; also a refresh or a login that raced "log out everywhere" / a password reset, a refresh racing reuse detection of its family, and a `client_credentials` token whose client is gone or no longer `ACTIVE` |
 | `REAUTHENTICATION_REQUIRED` | 401 | AuthN — `requireRecentAuth()`: the user's last real login is older than `session.recentAuthMaxAgeSeconds` (default 15 min), or unknown. Send the user through a login and retry |
 | `CACHE_UNAVAILABLE` | 503 | AuthN — cache adapter errored during a revocation check with `session.verifyOnEachRequest: false` (fail-closed). With it on, a cache error is logged and the session store decides |
 | `SESSION_STORE_UNAVAILABLE` | 503 | AuthN — `sessionRepository.findByJti` errored during the per-request session check (fail-closed); see [Middleware](middleware.md) |
-| `INVALID_CREDENTIALS` | 401 | Credentials — also every password, right or wrong, on a locked or deleted account |
+| `INVALID_CREDENTIALS` | 401 | Credentials — also every password, right or wrong, while password login is locked (failed-password lockout: `security.maxFailedLoginAttempts` per `security.accountLockDurationMs`, counted in the attempt counter as `password-login:<userId>`), on a `PENDING_VERIFICATION` account, or on a deleted account |
 | `EMAIL_AND_PASSWORD_REQUIRED` | 400 | Credentials |
 | `EMAIL_REQUIRED` | 400 | Credentials |
 | `USER_NOT_FOUND` | 404 | Credentials — authenticated routes whose user row has gone; never on the unauthenticated email endpoints |
 | `USER_ALREADY_EXISTS` | 409 | Credentials — **defined but never thrown**; `registerHandler` is enumeration-safe (see below) |
 | `USER_NOT_ACTIVE` | 403 | Credentials |
-| `ACCOUNT_LOCKED` | 423 | Credentials — a magic-link or passkey login to an account locked by failed password attempts. Password login on a locked account answers `INVALID_CREDENTIALS` instead, so the lock can't tell right passwords from wrong ones |
+| `ACCOUNT_LOCKED` | 423 | Credentials — an **administrative** lock only: status `LOCKED` without a `lockUntil`, set by your app (magic-link, passkey, or password login with the right password). The failed-password lockout no longer changes the status — it locks password login only (`INVALID_CREDENTIALS`), and every other method keeps working |
 | `ACCOUNT_SUSPENDED` | 403 | Credentials — status `SUSPENDED`/`DISABLED` |
-| `PENDING_VERIFICATION` | 403 | Credentials — status `PENDING_VERIFICATION`/`INVITED` |
+| `PENDING_VERIFICATION` | 403 | Credentials — status `INVITED` (and `PENDING_VERIFICATION` where a flow reaches `assertUsableStatus`). Password login on a `PENDING_VERIFICATION` account answers `INVALID_CREDENTIALS` instead (0.4.0) |
 | `CANNOT_DELETE_USER` | 400 | Credentials |
 | `EMAIL_ALREADY_VERIFIED` | 400 | Credentials — **no longer thrown** (0.4.0): resend-verification answers `{ status: 'ok' }` for every address |
 | `INVALID_OR_EXPIRED_TOKEN` | 400 | Credentials — opaque token/code (reset/verify/magic-link) not found or expired; also verify-email for an unknown or already-verified address |
-| `VERIFICATION_LOCKED` | 429 | Credentials — per-account email-verification lockout (`security.verificationCodeLockout`, default 5 wrong codes per hour); every outstanding code is deleted, so the user requests a new one |
+| `REGISTRATION_PASSWORD_REQUIRED` | 400 | Credentials — verify-email on an address registered more than once before verification, without the `password` of the code's registration (or with a wrong one); the code stays usable (for a code, the attempt counts toward `security.verificationCodeLockout`) |
+| `VERIFICATION_LOCKED` | 429 | Credentials — per-address lockout on the 6-digit verification **code** (`security.verificationCodeLockout`, default 5 wrong codes per hour, locked 15 min); answered the same for unknown, verified and pending addresses. The outstanding codes are cleared, but the emailed **link** (`token`) still works — it has no attempt budget |
 | `CURRENT_PASSWORD_INCORRECT` | 400 | Credentials |
+| `PASSWORD_CHANGE_LOCKED` | 429 | Credentials — `/password/change`: per-account limit on wrong current passwords (`security.passwordChangeLockout`, default 5 per hour, locked an hour); returned for the attempt that exhausts it and every attempt while locked |
 | `REFRESH_TOKEN_REQUIRED` | 400 | Session |
 | `INVALID_REFRESH_TOKEN` | 401 | Session — unknown, revoked or rotated token, an OAuth2 refresh token presented at `/refresh`, or a session family past `session.absoluteLifetimeSeconds` |
 | `REFRESH_TOKEN_NOT_FOUND` | 404 | Session |
@@ -120,7 +123,7 @@ validation list.
 | `MFA_NOT_ENABLED` | 400 | MFA |
 | `MFA_SETUP_REQUIRED` | 400 | MFA |
 | `INVALID_MFA_CODE` | 400 | MFA — wrong or already-used TOTP code or recovery code |
-| `INVALID_MFA_CHALLENGE_TOKEN` | 401 | MFA — invalid, expired or already-used challenge token, or one issued before the account's last password change |
+| `INVALID_MFA_CHALLENGE_TOKEN` | 401 | MFA — invalid, expired or already-used challenge token, one issued before the account's last password change, or one without this issuer's `iss` and `aud` `<issuer>#mfa-challenge` (e.g. from another environment sharing a signing key, or a 0.3.x token) |
 | `MFA_LOCKED` | 429 | MFA — per-account second-factor lockout; returned for the attempt that exhausts the budget and every attempt while locked, right code or not (see [MFA](mfa.md#per-account-lockout)) |
 | `MFA_ENCRYPTION_NOT_CONFIGURED` | 500 | MFA — an encrypted secret was found, or one must be written, with no `mfa.encryptionKey`/`secretCipher` |
 | `MFA_SECRET_NOT_ENCRYPTED` | 500 | MFA — a plain-text secret was found with `mfa.requireEncrypted: true`; run `migrateMfaSecrets()` |
@@ -129,7 +132,7 @@ validation list.
 | `KEY_NOT_ALLOWED` | 403 | OAuth2/OIDC/JWKS |
 | `INVALID_REDIRECT_URI` | 400 | OAuth2/OIDC/JWKS |
 | `INVALID_CLIENT` | 401 | OAuth2 — client authentication failed at `/oauth2/token`, `/token/revoke` or `/token/introspect`. Unknown, inactive and wrong-secret clients all get the same answer |
-| `INVALID_GRANT` | 400 | OAuth2 — bad, expired or reused authorization code or refresh token, `redirect_uri` mismatch, PKCE failure, inactive user, or a family past its lifetime |
+| `INVALID_GRANT` | 400 | OAuth2 — bad, expired or reused authorization code or refresh token, `redirect_uri` mismatch, PKCE failure, inactive user, a family past its lifetime, or an authorization code issued before the user's sessions were revoked, whose authorizing session has since been revoked (or is gone), or whose consent was withdrawn/re-granted since |
 | `INVALID_SCOPE` | 400 | OAuth2 — requested scope outside the client's `allowedScopes` |
 | `UNAUTHORIZED_CLIENT` | 400 | OAuth2 — grant type not allowed for the client |
 | `UNSUPPORTED_GRANT_TYPE` | 400 | OAuth2 |
@@ -143,7 +146,8 @@ validation list.
 | `SERVICE_TOKEN_INVALID` | 401 | Service mesh — includes tokens without `exp`, living over 5 minutes, or with `iat` in the future |
 | `SERVICE_AUTH_FAILED` | 401 | Service mesh — `serviceContextMiddleware` found no valid token or shared secret |
 | `SERVICE_NOT_CONFIGURED` | 500 | Service mesh — `ownServiceName` / `expectedAud` missing, or no `sharedSecret` while a secret-accepting `tokenMode` needs one |
-| `SERVICE_NAME_TAKEN` | 409 | Service mesh — the shared `bootstrapSecret` tried to register a name that already has a key; rotating a key needs that service's own `bootstrapSecrets` entry |
+| `SERVICE_NAME_TAKEN` | 409 | Service mesh — the shared `bootstrapSecret` tried to register a name that already has a key; rotating a key needs that service's own `bootstrapSecrets` entry. Also the losers of concurrent first registrations of one new name with the shared secret (the earliest-registered key keeps the name; the others' keys are revoked) |
+| `SERVICE_KEY_REVOKED` | 409 | Service mesh — `POST /internal/service-keys` with a key that was revoked; a revoked key is never re-activated, so the service must generate a new key pair |
 | `WEBAUTHN_NOT_CONFIGURED` | 500 | WebAuthn — `config.webauthn` incomplete at first use |
 | `WEBAUTHN_CHALLENGE_EXPIRED` | 400 | WebAuthn |
 | `WEBAUTHN_VERIFICATION_FAILED` | 400/401 | WebAuthn |
@@ -177,18 +181,20 @@ generic 400) where you expected a 404/409:
 - `verifyEmailHandler` — an unknown or already-verified address gets the same 400
   `INVALID_OR_EXPIRED_TOKEN` as a wrong code (so a second click on a used link is now a 400, not
   `ok`).
-- `resendVerificationEmailHandler` — always `{ status: 'ok' }`.
-- `forgotPasswordHandler` — always `{ status: 'ok' }`.
+- `resendVerificationEmailHandler` — always `{ status: 'ok' }`, sent before the address is looked up.
+- `forgotPasswordHandler` — always `{ status: 'ok' }`, sent before the address is looked up.
 - `requestMagicLinkHandler` — `{ status: 'ok' }` for an unknown email when
   `allowSignupViaMagicLink: false`, and for a deleted account.
 - `generateAuthenticationOptionsHandler` (WebAuthn) — ignores `email` unless
   `webauthn.allowCredentialsByEmail: true`, and then answers an unknown address with a stable decoy
   credential id rather than a distinguishable error.
-- `loginHandler` — a locked account answers `INVALID_CREDENTIALS` for every password.
+- `loginHandler` — while password login is locked, and on a pending account, every password
+  answers `INVALID_CREDENTIALS`; an unknown or passwordless account compares a dummy hash of the
+  configured `bcryptRounds` cost.
 
-On register, resend-verification, forgot-password and magic-link request, the email hooks (and
-their audit events) are started but not awaited, so response time doesn't reveal whether an email
-was sent either.
+On register and magic-link request, the email hooks (and their audit events) are started but not
+awaited (resend-verification and forgot-password do all their work after responding), so
+response time doesn't reveal whether an email was sent either.
 
 ## Related
 

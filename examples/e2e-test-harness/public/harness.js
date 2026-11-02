@@ -8,9 +8,9 @@ async function callApi(url, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
     // Same-origin fetch sends cookies by default. Most pages want that (they
     // rely on the login cookie for authContextMiddleware) — but a page that's
-    // specifically testing a *body-supplied* token (see /flows/refresh) needs
-    // to opt out, since the server prefers the cookie over the body when both
-    // are present (COOKIE_NAMES.REFRESH_TOKEN in idp-core's refreshTokenHandler).
+    // specifically testing a *body-supplied* token (see /flows/refresh) opts
+    // out, so the result depends only on that token (since 0.4.0 the body wins
+    // over the refresh cookie anyway).
     credentials: opts.credentials || 'same-origin',
   });
   let body;

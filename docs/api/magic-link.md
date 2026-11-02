@@ -45,14 +45,15 @@ Behavior by email state:
   nothing.
 - **Existing user with status `DELETED`**: no-ops — a magic link never resurrects a soft-deleted
   account.
-- **Any other existing user**: issues a link regardless of current status (e.g. a `LOCKED` account
-  still gets a link issued here — the status gate happens at *verify* time, via
+- **Any other existing user**: issues a link regardless of current status (e.g. an administratively
+  `LOCKED` account still gets a link issued here — the status gate happens at *verify* time, via
   `assertUsableStatus`, not at request time).
 
 **Token**: 32 raw bytes (`generateOpaqueToken(32)` → 64 hex chars), hashed at rest with HMAC-SHA256
 (`config.security.tokenHashSecret`) under `verificationTokenRepository` type `'magic_link'`.
-**Only the newest link works**: issuing one first deletes the account's earlier magic-link tokens
-(`deleteAllForUser('magic_link', userId)`).
+**Only the newest link works**: issuing one replaces the account's magic-link token atomically
+(`verificationTokenRepository.replaceForUser('magic_link', userId, …)`, backed by a partial unique
+index — one live link per user even under concurrent requests).
 
 **Hooks fired**: `auditLog('MAGIC_LINK_REQUESTED', { userId, email, isNewUser })`, then
 `onMagicLinkRequested({ email, magicLinkToken: <raw token>, firstName?, lastName?, isNewUser })` —
@@ -69,6 +70,11 @@ only on the endpoint that sends your emails.
 
 **Body**: `{ token: string }`.
 
+Sets session cookies, so every browser request is subject to the
+[CSRF origin check](middleware.md#csrf-origin-check): an `Origin` that is neither the issuer's nor
+in `cookies.trustedOrigins` gets 403 `CSRF_ORIGIN_REJECTED` (login CSRF). Non-browser clients are
+unaffected.
+
 Consumes the token (`verificationTokenRepository.consumeByHash('magic_link', ...)` — single-use,
 deleted/marked-used on read) and issues a full session through the **exact same
 `resolveAuthContext` → `issueSession` path every other login method uses** — magic-link login is
@@ -76,14 +82,21 @@ not a shortcut around claims resolution.
 
 - If the token belongs to a `PENDING_VERIFICATION` user (the signup-via-magic-link case, or an
   account registered with a password but never verified), promotes it to `ACTIVE` (also resetting
-  `failedLoginAttempts`/`lockUntil`) and treats this as `isNewUser: true` for
+  `failedLoginAttempts`/`lockUntil` and `registrationContested`) and treats this as `isNewUser: true` for
   `resolveAuthContext`'s `ctx`. **Any password and MFA state set before the address was proven are
   discarded** (`passwordHash: null`, `mfaEnabled: false`, secrets and recovery codes cleared), and
   outstanding email-verification codes are deleted: clicking the link proves ownership of the
   inbox, not of a password anyone could have pre-registered against the victim's address. The
-  owner can set a password through password reset.
-- Otherwise runs `assertUsableStatus(user)` — a `LOCKED`/`SUSPENDED`/etc. account rejects here even
-  though the request step let the link be issued (see above).
+  owner can set a password through password reset. The activation is conditional on the account
+  still being pending (`userRepository.updateByIdIfStatus`): if it was activated meanwhile (with
+  the password its owner verified), nothing is wiped — it's then an ordinary sign-in, through
+  `assertUsableStatus`.
+- Otherwise runs `assertUsableStatus(user)` — an administratively `LOCKED` (no `lockUntil`) or
+  `SUSPENDED`/etc. account rejects here even though the request step let the link be issued (see
+  above). A failed-password lockout does **not** block a magic link: it locks password login only.
+  It also isn't lifted by it (the password-guessing budget stays spent until it expires or a
+  password reset); only a lock recorded before 0.4.0 (`failedLoginAttempts`/`lockUntil`) is cleared
+  by the login.
 
 **MFA.** A magic link is one factor (the inbox). If the account has MFA enabled, no session is
 issued and no cookies are set; the response is the same MFA challenge password login returns:
@@ -104,17 +117,18 @@ Complete it at `POST /mfa/verify` (TOTP or recovery code) or `POST /webauthn/mfa
   "userId": "...", "isNewUser": true
 }
 ```
-Also sets the `access_token`/`refresh_token` cookies (same `cookieOptions()` as every other login
+Also sets the session cookies (`__Host-access_token`/`__Host-refresh_token` — same names and `cookieOptions()` as every other login
 method — see [Password & Email Auth](password-email-auth.md)). `refreshToken` is left out of the
 body under `cookies.refreshTokenInBody: false`.
 
 **Errors**:
 - `INVALID_OR_EXPIRED_TOKEN` (400) — token not found, already used, or expired.
+- `CSRF_ORIGIN_REJECTED` (403) — a browser request from an untrusted origin (see above).
 - `USER_NOT_FOUND` (404) — the token's linked user no longer exists (edge case).
 - A `PENDING_VERIFICATION` user is always the "new user" case — it's consumed by the
   activate-and-continue path above `assertUsableStatus`, so `PENDING_VERIFICATION`/`INVITED` (403)
   can never actually be thrown here. For any other non-`ACTIVE` status, whatever
-  `assertUsableStatus` throws: `ACCOUNT_LOCKED` (423), `ACCOUNT_SUSPENDED` (403, also covers
+  `assertUsableStatus` throws: `ACCOUNT_LOCKED` (423, administrative lock only), `ACCOUNT_SUSPENDED` (403, also covers
   `DISABLED`), `INVALID_CREDENTIALS` (401, `DELETED` — reachable if the token was issued before the
   account was soft-deleted), or `USER_NOT_ACTIVE` (403, any other unrecognized status) — see
   [Errors](errors.md).

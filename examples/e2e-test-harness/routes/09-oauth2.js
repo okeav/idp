@@ -115,7 +115,7 @@ export function mountOAuth2Flow(app, { AUTH_PREFIX, BASE_URL }) {
       ${error ? `<div class="flag blocked">Authorization failed: <strong>${escapeHtml(error)}</strong> — ${escapeHtml(error_description || '')}</div>` : ''}
       ${!code ? '<div class="flag">No <code>code</code> present — go back to <a href="/flows/oauth2">9. OAuth2</a> and grant consent first if you saw consent_required.</div>' : `
       <div class="card">
-        <p class="step">Step 4 — exchange the code for tokens. Sends the PKCE <code>code_verifier</code> generated for this attempt. Choose how the client authenticates — both are implemented: <code>client_secret_post</code> (id + secret in the body) or <code>client_secret_basic</code> (HTTP Basic header).</p>
+        <p class="step">Step 4 — exchange the code for tokens. Sends the PKCE <code>code_verifier</code> generated for this attempt. Choose how the client authenticates — both are implemented: <code>client_secret_post</code> (id + secret in the body) or <code>client_secret_basic</code> (HTTP Basic header). The code is refused with <code>400 INVALID_GRANT</code> if, since it was issued, you signed out everywhere (flow 4's logout-all, a password reset/change) or your consent for this client was withdrawn or re-granted.</p>
         <label>Client authentication</label>
         <select id="auth-method"><option value="post">client_secret_post</option><option value="basic">client_secret_basic</option></select>
         <button onclick="exchange()">Exchange code for tokens</button>
@@ -175,10 +175,10 @@ export function mountOAuth2Flow(app, { AUTH_PREFIX, BASE_URL }) {
             }
           }
         }
-        // credentials:'omit' is required here, not just tidy: authContextMiddleware
-        // prefers the access_token COOKIE over an Authorization: Bearer header when
-        // both are present, and you still have a (first-party) login cookie from
-        // authorizing this client — which /userinfo now refuses outright.
+        // credentials:'omit' keeps this unambiguous: since 0.4.0 an Authorization:
+        // Bearer header wins over the session cookie anyway, but you still have a
+        // (first-party) login cookie from authorizing this client, and this call
+        // should depend only on the OAuth2 token.
         async function callUserinfo() {
           if (!tokens) { alert('Exchange the code first.'); return; }
           const result = await callApi('${AUTH_PREFIX}/userinfo', { headers: { Authorization: 'Bearer ' + tokens.access_token }, credentials: 'omit' });

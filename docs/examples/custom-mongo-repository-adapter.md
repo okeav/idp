@@ -100,7 +100,16 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
       Object.assign(user, patch, { updatedAt: new Date() });
       return user;
     },
-    async incrementFailedLoginAttempts(id) {
+    // Required (0.4.0): write only while the status is still `status` — in a real database ONE
+    // conditional update (UPDATE ... WHERE id = $1 AND status = $2). Activation and re-registration
+    // of a pending account go through it.
+    async updateByIdIfStatus(id, status, patch) {
+      const user = users.get(id);
+      if (!user || user.status !== status) return null;
+      Object.assign(user, patch, { updatedAt: new Date() });
+      return user;
+    },
+    async incrementFailedLoginAttempts(id) { // still in the interface, no longer called (0.4.0)
       const user = users.get(id);
       if (!user) return null;
       user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
@@ -137,25 +146,41 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
   // oauthClientRepository, verificationTokenRepository, serviceKeyRepository,
   // credentialRepository — same pattern, see repository-adapters.md for each
   // method's exact signature. createSessionForLogin() in particular needs to
-  // behave atomically (write session + audit + lastLoginAt together) even
+  // behave atomically (write session + audit + lastLoginAt together, and reset the
+  // user's failedLoginAttempts/lockUntil — that clears a lock recorded before 0.4.0) even
   // without a real transaction, since nothing above the storage layer retries.
   //
   // sessionRepository.findByJti(jti) is optional but strongly recommended: it
   // runs on every authenticated request (session.verifyOnEachRequest), so back
   // it with an index on the session's jti, e.g.
-  //   async findByJti(jti) { return sessionsByJti.get(jti) ?? null; } // → { user, expiresAt, revokedAt } | null
+  //   async findByJti(jti) { return sessionsByJti.get(jti) ?? null; } // → { user, expiresAt, revokedAt, familyId, createdAt } | null
   //
   // Since 0.4.0, session rows also carry kind ('first_party' | 'oauth2'), authTime,
   // familyId and familyCreatedAt — store them as given. revokeByRefreshTokenHash must
   // persist opts.reason as revokeReason (and findByRefreshTokenHash return it), and
   // revokeAllForUser must honour opts.exceptJti. Implement revokeFamily(familyId) and
   // revokeForClient(clientId, { userId }) (both → { revokedCount, jtis }) so refresh-token
-  // reuse, consent revocation and client deactivation actually revoke tokens.
+  // reuse, consent revocation and client deactivation actually revoke tokens. revokeFamily must
+  // also set familyRevokedAt on EVERY row of the family, and isFamilyRevoked(familyId) (required,
+  // 0.4.0) reports it — refreshes and code redemptions call it after inserting their row.
+  // isFamilyLive(familyId) (required, 0.4.0): whether the family has an unrevoked, unexpired row.
+  // findByJti should also return familyId and revokeReason.
+  // Authorization codes carry sessionJti; optional markReused(hash) sets reuseDetectedAt.
+  // Users carry sessionsRevokedExceptFamily alongside sessionsRevokedAt.
   // credentialRepository.updateCounter / deleteByCredentialId resolve a boolean
   // (conditional writes), and a custom cache adapter needs an atomic take().
+  // serviceKeyRepository.upsertByKid must return null (and change nothing) for a
+  // REVOKED kid; setStatusByKid should record statusChangedAt and, given
+  // { expectedStatus }, change the key only from that status; findByKid is optional.
+  // Email-verification tokens carry passwordHash (persist it, return it on read/consume),
+  // and users carry registrationContested. verificationTokenRepository also needs (0.4.0)
+  // findActive(kind, { tokenHash } | { verificationCode }, userId) — read without consuming —,
+  // clearCodes(kind, userId) — null every row's verificationCode, keep the links — and
+  // replaceForUser(kind, userId, input) — the ONE live password_reset / magic_link row per
+  // user, atomically (back it with a unique constraint on (kind, user) for those kinds).
 
-  // Optional: attempt counters — the per-account MFA lockout, the email-verification
-  // code budget, and single-use MFA challenge tokens. recordFailure is called BEFORE
+  // Optional: attempt counters — the per-account MFA and password-login lockouts, the
+  // email-verification and password-change budgets, and single-use MFA challenge tokens. recordFailure is called BEFORE
   // the secret is checked and must be atomic — in a real database, one conditional
   // upsert, not read-then-write.
   const counters = new Map();
@@ -196,13 +221,16 @@ await initIdentityProvider({
 
 Leave out `findByJti`, `attemptCounterRepository`, or `claimTotpStep`/`consumeRecoveryCode` and
 `initIdentityProvider()` still boots, but logs a warning and falls back: access tokens survive
-logout-all/password reset until they expire, the MFA lockout (and the record of spent MFA challenge
-tokens) is counted per instance, and TOTP/recovery-code reuse is checked with a racy
+logout-all/password reset until they expire, the MFA and password-login lockouts (and the record
+of spent MFA challenge tokens) are counted per instance, and TOTP/recovery-code reuse is checked with a racy
 read-then-write. Leave out `revokeFamily`, `revokeForClient` or
 `authorizationCodeRepository.findUsedByCodeHash` and token reuse is refused but not punished, and
 revoking consent or deactivating a client leaves its tokens working. Fine for a single-process
 test store; implement all of them for anything real — the full table is in
-[Repository Adapters](../api/repository-adapters.md#optional-methods-and-their-fallbacks).
+[Repository Adapters](../api/repository-adapters.md#optional-methods-and-their-fallbacks). The
+0.4.0 methods `updateByIdIfStatus`, `isFamilyRevoked`, `isFamilyLive`, `findActive`, `clearCodes`
+and `replaceForUser` have **no** fallback: without them re-registration, email verification, password reset,
+magic links and refresh fail.
 
 Note `mongo.skipTransactionCheck` and the whole Mongo-transaction-support startup probe (see
 [Repository Adapters](../api/repository-adapters.md#transactions-are-required)) only apply to the

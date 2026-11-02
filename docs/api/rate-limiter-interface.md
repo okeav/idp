@@ -10,11 +10,13 @@ description: "The RateLimiter contract, built-in memory/Redis/noop adapters, per
 
 Request-rate limiting throttles the *rate* of requests to the sensitive endpoints within a fixed
 window, regardless of whether individual requests succeed. It's a **distinct concern** from
-`security.maxFailedLoginAttempts` (which locks one account after N wrong passwords, tracked on the
-user record — see [Password & Email Auth](password-email-auth.md)), from the per-account MFA
-lockout (`config.mfa.lockout` — see [MFA](mfa.md#per-account-lockout)) and from the per-account
-email-verification lockout (`security.verificationCodeLockout`). Both lockouts are counted in
-storage and are independent of `rateLimiting.enabled`.
+`security.maxFailedLoginAttempts` (which locks one account's *password login* after N wrong
+passwords, counted per account in the attempt-counter store (`password-login:<userId>`) — the
+account stays `ACTIVE` and every other sign-in method keeps working; see [Password & Email Auth](password-email-auth.md#failed-password-lockout)), from
+the per-account MFA lockout (`config.mfa.lockout` — see [MFA](mfa.md#per-account-lockout)), and
+from the per-address email-verification code and per-account password-change lockouts
+(`security.verificationCodeLockout`, `security.passwordChangeLockout`). Those lockouts are
+counted in storage and are independent of `rateLimiting.enabled`.
 
 ## `RateLimiter` contract
 
@@ -134,10 +136,13 @@ Zero-config default. Fixed-window counter, **single-process only** — same cave
 `MemoryCacheAdapter`: fine for local dev, wrong for horizontally-scaled deployments (each instance
 enforces its own independent limit, effectively multiplying the real limit by instance count).
 
-It tracks at most `maxKeys` keys (default 500,000). When full — after sweeping expired windows — a
-**new** key is refused with an error, which the fail-closed call sites turn into 503
-`RATE_LIMITER_UNAVAILABLE`. It deliberately doesn't evict: eviction would let an attacker flush
-their own counter by flooding distinct keys. Existing keys keep counting normally.
+It tracks at most `maxKeys` keys (default 500,000). When full — after sweeping expired windows — it
+evicts the oldest counters that have **not** reached their limit (a batch of 1% of `maxKeys`), to
+make room. An exhausted counter is never evicted, since that would release a block; flushing an
+unexhausted one gives an attacker at most one window's attempts back. Only when every tracked key
+is exhausted is a **new** key refused with an error, which the fail-closed call sites turn into 503
+`RATE_LIMITER_UNAVAILABLE`. (Refusing every new key once full, as before, let a flood of distinct
+keys deny every new client.) Existing keys keep counting normally.
 
 ## `RedisRateLimiter` / `createRedisRateLimiter(opts)`
 

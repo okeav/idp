@@ -18,7 +18,7 @@ As soon as any provider has a `clientId`, `initIdentityProvider()` **refuses to 
 
 ```js
 sso: {
-  // Absolute http(s) URL providers redirect back to: <baseCallbackUrl>/sso/<provider>/callback.
+  // Absolute https URL (http only for localhost, or with NODE_ENV=development) providers redirect back to: <baseCallbackUrl>/sso/<provider>/callback.
   // Use the URL the router is mounted at, e.g. 'https://api.example.com/auth'.
   baseCallbackUrl: 'https://api.example.com/auth',
   // Exact origins (scheme://host[:port], no path) SSO may send the browser back to.
@@ -92,9 +92,12 @@ untrusted** and never grant anything on them alone.
 Generates a random `state` (32 bytes, base64url) and a random **binding** value, and stores
 `{ provider, redirect_uri, extra, bindingHash, codeVerifier, nonce }` in the cache keyed by the
 state (`config.ttls.ssoState`, default 600s). Sets the binding in an httpOnly cookie named
-`idp_sso_<first 16 chars of state>` (one per attempt, so two logins in two tabs don't collide;
-`SameSite=Lax`, or `SameSite=None; Secure` for Apple, whose callback is a cross-site form POST;
-`cookies.domain` applies). Then redirects to the provider's authorization URL with
+`__Host-idp_sso_<first 16 chars of state>` (plain `idp_sso_…` only when cookies aren't Secure; one
+per attempt, so two logins in two tabs don't collide; `SameSite=Lax`, or `SameSite=None; Secure`
+for Apple, whose callback is a cross-site form POST). It is **always host-only** (`Path=/`, no
+`Domain` — `cookies.domain` does not apply since 0.4.0): it only has to come back to the IdP, and a
+binding cookie planted from a sibling subdomain would bind the victim's browser to the attacker's
+login attempt. A callback carrying the binding cookie twice is refused (400 `COOKIE_CONFLICT`). Then redirects to the provider's authorization URL with
 `response_type=code`, the package's **own** callback URL (not your `redirect_uri`) as
 `redirect_uri`, `code_challenge` + `code_challenge_method=S256` (Google, GitHub, Microsoft), `nonce`
 (Apple), and provider-specific extras: Apple gets `response_mode=form_post`; Google gets
@@ -136,12 +139,18 @@ Steps:
      provider id — its email isn't consulted.
    - Otherwise the provider must **assert the email is verified** (per the table above); if not →
      redirect `?error=email_not_verified`. Then, by email:
-     - an `ACTIVE` account → the identity is linked to it (`isNewLink`);
+     - an `ACTIVE` account → the identity is linked to it (`isNewLink`). A failed-password lockout
+       doesn't change that (it locks password login only, and stays in place — another method
+       signing in doesn't reset the password-guessing budget; a pre-0.4.0 row with status `LOCKED`
+       and a `lockUntil` counts as `ACTIVE`, and the SSO login clears that legacy lock);
      - a `PENDING_VERIFICATION` account (registered here, never verified) → claimed: activated,
        with any password and MFA state set before the address was proven **discarded** and
        outstanding email-verification codes deleted, then linked (audit
-       `SSO_PENDING_ACCOUNT_CLAIMED`). The owner can set a password through password reset;
-     - any other status (locked, suspended, deleted …) → a login method is **never attached**;
+       `SSO_PENDING_ACCOUNT_CLAIMED`). The activation is conditional on the account still being
+       pending (`updateByIdIfStatus`): if its owner activated it meanwhile, nothing is wiped and the
+       identity is just linked. The owner can set a password through password reset;
+     - any other status (administratively locked, suspended, deleted …) → a login method is
+       **never attached**;
        redirect `?error=account_inactive`;
      - no account → a new one is created with `status: 'ACTIVE'` directly (the provider verified
        the address) (`isNewUser`).

@@ -6,6 +6,6 @@ export const disableMfaSchema = z.object({ password: z.string().min(1).optional(
 export const regenerateRecoveryCodesSchema = z.object({ password: z.string().min(1).optional(), code: z.string().min(6).max(10) }).strict();
 export const verifyMfaChallengeSchema = z.object({
     mfaChallengeToken: z.string().min(1),
-    // Room for a recovery code (`XXXXXX-XXXXXX`, 13 chars) as well as a TOTP code.
+    // Room for a recovery code (`XXXXX-XXXXX-XXXXX-XXXXX`, 23 chars, typed with spaces too) as well as a TOTP code.
     code: z.string().min(6).max(32),
 }).strict();

@@ -75,7 +75,11 @@ Both revoke **every** session, the caller's own included (and any OAuth2 app ses
 `session.verifyOnEachRequest` on (the default) their access tokens — including the one making this
 call — stop working on the next request, on every instance; with it off, they stay valid until
 they expire (see [Middleware](../api/middleware.md)). A refresh racing with either call can't
-resurrect a session: it re-checks the user's revoke-all time after rotating.
+resurrect a session: it re-checks the user's revoke-all time after rotating. The same goes for a
+login that was still checking its password when the call landed (it answers 401 `TOKEN_REVOKED`).
+Likewise an OAuth2 authorization code issued before the call but not yet redeemed is refused
+(`INVALID_GRANT`) at `/oauth2/token` — as is any code whose authorizing session has been revoked —
+so it can't become a new session afterwards.
 
 ```js
 // Returns how many sessions were revoked.

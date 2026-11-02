@@ -10,7 +10,7 @@ export function mountRefreshFlow(app, { AUTH_PREFIX }) {
         Every successful refresh <strong>rotates</strong> the refresh token — the old value is revoked immediately, even though it hasn't expired.</p>
         <p class="step"><strong>Reuse detection (0.4.0):</strong> replaying an already-rotated token within ~10 s (<code>session.refreshReuseGraceSeconds</code> — two tabs refreshing at once) is just refused. Replay it <em>after</em> that and it's treated as theft: the whole family (this login) is revoked — the current token in the box stops working too — and <code>REFRESH_TOKEN_REUSE_DETECTED</code> appears in the activity panel. Log in again (flow 2) to continue.</p>
         <p class="step"><code>session.reresolveClaimsOnRefresh</code> now defaults to <code>true</code>: every refresh re-runs <code>resolveAuthContext</code>, so the decoded claims below show <code>claims.via: "refresh"</code> (this harness's hook tags the calling method).</p>
-        <p class="step">These requests deliberately omit cookies (<code>credentials:'omit'</code>) and rely purely on the body-supplied token — <code>refreshTokenHandler</code> prefers the <code>refresh_token</code> cookie over the body when both are present, which would otherwise mask the "old token now fails" check with whatever your login cookie currently holds.</p>
+        <p class="step">These requests deliberately omit cookies (<code>credentials:'omit'</code>) and rely purely on the body-supplied token. Since 0.4.0 a token in the body wins over the refresh cookie anyway; omitting the cookie just keeps the check unambiguous.</p>
         <label>Refresh token</label>
         <input id="refreshToken">
         <button onclick="doRefresh()">Refresh</button>

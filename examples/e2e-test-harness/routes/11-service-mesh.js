@@ -12,7 +12,7 @@ function generateKeypair() {
     return { privateKey, publicKey };
 }
 
-export function mountServiceMeshFlow(app, { BASE_URL, IDP_BASE_URL, SERVICE_BOOTSTRAP_SECRETS, SHARED_BOOTSTRAP_SECRET }) {
+export function mountServiceMeshFlow(app, { BASE_URL, IDP_BASE_URL, SERVICE_BOOTSTRAP_SECRETS, SHARED_BOOTSTRAP_SECRET, LEGACY_SERVICE_NAME }) {
     app.get('/flows/service-mesh', (req, res) => {
         res.send(layout({
             title: '11. Service mesh (S2S JWKS trust)',
@@ -20,7 +20,7 @@ export function mountServiceMeshFlow(app, { BASE_URL, IDP_BASE_URL, SERVICE_BOOT
       <div class="flag">
         <code>initServiceIdentity()</code>'s "which service am I" identity is a client-side singleton (one active identity per process — realistic, since a real backend service really does have exactly one identity). So this page registers Service A, then Service B (which becomes the "current" identity), then mints a token AS B targeting A — all through the real, unmodified public API, done sequentially rather than concurrently.
         <br><br>
-        Each service registers with <strong>its own</strong> bootstrap secret (<code>serviceMesh.bootstrapSecrets</code> in <code>server.js</code>), which covers only that service's name — so clicking a Register button again simply <em>rotates</em> that service's key (the previous one goes <code>ROTATING</code>, then <code>RETIRED</code>). Names must match <code>^[a-z0-9][a-z0-9-]{0,62}$</code> and are limited to the two below by <code>serviceMesh.allowedServiceNames</code>.
+        Each service registers with <strong>its own</strong> bootstrap secret (<code>serviceMesh.bootstrapSecrets</code> in <code>server.js</code>), which covers only that service's name — so clicking a Register button again simply <em>rotates</em> that service's key (the previous one goes <code>ROTATING</code> — still verifying for <code>serviceMesh.rotationGraceSeconds</code>, default 1 hour — then <code>RETIRED</code> on the next rotation). Names must match <code>^[a-z0-9][a-z0-9-]{0,62}$</code> and are limited by <code>serviceMesh.allowedServiceNames</code> to the two below plus <code>${LEGACY_SERVICE_NAME}</code> (step 7). A key revoked with <code>revokeServiceKey()</code> is never re-activated: re-registering it answers <code>409 SERVICE_KEY_REVOKED</code> (the Register buttons always generate a fresh keypair, so they don't hit that).
       </div>
 
       <div class="card">
@@ -61,9 +61,13 @@ export function mountServiceMeshFlow(app, { BASE_URL, IDP_BASE_URL, SERVICE_BOOT
       </div>
 
       <div class="card">
-        <p class="step">Step 7 — impersonation check: try to register a <em>new</em> key under "harness-service-a" using only the <strong>shared</strong> <code>serviceMesh.bootstrapSecret</code>. Expected: <code>409 SERVICE_NAME_TAKEN</code> — the shared secret only proves "some participating service", so it can claim a name with no key yet, never replace an existing one.</p>
-        <button class="danger" onclick="hijack()">Replace A's key with the shared secret</button>
+        <p class="step">Step 7 — impersonation checks with only the <strong>shared</strong> <code>serviceMesh.bootstrapSecret</code>, which proves "some participating service", not which one.</p>
+        <p class="step">7a — try to register a <em>new</em> key under "harness-service-a". Expected: <code>403 FORBIDDEN</code> — a name listed in <code>serviceMesh.bootstrapSecrets</code> registers only with its own secret, never the shared one (otherwise, once A's key was revoked, anyone with the shared secret could claim A's name).</p>
+        <button class="danger" onclick="hijack('harness-service-a', 'hijack-result')">Register a key for A with the shared secret</button>
         <pre id="hijack-result" class="result"></pre>
+        <p class="step">7b — register "${LEGACY_SERVICE_NAME}" (allowed, but with no per-service secret) with the shared secret, then click again: each click sends a brand-new key. Expected: <code>201</code> the first time the name has no key, then <code>409 SERVICE_NAME_TAKEN</code> — the shared secret can claim a name with no key yet, never replace an existing one. (Mongo persists across restarts, so after the first run every click is 409.)</p>
+        <button class="danger" onclick="hijack('${LEGACY_SERVICE_NAME}', 'legacy-result')">Register ${LEGACY_SERVICE_NAME} with the shared secret</button>
+        <pre id="legacy-result" class="result"></pre>
       </div>
 
       <script>
@@ -90,9 +94,9 @@ export function mountServiceMeshFlow(app, { BASE_URL, IDP_BASE_URL, SERVICE_BOOT
           const result = await callApi('/api/service-mesh/call-a', { method: 'POST', body: { withToken } });
           showResult('call-result', result);
         }
-        async function hijack() {
-          const result = await callApi('/api/service-mesh/register-shared', { method: 'POST', body: { name: 'harness-service-a' } });
-          showResult('hijack-result', result);
+        async function hijack(name, resultId) {
+          const result = await callApi('/api/service-mesh/register-shared', { method: 'POST', body: { name } });
+          showResult(resultId, result);
         }
       </script>`,
         }));
@@ -114,7 +118,7 @@ export function mountServiceMeshFlow(app, { BASE_URL, IDP_BASE_URL, SERVICE_BOOT
 
     // Talks to /internal/service-keys directly (not through initServiceIdentity,
     // which would also switch this process's identity) with only the shared
-    // secret and a brand-new key, to show the 409.
+    // secret and a brand-new key, to show the 403 / 409.
     app.post('/api/service-mesh/register-shared', async (req, res) => {
         try {
             const { name } = req.body;

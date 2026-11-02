@@ -6,7 +6,7 @@ export function mountPasswordResetFlow(app, { AUTH_PREFIX }) {
             title: '5. Forgot / reset password',
             body: `
       <div class="card">
-        <p class="step">Step 1 — request a reset. Enumeration-safe: always returns <code>{status:'ok'}</code> whether or not the email exists.</p>
+        <p class="step">Step 1 — request a reset. Enumeration-safe: always returns <code>{status:'ok'}</code> whether or not the email exists — and answers <em>before</em> looking the address up (so the timing is the same too); the token is written, and the hook fires, just after the response.</p>
         <label>Email (must be an existing, verified account — e.g. from flow 1)</label>
         <input id="email">
         <button onclick="requestReset()">Request password reset</button>
@@ -20,7 +20,7 @@ export function mountPasswordResetFlow(app, { AUTH_PREFIX }) {
       </div>
 
       <div class="card">
-        <p class="step">Step 3 — reset the password. This also revokes every existing session for the account.</p>
+        <p class="step">Step 3 — reset the password. This also revokes every existing session for the account, resets the password-login lockout, and — for an account still awaiting email verification — verifies it (the reset proved the inbox).</p>
         <label>Token</label>
         <input id="token">
         <label>New password</label>

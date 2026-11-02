@@ -28,19 +28,23 @@ await initIdentityProvider({
   serviceMesh: {
     // One secret per service, provisioned out-of-band. Each covers only its own name, and lets that
     // service rotate its key. (With configFromEnv: IDP_S2S_BOOTSTRAP_SECRETS=orders-api=…,payments-api=…)
+    // Each must be at least 32 characters (startup refuses shorter ones): openssl rand -base64 32
     bootstrapSecrets: {
       'orders-api': process.env.S2S_BOOTSTRAP_SECRET_ORDERS,
       'payments-api': process.env.S2S_BOOTSTRAP_SECRET_PAYMENTS,
     },
     allowedServiceNames: ['orders-api', 'payments-api'], // optional
     // tokenMode defaults to 'token' — only signed S2S JWTs are accepted.
+    // rotationGraceSeconds: 3600, // default — how long a rotated-away key still verifies
   },
 });
 ```
 
 The legacy shared `bootstrapSecret` still works, but it can only register a name that has no key
 yet: a second registration of an existing name with a different key answers 409
-`SERVICE_NAME_TAKEN`. Registration is rate limited per IP (`rateLimiting.serviceKeyRegistration`).
+`SERVICE_NAME_TAKEN` (as do the losers of two *simultaneous* first registrations of one name —
+their keys are revoked), and a name listed in `bootstrapSecrets` (like the two above) can't be
+registered with it at all — 403 `FORBIDDEN`. Registration is rate limited per IP (`rateLimiting.serviceKeyRegistration`).
 
 ## Register two service identities
 
@@ -65,6 +69,7 @@ function generateKeypair() {
 // `idpBaseUrl + '/.well-known/services-jwks.json'` with no awareness of where the
 // router is actually mounted (same caveat as the `.well-known` note in
 // router-and-schemas.md). This example assumes the router is mounted at `/`.
+// It must be https — both functions refuse plain http except to localhost (or with NODE_ENV=development).
 const IDP_BASE_URL = 'https://idp.example.com';
 
 // Service "payments-api" registers itself at startup, with its own bootstrap secret:
@@ -88,8 +93,11 @@ await initServiceIdentity({
 ```
 
 Registering a *new* keypair later under the same name with that service's own secret rotates it:
-the old key moves to `ROTATING` (still accepted, so in-flight tokens keep working) and is `RETIRED`
-on the next rotation. To cut a key off immediately, call `revokeServiceKey(kid)` on the IDP.
+the old key moves to `ROTATING` — still accepted for `serviceMesh.rotationGraceSeconds` (default
+3600), so in-flight tokens and instances still on the old key keep working — and is `RETIRED` on the
+next rotation. To cut a key off immediately, call `revokeServiceKey(kid)` on the IDP. A revoked key
+stays revoked: when the service restarts and re-registers it, `initServiceIdentity` fails with 409
+`SERVICE_KEY_REVOKED` — generate a new keypair for it.
 
 > `initServiceIdentity` sets **process-global state** — one active identity per process. In a real
 > deployment, "orders-api" and "payments-api" are two separate running processes, each calling

@@ -71,7 +71,9 @@ set for OAuth2 tokens. For an `oauth2-client` (client_credentials) token `req.au
 response_type, scope?, state?, nonce?, code_challenge?, code_challenge_method?`. Mounted behind
 `authContextMiddleware({ optional: true })` — it behaves differently for logged-in vs. anonymous
 callers rather than requiring auth outright. It answers JSON (or a redirect), so your frontend
-calls it with the user's session (cookie or Bearer) and acts on the result.
+calls it with the user's session (cookie or Bearer) and acts on the result. OIDC `prompt` and
+`max_age` are **not** supported — they're ignored, so an existing session is reused however old it
+is; an RP that needs a fresh login checks the ID token's `auth_time` itself.
 
 The request is validated **before** the login check, in this order — so an anonymous caller still
 gets these errors:
@@ -170,7 +172,7 @@ answer `{ error, message }` with the RFC 6749 §5.2 error in **upper-case** form
 | `error` | Status | When |
 |---|---|---|
 | `INVALID_CLIENT` | 401 | any client-authentication failure (below) |
-| `INVALID_GRANT` | 400 | code/refresh token unknown, used, expired, revoked, issued to another client; `redirect_uri` mismatch; PKCE failure; user not `ACTIVE`; refresh family past its absolute lifetime |
+| `INVALID_GRANT` | 400 | code/refresh token unknown, used, expired, revoked, issued to another client; `redirect_uri` mismatch; PKCE failure; user not `ACTIVE`; refresh family past its absolute lifetime; a code issued before the user's sessions were revoked, or whose consent is gone, no longer covers its scopes, or was re-granted since |
 | `INVALID_SCOPE` | 400 | `client_credentials` asked for a scope outside `allowedScopes` |
 | `UNAUTHORIZED_CLIENT` | 400 | grant not in the client's `allowedGrants` |
 | `UNSUPPORTED_GRANT_TYPE` | 400 | see above |
@@ -210,10 +212,27 @@ authenticated client, and `redirect_uri` must match exactly what was used at aut
 someone else holds it: everything its first redemption issued (the whole refresh-token family) is
 revoked, and `OAUTH2_CODE_REUSE_DETECTED` is audited. The request itself fails `INVALID_GRANT`.
 
+**A code dies with the sessions and the consent it came from** (0.4.0). The user must still be
+`ACTIVE`, and the code is refused with `INVALID_GRANT` if the session that authorized it (the code
+stores its access token's `jti`, `sessionJti`) has since been signed out or is gone — a sign-out
+landing while `/authorize` was in flight. An ordinary refresh of that session doesn't count: a row
+retired by rotation whose family still has a live row (`isFamilyLive`) keeps the code redeemable.
+(A sessionless token — from the public `issueAccessToken()` export — binds no session to the code.)
+It is also refused if it was issued at or before the user's
+`sessionsRevokedAt` (logout-all, password reset/change, account deletion), or if the user's
+consent for this client is missing, expired, doesn't cover the code's scopes, or was (re)granted
+after the code was issued — so a code minted with a stolen session just before the victim signed
+out everywhere, or withdrew consent, can't become a fresh long-lived session. After the new session
+row is written, the redemption re-checks that the code wasn't replayed meanwhile (`reuseDetectedAt`,
+the family tombstone) and that no "log out everywhere" landed while it ran; either way the new row
+is revoked and the request fails (`INVALID_GRANT` / 401 `TOKEN_REVOKED`).
+
 Issues an access token (`oauth2-user`) and a refresh token, plus an **ID token if the granted
 scopes include `openid`** (see [OIDC](oidc.md#id-tokens) for its claims: `nonce` from the
 authorize request, `azp`, `auth_time`, scope-gated profile/email claims). TTLs prefer per-client
-overrides (`client.accessTokenTTL` / `refreshTokenTTL` / `idTokenTTL`) over `config.ttls.*`. The
+overrides (`client.accessTokenTTL` / `refreshTokenTTL` / `idTokenTTL`) over `config.ttls.*`, clamped
+at issuance to 24 h (access, ID) and 1 year (refresh) — `MAX_CLIENT_TTL_SECONDS`, which also covers
+values stored before the schema cap. The
 refresh token's session row is stored with `kind: 'oauth2'` and starts a new family rooted at the
 code.
 
@@ -223,16 +242,21 @@ code.
 
 ### `refresh_token`
 
-Body adds: `refresh_token` (+ client authentication). Atomically finds-and-revokes the presented
-refresh token (rotation — the old token cannot be used again).
+Body adds: `refresh_token` (+ client authentication). Reads the presented refresh token's row and
+runs every check below (client binding, user still `ACTIVE`, family lifetime) **before** consuming
+it, so a refused refresh doesn't burn the token; then atomically finds-and-revokes it (rotation —
+the old token cannot be used again).
 
 - **Bound to its client.** Only a session row of kind `oauth2` issued to the authenticated client
   is accepted. A first-party refresh token (from `/login`), or another client's, fails
-  `INVALID_GRANT` — and stays revoked, since presenting it here means it leaked. Conversely, the
+  `INVALID_GRANT` — and is revoked (reason `misused`, not a rotation), since presenting it here
+  means it leaked. Conversely, the
   first-party `POST /refresh` refuses OAuth2 refresh tokens.
 - **Reuse detection.** A token that was already rotated, presented again after
   `session.refreshReuseGraceSeconds` (default 10 s), revokes its whole family and emits
-  `REFRESH_TOKEN_REUSE_DETECTED`; within the grace window the replay is only refused.
+  `REFRESH_TOKEN_REUSE_DETECTED`; within the grace window the replay is only refused. A refresh
+  racing that revocation is caught after it inserts its successor (`isFamilyRevoked`) and fails
+  `TOKEN_REVOKED` (401).
 - **Absolute lifetime.** A family ends `session.absoluteLifetimeSeconds` (default 90 days) after
   the code was redeemed, however actively it's refreshed; no refresh token's expiry extends past
   that, and a refresh after it fails `INVALID_GRANT`.
@@ -255,8 +279,11 @@ Body adds: `scope?` (+ client authentication). **Confidential clients only** —
 gets `INVALID_CLIENT`. If `scope` is omitted, defaults to the client's **entire `allowedScopes`
 set**; a scope outside it → `INVALID_SCOPE`. The token's `sub` is the client's own `clientId` and
 it carries `gty: 'client_credentials'`, so it is classified `oauth2-client` and can never pass as
-a user. No session row backs it, so it carries `sessionless: true` — it can't be revoked before it
-expires.
+a user. No session row backs it, so it carries `sessionless: true` and can't be revoked
+individually — but `authContextMiddleware` checks it against its **client** on every request: once
+the client is deactivated (or deleted), its machine tokens get 401 `TOKEN_REVOKED` at once. (A
+resource server that only calls `verifyAccessToken` doesn't get that check.) Its lifetime is the
+client's `accessTokenTTL` (capped at 24 h, also at issuance) or `ttls.accessToken`.
 
 ```json
 { "access_token": "...", "token_type": "Bearer", "expires_in": 3600, "scope": "..." }
@@ -329,7 +356,11 @@ Refresh token:
 - **`PATCH /oauth2/clients/:clientId`** — accepts `name, redirectUris, postLogoutRedirectUris,
   allowedScopes, allowedGrants, clientType, accessTokenTTL, refreshTokenTTL, idTokenTTL, logoUrl,
   websiteUrl, privacyPolicyUrl, termsOfServiceUrl, supportEmail, metadata`
-  (`updateOAuthClientSchema`, strict, all optional). **`status` is not an updatable field through
+  (`updateOAuthClientSchema`, strict, all optional). `accessTokenTTL` and `idTokenTTL` are capped
+  at 86400 (24 h) and `refreshTokenTTL` at 31536000 (1 year) — an access token can't be revoked
+  once issued, so a ten-year TTL would be a ten-year credential; `logoUrl`, `websiteUrl`,
+  `privacyPolicyUrl` and `termsOfServiceUrl` must be `https` URLs (they're links on the consent
+  screen — a `javascript:` URL there would run in the IdP's origin). **`status` is not an updatable field through
   this schema** — see lifecycle note below. → `{ clientId, name, status }`.
 - **`POST /oauth2/clients/:clientId/approve`** — `PENDING_APPROVAL → ACTIVE`. The only way out of
   pending approval.
@@ -337,7 +368,8 @@ Refresh token:
   invalidating the old one (no grace period/dual-secret support) → `{ clientId, clientSecret }`.
 - **`DELETE /oauth2/clients/:clientId`** (deactivate) — `status → INACTIVE`, and **revokes every
   session issued to the client, for every user** (and marks the paired access tokens revoked), so
-  the client keeps nothing it was issued → `{ clientId, status }`. Needs the adapter's
+  the client keeps nothing it was issued → `{ clientId, status }`. Its `client_credentials` tokens
+  stop at `authContextMiddleware` too (they have no session). Needs the adapter's
   `SessionRepository.revokeForClient`; without it a warning is logged and the tokens are left
   alone.
 
@@ -380,7 +412,8 @@ authenticate to revoke/introspect.
 - **`DELETE /oauth2/consent/sessions/:clientId`** (auth required) → `{ status: 'ok' }`. Revokes the
   consent record (`ConsentRepository.revoke`, no existence check — revoking an unknown client
   no-ops) **and** the client's sessions for this user (`SessionRepository.revokeForClient(clientId,
-  { userId })`), with their access tokens — withdrawing consent ends what it authorized. Emits
+  { userId })`), with their access tokens, and any of its authorization codes not yet redeemed
+  (refused at `/oauth2/token`) — withdrawing consent ends what it authorized. Emits
   `CONSENT_REVOKED` with `revokedSessions`.
 
 These routes take the user's first-party session; the `DELETE` is subject to the CSRF origin

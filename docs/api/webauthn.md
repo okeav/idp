@@ -154,7 +154,11 @@ required, advances the credential's signature counter (conditional write — rep
 checks that a discoverable assertion's `userHandle` names the credential's owner, loads the owning
 user, and issues a full session through the same `resolveAuthContext` → `issueSession` path as
 every other login method. A passkey login is not followed by a TOTP challenge — a
-user-verifying passkey is already two factors.
+user-verifying passkey is already two factors. Because it sets session cookies, every browser
+request is subject to the [CSRF origin check](middleware.md#csrf-origin-check) (403
+`CSRF_ORIGIN_REJECTED` from an origin that is neither the issuer's nor in
+`cookies.trustedOrigins`). A failed-password lockout doesn't block passkey login (it locks password
+login only); a passkey login doesn't lift it either (only a lock recorded before 0.4.0 is cleared).
 
 **Success (200)**: `{ accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt, userId }`
 + session cookies set (`refreshToken` is left out of the body under
@@ -164,8 +168,9 @@ user-verifying passkey is already two factors.
 (400, malformed assertion — can't decode challenge or missing `response.id`);
 `WEBAUTHN_CHALLENGE_EXPIRED` (400); `CREDENTIAL_NOT_FOUND` (400, unknown credential ID);
 `WEBAUTHN_VERIFICATION_FAILED` (400 — verification failed, no UV, counter didn't advance, or
-`userHandle` doesn't match the owner); `USER_NOT_FOUND` (404); whatever `assertUsableStatus`
-throws for a non-`ACTIVE` user.
+`userHandle` doesn't match the owner); `USER_NOT_FOUND` (404); `CSRF_ORIGIN_REJECTED` (403);
+whatever `assertUsableStatus` throws for a non-`ACTIVE` user (`ACCOUNT_LOCKED` 423 only for an
+administrative lock).
 
 ## Passkey as MFA second factor
 
@@ -185,7 +190,9 @@ established presence/verification; re-demanding it here just adds friction, per
 
 **`POST /webauthn/mfa/verify`**
 
-Body: `{ mfaChallengeToken: string, response: <AuthenticationResponseJSON> }`. Rate limited,
+Body: `{ mfaChallengeToken: string, response: <AuthenticationResponseJSON> }`. Subject to the
+[CSRF origin check](middleware.md#csrf-origin-check) for every browser request (it sets session
+cookies). Rate limited,
 fail-closed, on the same `mfa-challenge:ip:<req.ip>` key and `config.rateLimiting.mfaChallenge`
 rule as TOTP's `/mfa/verify`. Re-verifies the challenge token (refusing one issued before the
 account's last password change), then — under the [per-account MFA
@@ -205,7 +212,8 @@ before the last password change); `CREDENTIAL_NOT_FOUND`
 (400, no passkeys registered); `WEBAUTHN_CHALLENGE_EXPIRED` (400);
 `WEBAUTHN_VERIFICATION_FAILED` (401, credential belongs to a different user than the challenge —
 distinct 401 from the 400 used for a straightforward crypto-verification failure);
-`USER_NOT_ACTIVE` (403); `MFA_LOCKED` (429); `RATE_LIMIT_EXCEEDED` (429) /
+`USER_NOT_ACTIVE` (403 — not for a failed-password lockout, only an inactive or administratively
+locked account); `CSRF_ORIGIN_REJECTED` (403); `MFA_LOCKED` (429); `RATE_LIMIT_EXCEEDED` (429) /
 `RATE_LIMITER_UNAVAILABLE` (503).
 
 ## Related

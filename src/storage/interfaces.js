@@ -24,7 +24,8 @@
  * @property {(id: string, patch: object, opts?: object) => Promise<object|null>} updateById
  * @property {(id: string, status: string, patch: object) => Promise<object|null>} updateByIdIfStatus - ATOMIC: apply
  *   `patch` only while the user's status is still `status`; null if it changed (registration/activation races)
- * @property {(id: string) => Promise<object|null>} incrementFailedLoginAttempts - atomic $inc, returns the post-increment document
+ * @property {(id: string) => Promise<object|null>} [incrementFailedLoginAttempts] - unused since 0.4.0 (the password
+ *   lockout lives in the attempt counters, key `password-login:<userId>`); kept for older callers
  * @property {(id: string, step: number) => Promise<boolean>} [claimTotpStep] - ATOMIC: set `mfaLastTotpStep = step`
  *   only if it is unset or lower; resolve whether this call set it. Keeps a TOTP code from being accepted twice.
  *   Optional for now (a non-atomic fallback is used, with a startup warning).
@@ -38,10 +39,12 @@
  * @typedef {Object} SessionRepository
  * @property {(input: object) => Promise<object>} createSession
  * @property {(hash: string) => Promise<object|null>} findByRefreshTokenHash
- * @property {(jti: string) => Promise<{user, expiresAt: Date, revokedAt: Date|null}|null>} [findByJti] - the
+ * @property {(jti: string) => Promise<{id, user, expiresAt: Date, revokedAt: Date|null, revokeReason?: string, familyId?: string, createdAt?: Date}|null>} findByJti - the
  *   session whose `jti` matches an access token's `jti`. Called once per authenticated request when
- *   `config.session.verifyOnEachRequest` is on (the default), so it must be an indexed lookup. Optional
- *   for now: an adapter without it falls back to the per-process revocation cache, with a startup warning.
+ *   `config.session.verifyOnEachRequest` is on (the default), so it must be an indexed lookup. Also used
+ *   to bind authorization codes to their session and to exempt the enrolling session at MFA enrolment —
+ *   implement it (an adapter without it degrades to the per-process revocation cache, with a warning,
+ *   and loses both of those guarantees).
  * @property {(hash: string, opts?: {onlyIfActive?: boolean, reason?: string}) => Promise<object|null>} revokeByRefreshTokenHash -
  *   ATOMIC consume; resolves the row as it was BEFORE revocation. Must persist `reason` as `revokeReason`
  *   ('rotated' on refresh) — that is how a replayed rotated token is recognised.
@@ -49,7 +52,7 @@
  *   unexpired) row
  * @property {(familyId: string) => Promise<boolean>} isFamilyRevoked - whether revokeFamily ran for this family
  *   (it must tombstone every row of the family, `familyRevokedAt`, not only revoke the live ones)
- * @property {(familyId: string, opts?: {reason?: string}) => Promise<{revokedCount: number, jtis: string[]}>} [revokeFamily] -
+ * @property {(familyId: string, opts?: {reason?: string}) => Promise<{revokedCount: number, jtis: string[]}>} revokeFamily -
  *   revokes every live row with this `familyId` (refresh-token reuse / authorization-code reuse). Optional for now:
  *   without it, reuse is only refused, not punished.
  * @property {(clientId: string, opts?: {userId?: string}) => Promise<{revokedCount: number, jtis: string[]}>} [revokeForClient] -
@@ -123,7 +126,8 @@
  *
  * @typedef {Object} AttemptCounterRepository
  * Optional. Fixed-window failure counters with a lock, keyed by an opaque
- * string (currently `mfa:<userId>` — the per-account second-factor lockout).
+ * string (`mfa:<userId>`, `password-login:<userId>`, `password-change:<userId>`,
+ * `email-verification:<email key>`).
  * Lives in storage rather than the rate limiter so every app instance sees
  * the same count whatever cache/rate-limiter adapter is configured. An
  * adapter that doesn't provide it gets an in-process fallback

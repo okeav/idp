@@ -114,6 +114,11 @@ async function verifyMagicLink(token) {
 
 See [MFA TOTP Setup & Verify](mfa-totp-setup-and-verify.md) for the `/mfa/verify` call.
 
+If this page runs on another origin than the IdP (here `https://app.example.com`), list that
+origin in the server's `cookies.trustedOrigins`: `/magic-link/verify` sets session cookies, so a
+browser request from an untrusted origin is refused with 403 `CSRF_ORIGIN_REJECTED` (login-CSRF
+protection — see [Middleware](../api/middleware.md#csrf-origin-check)).
+
 `isNewUser: true` in the response tells your frontend this was a first-time signup via magic
 link — useful for routing to an onboarding flow vs. a normal post-login redirect. Activating a
 not-yet-verified account this way discards any password set on it before the address was proven,

@@ -112,13 +112,16 @@ curl -X POST http://localhost:3000/auth/login \
   beyond a demo (see [Tokens & Signing](../api/tokens-rs256.md)).
 - `emailHashPepper`/`tokenHashSecret` fall back to public placeholders — set real random secrets
   (at least 32 characters; `emailHashPepper` can never be rotated, since it keys the email lookup
-  index). The package's own `examples/express-quickstart/` refuses to start with
-  `NODE_ENV=production` while any dev fallback is in use; do the same.
+  index). The package's own `examples/express-quickstart/` uses its dev fallbacks only when
+  `NODE_ENV=development` is set explicitly (its `.env.example` sets it) and otherwise refuses to
+  start until every secret is set — an unset `NODE_ENV`, common in containers, counts as
+  production; do the same.
 - Adding social login? Once any `oauthProviders` entry is configured, `initIdentityProvider()`
   also requires `sso.allowedRedirectOrigins` and an absolute `sso.baseCallbackUrl` (see
   [Google SSO](sso-google-login.md)).
-- Browser frontend on another origin using cookie sessions? List it in `cookies.trustedOrigins`,
-  or its state-changing requests get 403 `CSRF_ORIGIN_REJECTED` (see
+- Browser frontend on another origin? List it in `cookies.trustedOrigins`, or its cookie-authenticated
+  state-changing requests — and every login/refresh/MFA-verify call, cookies or not — get 403
+  `CSRF_ORIGIN_REJECTED` (see
   [Bootstrap & Config](../api/bootstrap-config.md#csrf-cookiestrustedorigins)). A browser-only app
   should also set `cookies.refreshTokenInBody: false`.
 - `buildRouter()` with no options leaves OAuth2 client administration (`/oauth2/clients*`)
@@ -138,6 +141,9 @@ curl -X POST http://localhost:3000/auth/login \
   `Secure` cookie over plain `http://`. This fails quietly: `curl`/Postman don't enforce `Secure`
   at all, so a login that looks like it worked in a terminal can still be broken in an actual
   browser. Only matters for the cookie path — an `Authorization: Bearer` client is unaffected.
+  (With Secure the cookies are `__Host-access_token` / `__Host-refresh_token`; without it, plain
+  `access_token` / `refresh_token`.) The issuer may be `http` only for `localhost` / `127.0.0.1` /
+  `[::1]` (or anywhere with `NODE_ENV=development`) — otherwise `initIdentityProvider()` requires `https`.
 
 ## Related
 

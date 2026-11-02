@@ -174,7 +174,8 @@ const tokenRes = await fetch(`${BASE}/oauth2/token`, {
 const tokens = await tokenRes.json();
 // { access_token, refresh_token, id_token, token_type: 'Bearer', expires_in, scope }
 // On failure: 400 { error: 'INVALID_GRANT', message } (bad/used code, redirect_uri or PKCE
-// mismatch), 401 { error: 'INVALID_CLIENT', ... }, etc.
+// mismatch, or the user signed out everywhere / withdrew or re-granted consent since the code was
+// issued), 401 { error: 'INVALID_CLIENT', ... }, etc.
 ```
 
 A **confidential** client authenticates with HTTP Basic (`client_secret_basic`) — or with
@@ -232,7 +233,8 @@ const rotated = await refreshRes.json(); // store rotated.refresh_token — the 
 // - no id_token on refresh;
 // - scope is the originally consented scope narrowed against the client's CURRENT
 //   allowedScopes — it can only hold steady or shrink, never widen;
-// - the refresh token only works for the client it was issued to;
+// - the refresh token only works for the client it was issued to (presented by another client,
+//   it is revoked); a refused refresh (e.g. the user was suspended) doesn't spend it;
 // - replaying a spent refresh token (after a 10 s grace) revokes the whole token family;
 // - the family ends session.absoluteLifetimeSeconds (90 days) after the code exchange.
 ```

@@ -85,7 +85,8 @@ async function completeMfaLogin(mfaChallengeToken, code) {
 }
 
 // `code` here can be either the current TOTP code OR one of the recovery
-// codes issued at setup (`XXXXXX-XXXXXX`, any case, surrounding spaces ignored) —
+// codes issued at setup (`XXXXX-XXXXX-XXXXX-XXXXX`; any case, spaces and dashes optional,
+// O/I/L read as 0/1) —
 // verifyMfaChallengeHandler tries TOTP first, then falls back to recovery codes
 // automatically (see mfa.md).
 ```

@@ -39,9 +39,9 @@ Mounted as `authContextMiddleware({ accept: ['oauth2-user'] })` → `userinfoHan
 **only an OAuth2 access token issued to a client on behalf of a user**: a first-party token (from
 `/login`), a `client_credentials` token, or a missing/invalid/expired/revoked token is refused by
 the middleware (`AUTH_REQUIRED` / `INVALID_TOKEN` / `TOKEN_REVOKED`, 401) before the handler runs.
-Note the middleware prefers the `access_token` cookie over an `Authorization` header — call
-`/userinfo` with the Bearer token and no first-party cookie (i.e. server-side, or cross-site
-without credentials).
+An `Authorization: Bearer` header wins over the first-party session cookie (since 0.4.0), so the
+RP's Bearer token is used even if the browser also sends a cookie; still, calling `/userinfo`
+server-side is the usual pattern.
 
 The handler then applies its own checks, answering in the OAuth 2.0 Bearer Token error format
 (RFC 6750) rather than via `IdpError`:
@@ -52,7 +52,7 @@ The handler then applies its own checks, answering in the OAuth 2.0 Bearer Token
   WWW-Authenticate: Bearer error="insufficient_scope", scope="openid"
   { "error": "insufficient_scope", "error_description": "The openid scope is required" }
   ```
-- The user no longer exists or isn't `ACTIVE` (suspended, locked, deleted, pending verification…) →
+- The user no longer exists or isn't `ACTIVE` (suspended, administratively locked, deleted, pending verification… — a failed-password lockout doesn't count) →
   ```
   401
   WWW-Authenticate: Bearer error="invalid_token"
@@ -99,9 +99,12 @@ signs the user out of every device** (that's `POST /logout/all`):
    (`INVALID_REDIRECT_URI`, 400 otherwise).
 3. **The browser's own IdP session** — if a first-party session came with the request, that one
    session is revoked and the session cookies are cleared.
-4. **The hinted client's sessions for that user** — with a valid hint, every session issued to
-   the hint's client (`aud`) for the hint's `sub` is revoked (`SessionRepository.revokeForClient`).
-   The user's other clients and devices are untouched.
+4. **The hinted client's sessions for that user** — only when a valid hint comes **together with
+   that same user's first-party session** (normally the browser's cookie): every session issued to the hint's
+   client (`aud`) for the hint's `sub` is then revoked (`SessionRepository.revokeForClient`). A
+   hint alone ends nothing (0.4.0) — ID tokens travel through URLs and logs, and whoever holds one
+   must not be able to sign its user out of the relying party. The user's other clients and
+   devices are untouched.
 5. Revoked sessions' access tokens are marked revoked in the cache as well; with
    `session.verifyOnEachRequest` (default — see [Middleware](middleware.md)) they stop working on
    every instance at the next request.
@@ -109,7 +112,11 @@ signs the user out of every device** (that's `POST /logout/all`):
    identified.
 7. Redirects to `post_logout_redirect_uri?state=...` if supplied; otherwise `200 { status: 'ok' }`.
 
-A call with neither a hint nor a session is a no-op `200`.
+A call without a session is a no-op `200` (apart from the redirect, when a valid hint and URI are
+given). There is **no confirmation step**: a page that triggers this GET in the user's browser ends
+that browser's IdP session (and, with a hint, that client's sessions for the user) — narrow by
+design, as above. Error and rejection logs record the path only — never the query string, which
+carries the `id_token_hint`.
 
 ## Related
 

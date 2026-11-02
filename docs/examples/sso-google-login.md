@@ -119,7 +119,8 @@ if (fragment.get('mfa_required') === '1') {
 } else if (params.get('error') === 'email_required') {
   // The provider returned no email — ask the user to try another method, or another account.
 } else if (params.get('error') === 'account_inactive') {
-  // An existing account with this email is locked/suspended/deleted — SSO never attaches to it.
+  // An existing account with this email is administratively locked/suspended/deleted — SSO never
+  // attaches to it. (A failed-password lockout doesn't count: SSO still signs that account in.)
 } else if (params.get('error') === 'provider_error') {
   // The user cancelled at Google, or Google returned an error (`provider_error` has its code).
 }

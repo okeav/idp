@@ -21,16 +21,21 @@ export interface StorageContract {
     verificationTokenRepository: unknown;
     serviceKeyRepository: unknown;
     credentialRepository: unknown;
-    /** Optional — see `AttemptCounterRepository`. Without it the per-account MFA lockout is counted in-process only. */
+    /** Optional — see `AttemptCounterRepository`. Without it the attempt budgets (MFA and password-login lockouts, verification-code and password-change limits) are counted in-process only. */
     attemptCounterRepository?: AttemptCounterRepository;
     // Loosely typed for now — the full per-repository shapes are documented
     // as JSDoc in src/storage/interfaces.js; a future pass may promote them
-    // to real TS interfaces here.
+    // to real TS interfaces here. 0.4.0 adds REQUIRED methods a custom adapter
+    // must implement: userRepository.updateByIdIfStatus,
+    // sessionRepository.isFamilyRevoked / isFamilyLive, verificationTokenRepository.findActive /
+    // clearCodes / replaceForUser — see docs/api/repository-adapters.md.
 }
 
 /**
- * Optional storage repository behind the per-account MFA lockout: atomic
- * fixed-window failure counters with a lock, shared by every app instance.
+ * Optional storage repository behind the attempt budgets (`mfa:<userId>`,
+ * `password-login:<userId>`, `email-verification:<email hash>`,
+ * `password-change:<userId>`, spent MFA challenges): atomic fixed-window
+ * failure counters with a lock, shared by every app instance.
  * See src/storage/interfaces.js for the exact semantics `recordFailure` must have.
  */
 export interface AttemptCounterRepository {
@@ -58,6 +63,7 @@ export interface SecretCipher {
 export type MfaEncryptionKey = string | { id: string; key: string };
 
 export interface IdpConfig {
+    /** https URL (plain http only for localhost / 127.0.0.1 / [::1], or with NODE_ENV=development) — checked at startup. */
     issuer: string;
     /** Required unless `storage.factory` is provided. */
     mongo?: ({ uri: string } | { connection: unknown }) & { skipTransactionCheck?: boolean };
@@ -80,13 +86,25 @@ export interface IdpConfig {
     };
     signingKeys: { keys: Record<string, SigningKeyEntry> };
     cookies?: {
+        /**
+         * Default: NODE_ENV !== 'development'. Secure session cookies are named `__Host-access_token` /
+         * `__Host-refresh_token` (or `__Secure-…` with `domain`); without Secure, plain `access_token` /
+         * `refresh_token`.
+         */
         secure?: boolean;
+        /** Default 'lax' (case-insensitive). 'none' requires secure cookies (checked at startup). */
         sameSite?: 'lax' | 'strict' | 'none';
+        /**
+         * Share the session cookies with subdomains. Rules out the `__Host-` prefix: the cookies become
+         * `__Secure-…`, and a request carrying one twice is refused (400 COOKIE_CONFLICT).
+         */
         domain?: string;
         /**
-         * Origins of your frontends that make cookie-authenticated requests. A cookie-authenticated
-         * POST/PUT/PATCH/DELETE from any other origin is refused (403 CSRF_ORIGIN_REJECTED). The
-         * issuer's origin is always trusted; Bearer-authenticated requests are unaffected.
+         * Exact origins (e.g. `https://app.example.com` — no path, no trailing slash; checked at startup)
+         * of your frontends that make cookie-authenticated requests. A cookie-authenticated
+         * POST/PUT/PATCH/DELETE from any other origin is refused (403 CSRF_ORIGIN_REJECTED), as is any
+         * browser request to an endpoint that sets or clears session cookies. The issuer's origin is
+         * always trusted; Bearer-authenticated requests are unaffected.
          */
         trustedOrigins?: string[];
         /** Default true. false: the refresh token is only ever in its httpOnly cookie, never in JSON bodies. */
@@ -123,6 +141,7 @@ export interface IdpConfig {
         /** A rotated refresh token replayed within this many seconds is only refused; later, it revokes its whole family. Default 10. */
         refreshReuseGraceSeconds?: number;
     };
+    /** Seconds; each must be a positive integer (checked at startup). */
     ttls?: Partial<{
         accessToken: number; idToken: number; refreshToken: number; internalToken: number;
         authCode: number; revocationCache: number; refreshTokenCache: number;
@@ -132,17 +151,23 @@ export interface IdpConfig {
     security: {
         /** Random, at least 32 characters (checked at startup). Never rotate — it keys the email lookup index. */
         emailHashPepper: string;
-        /** Random, at least 32 characters (checked at startup). Keys every stored token hash. */
+        /**
+         * Random, at least 32 characters, different from `emailHashPepper` (checked at startup). Keys every
+         * stored token/code hash and HMAC-stored client secret — rotating it invalidates all of them.
+         */
         tokenHashSecret: string;
+        /** Wrong passwords per `accountLockDurationMs` window before password login (only) is locked — active accounts with a password only. Default 5. */
         maxFailedLoginAttempts?: number;
+        /** The counting window and the password-login lock's length, in ms. Default 1_800_000 (30 min). */
         accountLockDurationMs?: number;
         /** Integer 10-15 (default 12). */
         bcryptRounds?: number;
         /** Tests only: allow bcryptRounds down to 4. */
         allowWeakBcryptRounds?: boolean;
         /**
-         * Per-account limit on wrong email-verification codes/tokens. When used up, every outstanding
-         * code for the account is deleted (the owner requests a new one). Defaults: 5 in 3600s, locked 900s.
+         * Per-address limit on wrong 6-digit email-verification codes (the link token has no budget). When
+         * used up, the outstanding codes are cleared; the emailed links keep working. Defaults: 5 in 3600s,
+         * locked 900s.
          */
         verificationCodeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number };
         /** Per-account limit on wrong current passwords at /password/change. Defaults: 5 in 3600s, locked 3600s. */
@@ -205,7 +230,7 @@ export interface IdpConfig {
     };
     /** Required (startup fails otherwise) as soon as any `oauthProviders` entry has a `clientId`. */
     sso?: {
-        /** Absolute base URL providers redirect back to (`<base>/sso/<provider>/callback`). */
+        /** Absolute base URL providers redirect back to (`<base>/sso/<provider>/callback`). https (http only for localhost, or with NODE_ENV=development). */
         baseCallbackUrl?: string;
         /** Origins (scheme://host[:port]) SSO may send the browser back to. https, or http only for localhost. */
         allowedRedirectOrigins?: string[];
@@ -213,15 +238,16 @@ export interface IdpConfig {
         providerTimeoutMs?: number;
     };
     serviceMesh?: {
-        /** One registration credential per service (preferred): `{ billing: '<secret>', ... }`. Proves which service registers, and lets it rotate its key. */
+        /** One registration credential per service (preferred): `{ billing: '<secret>', ... }`. Proves which service registers, and lets it rotate its key. Each ≥ 32 characters and different from `bootstrapSecret`. */
         bootstrapSecrets?: Record<string, string>;
-        /** Legacy shared registration secret: can register a NEW name only (never one listed in bootstrapSecrets), never replace an existing service's key. */
+        /** Legacy shared registration secret (≥ 32 characters): can register a NEW name only (never one listed in bootstrapSecrets), never replace an existing service's key. */
         bootstrapSecret?: string;
         /** Names allowed to register at all. */
         allowedServiceNames?: string[];
         /** Default 'token'. 'secret'/'both' accept the shared secret with an unverified x-service-name. */
         tokenMode?: 'token' | 'secret' | 'both';
         ownServiceName?: string;
+        /** ≥ 32 characters. */
         sharedSecret?: string;
         /** Let requireServiceCallerMiddleware accept shared-secret callers (their name is unverified). Default false. */
         allowLegacySecretCallers?: boolean;
@@ -413,7 +439,10 @@ export class IdpError extends Error {
     constructor(opts: { code: string; httpStatus?: number; message?: string; cause?: unknown });
 }
 export function isIdpError(err: unknown): err is IdpError;
-/** Express error handler safe for the internet: IdpError < 500 → { error, message }; anything else → 500 { error } with no internals. */
+/**
+ * Express error handler safe for the internet: IdpError < 500 → { error, message }; anything else → 500 { error } with no internals.
+ * 5xx errors are logged (path only) through `opts.logger`, or by default the logger given to `initIdentityProvider`.
+ */
 export function idpErrorHandler(opts?: { logger?: Logger }): ErrorRequestHandler;
 export const ERROR_CODES: Record<string, string>;
 
@@ -436,7 +465,8 @@ export function verifyAccessToken(token: string, opts?: VerifyAccessTokenOptions
 export function issueIdToken(user: IdentityUser, audience: string, nonce?: string, opts?: { scopes?: string[]; authTime?: number; ttlSeconds?: number }): Promise<IssuedToken>;
 export function issueOAuth2AccessToken(subject: { id: string }, client: { clientId: string; accessTokenTTL?: number }, scopes: string[], opts?: { sessionless?: boolean }): Promise<IssuedToken>;
 export function issueMfaChallengeToken(subjectId: string): Promise<string>;
-export function verifyMfaChallengeToken(token: string): { sub: string; type: 'mfa_challenge' };
+/** Checks signature, expiry, `type`, `iss` (the issuer) and `aud` (`<issuer>#mfa-challenge`). */
+export function verifyMfaChallengeToken(token: string): { sub: string; type: 'mfa_challenge'; iss: string; aud: string; jti: string; iat: number; exp: number };
 export function verifyIssuedToken(token: string, opts?: { issuer?: string }): Record<string, unknown> | null;
 
 // ── JWKS / discovery ─────────────────────────────────────────────────────
@@ -452,10 +482,12 @@ export const getServicesJwksHandler: RequestHandler;
 /** Revokes a service key (no longer published or accepted). Resolves whether a key was found. */
 export function revokeServiceKey(kid: string): Promise<boolean>;
 export const s2sBootstrapMiddleware: RequestHandler;
+/** `idpBaseUrl` must be https (http only for localhost, or with NODE_ENV=development) — throws otherwise. */
 export function initServiceIdentity(opts: { serviceName: string; privateKeyPem: string; region?: string; idpBaseUrl: string; bootstrapSecret: string }): Promise<{ kid: string }>;
 export function mintServiceToken(targetService: string, opts?: { scopes?: string[] }): string;
 export const issueServiceToken: typeof mintServiceToken;
 export function getServiceIdentity(): { serviceName: string; kid: string; region: string };
+/** `idpBaseUrl` (or the one from `initServiceIdentity`) must be https (http only for localhost, or with NODE_ENV=development). */
 export function verifyServiceTokenRemote(token: string, opts: { expectedAud: string; expectedIss?: string; idpBaseUrl?: string }): Promise<Record<string, unknown>>;
 
 // ── Middleware ───────────────────────────────────────────────────────────
@@ -594,7 +626,7 @@ export class RedisCacheAdapter implements CacheAdapter {
     /** Atomic get-and-delete — of two concurrent callers, exactly one gets the value. */
     take(key: string): Promise<unknown | null>;
 }
-export function createRedisCacheAdapter(opts: { host: string; port: number; password?: string; db?: number; keepAliveMs?: number }): Promise<RedisCacheAdapter>;
+export function createRedisCacheAdapter(opts: { host: string; port: number; username?: string; password?: string; db?: number; tls?: boolean | Record<string, unknown>; keepAliveMs?: number }): Promise<RedisCacheAdapter>;
 
 // ── Rate limiter adapters ────────────────────────────────────────────────
 
@@ -613,7 +645,11 @@ export interface RateLimiter {
     reset(key: string): Promise<void>;
 }
 export class MemoryRateLimiter implements RateLimiter {
-    /** `maxKeys` (default 500000): when full, a NEW key is refused (an error — fail-closed call sites answer 503). */
+    /**
+     * `maxKeys` (default 500000): when full, expired windows and then the oldest counters that haven't
+     * reached their limit are evicted; a NEW key is refused (an error — fail-closed call sites answer 503)
+     * only if every counter is exhausted.
+     */
     constructor(opts?: { sweepIntervalMs?: number; maxKeys?: number });
     check(key: string): Promise<RateLimitResult>;
     increment(key: string, opts: { max: number; windowSeconds: number }): Promise<RateLimitResult>;
@@ -626,7 +662,13 @@ export class RedisRateLimiter implements RateLimiter {
     increment(key: string, opts: { max: number; windowSeconds: number }): Promise<RateLimitResult>;
     reset(key: string): Promise<void>;
 }
-export function createRedisRateLimiter(opts: { redis?: unknown; host?: string; port?: number; password?: string; db?: number }): Promise<RedisRateLimiter>;
+export function createRedisRateLimiter(opts: { redis?: unknown; host?: string; port?: number; username?: string; password?: string; db?: number; tls?: boolean | Record<string, unknown> }): Promise<RedisRateLimiter>;
+/** Used when `rateLimiting.enabled === false` — every check passes. */
+export class NoopRateLimiter implements RateLimiter {
+    check(key: string): Promise<RateLimitResult>;
+    increment(key: string, opts: { max: number; windowSeconds: number }): Promise<RateLimitResult>;
+    reset(key: string): Promise<void>;
+}
 
 // ── Outbound webhooks ────────────────────────────────────────────────────
 

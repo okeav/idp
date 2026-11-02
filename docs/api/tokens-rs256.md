@@ -172,8 +172,11 @@ A short-lived (`config.ttls.mfaChallenge`, default 300s), single-purpose RS256 t
 which user just passed the first authentication factor and still owes a second one. Issued by
 `loginHandler`, `verifyMagicLinkHandler` and the SSO callback when `user.mfaEnabled`; consumed by
 `verifyMfaChallengeHandler` (TOTP), `generateMfaWebauthnChallengeOptionsHandler`, and
-`verifyMfaWebauthnChallengeHandler` (WebAuthn MFA). `verifyMfaChallengeToken` is synchronous,
-checks only signature, expiry and `type`, and throws `INVALID_MFA_CHALLENGE_TOKEN` (401).
+`verifyMfaWebauthnChallengeHandler` (WebAuthn MFA). The token carries `iss` = `config.issuer` and
+`aud` = `<issuer>#mfa-challenge` (0.4.0). `verifyMfaChallengeToken` is synchronous, checks
+signature, expiry, `type`, issuer and that audience — so a challenge from another environment
+sharing a signing key, or any other token type, isn't accepted — and throws
+`INVALID_MFA_CHALLENGE_TOKEN` (401).
 
 The built-in MFA handlers add two checks on top: a challenge token completes **one** login only
 (its `jti` is spent atomically once the second factor checks out), and a token issued before the

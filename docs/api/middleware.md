@@ -37,13 +37,20 @@ req.auth = {
 in, carried unchanged across refreshes — `null` if the token has none. It's what
 [`requireRecentAuth()`](#requirerecentauthopts) checks.
 
-Accepts either the `access_token` cookie (browser flows, paired with `cookieParser()`) or an
-`Authorization: Bearer <token>` header (API/service clients) — cookie wins if both are present. A
-non-string cookie value (e.g. a `j:`-prefixed JSON cookie) is ignored.
+Accepts either an `Authorization: Bearer <token>` header (API/service clients) or the access-token
+cookie (browser flows, paired with `cookieParser()`) — **the header wins** if both are present (it
+is explicit; the cookie is whatever the browser holds). The cookie is `__Host-access_token` when
+cookies are Secure and no `cookies.domain` is set, `__Secure-access_token` with `cookies.domain`,
+and plain `access_token` without Secure (see [cookie names](password-email-auth.md#shared-session-mechanics)).
+A request carrying the cookie twice (one may have been planted by a sibling subdomain — in practice
+possible only with `cookies.domain`) is refused with 400 `COOKIE_CONFLICT`. Names are compared the
+way the parser reads them — trimmed, up to the first `=` — so `access_token =x; access_token=y`
+counts as two. A non-string cookie value (e.g. a `j:`-prefixed
+JSON cookie) is ignored.
 
 Steps: extract token → [CSRF origin check](#csrf-origin-check) (cookie-authenticated requests
-only) → `verifyAccessToken` (with `issuer`, `audience`, `accept`) → revocation check (below) → set
-`req.auth`.
+only) → `verifyAccessToken` (with `issuer`, `audience`, `accept`) → revocation check (below) →
+client check for `client_credentials` tokens (below) → set `req.auth`.
 
 ### Which tokens are accepted (`accept`, `audience`)
 
@@ -103,6 +110,11 @@ effect on **every instance immediately**, not just the one that handled it.
 This check is what `verifyAccessToken` alone does **not** do — a resource server that calls
 `verifyAccessToken` directly accepts a revoked session's token until it expires.
 
+**Machine tokens (`oauth2-client` — `client_credentials`) are checked against their client** on every request (by classification, not only the `gty` claim), whatever
+`verifyOnEachRequest` says (they have no session row to revoke): if the client no longer exists or
+isn't `ACTIVE`, 401 `TOKEN_REVOKED` — a deactivated client's machine tokens stop at once, not when
+they expire. Costs one `oauthClientRepository.findByClientId` per such request.
+
 **Off** (`session: { verifyOnEachRequest: false }`, env `IDP_SESSION_VERIFY_ON_EACH_REQUEST=false`
 — 0.2.x behaviour): only the revocation cache is checked (fail-closed: a cache error → 503
 `CACHE_UNAVAILABLE` — see [Cache Interface](cache-interface.md)). Single-session revocations
@@ -125,14 +137,17 @@ Throws:
   origin (see below).
 - Whatever `verifyAccessToken` throws (`TOKEN_EXPIRED`, `INVALID_TOKEN`, both 401) for a present-
   but-invalid token — including a token whose kind isn't in `accept` or whose audience is wrong.
-- `TOKEN_REVOKED` (401) — token's `jti` found in the revocation cache, or its session row is
-  missing/revoked/expired/another user's.
+- `COOKIE_CONFLICT` (400) — the access-token cookie sent twice.
+- `TOKEN_REVOKED` (401) — token's `jti` found in the revocation cache, its session row is
+  missing/revoked/expired/another user's, or (a `client_credentials` token) its client is gone or
+  inactive.
 - `SESSION_STORE_UNAVAILABLE` (503) — `findByJti` errored (verification on).
 - `CACHE_UNAVAILABLE` (503) — cache adapter errored during the revocation check (verification off,
   or a `sessionless` token).
 
-Every rejection is logged via `logger.warn({ err, path: req.originalUrl }, 'authContextMiddleware rejected request')`
-before being passed to `next(err)`.
+Every rejection is logged via `logger.warn({ err, path: req.path }, 'authContextMiddleware rejected request')`
+before being passed to `next(err)` — the path only, never the query string (which can carry
+tokens: end-session's `id_token_hint`, an SSO code).
 
 ## `requireRecentAuth(opts?)`
 
@@ -174,15 +189,30 @@ and not at all under `cookies.sameSite: 'none'`. So a **state-changing** request
 
 - `Sec-Fetch-Site: same-origin` → allowed.
 - An `Origin` header → it must be the issuer's origin or one of `config.cookies.trustedOrigins`
-  (env `IDP_COOKIE_TRUSTED_ORIGINS`, comma-separated) — exact `scheme://host[:port]` strings.
+  (env `IDP_COOKIE_TRUSTED_ORIGINS`, comma-separated) — exact `scheme://host[:port]` strings
+  (checked at startup: no path, no trailing slash).
 - Neither header → not a browser → allowed. (A `Sec-Fetch-Site` other than `same-origin`/`none`
   with no `Origin` is refused.)
 
 Anything else is refused with 403 `CSRF_ORIGIN_REJECTED`. The check runs in
-`authContextMiddleware` when the token came from the `access_token` cookie, in `POST /refresh`
-when the refresh token came from the `refresh_token` cookie, and in `POST /logout` when no
-`refreshToken` is in the body. Requests authenticated with an `Authorization: Bearer` header (or a
-refresh token in the body) are unaffected — a browser never attaches those on its own.
+`authContextMiddleware` when the token came from the access-token cookie. Requests authenticated
+with an `Authorization: Bearer` header are unaffected — a browser never attaches one on its own.
+
+**Endpoints that set or clear session cookies check every request** (0.4.0), whatever its
+credential: `POST /login`, `/refresh` (refresh token from the cookie *or* the body), `/logout`
+(likewise — a cross-site form could otherwise clear the victim's session), `/mfa/verify`,
+`/magic-link/verify`, `/webauthn/authentication/verify` and `/webauthn/mfa/verify`. Otherwise a
+form on a sibling origin could post the *attacker's* credentials and sign the victim's browser into
+the attacker's account (login CSRF).
+
+**Cookie tossing.** A sibling subdomain can't read your cookies, but it can *set* one for the
+parent domain with the same name; the browser then sends both, and the server would read the
+planted session. Hence the [`__Host-` cookie names](password-email-auth.md#shared-session-mechanics)
+(they can only be set by this exact host), the duplicate-cookie refusal (400 `COOKIE_CONFLICT`)
+when `cookies.domain` rules `__Host-` out, and explicit credentials winning over cookies (a Bearer
+header over the access-token cookie, a body refresh token over the refresh cookie). Non-browser clients (no `Origin`/`Sec-Fetch-Site`) are still
+unaffected, but a browser frontend on another origin must be listed in `cookies.trustedOrigins`
+even if it doesn't use cookies.
 
 ```js
 cookies: {
@@ -275,8 +305,7 @@ const cookieParser: (...args: unknown[]) => RequestHandler
 A convenience re-export of the `cookie-parser` npm package (a peer dependency — your app must
 install it). Mount it before any handler that reads `req.cookies` (i.e. before
 `authContextMiddleware` and any password/magic-link/WebAuthn/SSO handler that reads or sets the
-`access_token`/`refresh_token` cookies, and before the SSO routes, which need their binding
-cookie).
+session cookies, and before the SSO routes, which need their binding cookie).
 
 ## `idpErrorHandler(opts?)`
 
@@ -294,7 +323,9 @@ error handler that is safe to expose to the internet; mount it **after** the rou
   parser's text (which echoes the request body).
 - Anything else — an `IdpError` of 500+, a database error, a bug — answers its status (500 for
   non-`IdpError`s) with a bare `{ error: code }` / `{ error: 'INTERNAL_ERROR' }`: no message, stack
-  or driver detail. It's logged through `opts.logger.error` if you pass one.
+  or driver detail. It's logged (with `req.path` only, never the query string) through
+  `opts.logger.error` — or, without `opts.logger`, the logger given to `initIdentityProvider`, so
+  5xx errors are never silently dropped.
 
 If you write your own handler, apply the same rule: only show `err.message` when `err.expose` is
 true. See [Errors](errors.md).

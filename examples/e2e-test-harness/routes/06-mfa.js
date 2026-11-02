@@ -32,7 +32,7 @@ export function mountMfaFlow(app, { AUTH_PREFIX }) {
       </div>
 
       <div class="card">
-        <p class="step">Step 4 — complete the challenge with a TOTP code — a <em>new</em> one, not the code you confirmed with — or an unused recovery code from step 2's response (any case, surrounding spaces ignored). A challenge token completes one login only. The same form also completes a challenge from <a href="/flows/magic-link">7. Magic link</a> or <a href="/flows/sso">10. SSO</a> for an MFA account.</p>
+        <p class="step">Step 4 — complete the challenge with a TOTP code — a <em>new</em> one, not the code you confirmed with — or an unused recovery code from step 2's response (<code>XXXXX-XXXXX-XXXXX-XXXXX</code>; any case, spaces and dashes optional). A challenge token completes one login only. The same form also completes a challenge from <a href="/flows/magic-link">7. Magic link</a> or <a href="/flows/sso">10. SSO</a> for an MFA account.</p>
         <label>mfaChallengeToken</label><input id="challenge-token">
         <label>Code</label><input id="challenge-code">
         <button class="secondary" onclick="computeTotpInto('challenge-code')">Compute current code (convenience only)</button>

@@ -72,13 +72,22 @@ Body: `{ code: string (6-10 chars) }`. Verifies `code` against `mfaTempSecret`, 
 the temp secret into `mfaSecret` (a legacy plain-text temp secret is sealed here), nulls
 `mfaTempSecret`, sets `mfaEnabled: true`, and
 **generates recovery codes at this point** (not at setup time) — count from
-`config.mfa.recoveryCodeCount` (default 10). Each code: two 3-byte hex groups joined by a hyphen
-(`XXXXXX-XXXXXX`). Stored server-side only as `{ codeHash: HMAC-SHA256(code), usedAt: null }` —
-raw codes are never persisted.
+`config.mfa.recoveryCodeCount` (default 10). Each code: 20 random characters of Crockford base32
+(`0-9`, `A-Z` without `I L O U` — 100 bits) shown as four groups of five, `XXXXX-XXXXX-XXXXX-XXXXX`.
+(0.3.x codes were 48 bits — with the database and the HMAC key, every user's codes fell to one
+offline search.) Stored server-side only as `{ codeHash, usedAt: null }`, where `codeHash` is the
+HMAC-SHA256 (keyed by `security.tokenHashSecret`) of `mfa-recovery:<userId>:<normalized code>` —
+bound to the user, so one guess can't be tested against everyone's codes at once. Raw codes are
+never persisted. **Recovery codes issued before 0.4.0 (`XXXXXX-XXXXXX`) no longer verify** (they
+were hashed without the user binding) — users who enabled MFA earlier need a new set
+(`POST /me/mfa/recovery-codes`).
 
 **Enabling MFA signs out the account's other sessions.** Every other session row is revoked
 (`sessionRepository.revokeAllForUser(userId, { exceptJti })`), keeping only the session that
-enrolled — any of them could be the reason the user is securing the account. The `MFA_ENABLED`
+enrolled — any of them could be the reason the user is securing the account. It also writes the
+sign-out watermark (`sessionsRevokedAt`) with the enrolling session's family exempt
+(`sessionsRevokedExceptFamily`), so a refresh of another session that was already in flight is
+revoked too. The `MFA_ENABLED`
 audit event carries `revokedOtherSessions` (the count).
 
 → `{ mfaEnabled: true, recoveryCodes: [...] }` (`Cache-Control: no-store`) — **shown once, in plaintext.** Your UI must prompt
@@ -127,15 +136,19 @@ Errors: `USER_NOT_FOUND` (404); `MFA_NOT_ENABLED` (400); `CURRENT_PASSWORD_INCOR
 **No auth required** — identity comes from the challenge token, not `req.auth`. Completes the
 `mfaRequired` response `loginHandler` returns when `user.mfaEnabled`. Body:
 `{ mfaChallengeToken: string, code: string (6-32 chars) }` — a TOTP code or a recovery code
-(`XXXXXX-XXXXXX`, 13 chars). Rate limited, fail-closed: `mfa-challenge:ip:<req.ip>` against
-`config.rateLimiting.mfaChallenge` (5/15min default).
+(`XXXXX-XXXXX-XXXXX-XXXXX`, 23 chars with the dashes). Rate limited, fail-closed: `mfa-challenge:ip:<req.ip>` against
+`config.rateLimiting.mfaChallenge` (5/15min default). It sets session cookies, so every browser
+request is subject to the [CSRF origin check](middleware.md#csrf-origin-check) (403
+`CSRF_ORIGIN_REJECTED` from an origin that is neither the issuer's nor in `cookies.trustedOrigins`).
 
-**Verification order**: the challenge token is verified; the user must be `ACTIVE` with MFA still
+**Verification order**: the challenge token is verified (signature, expiry, `type`, `iss` = the
+issuer and `aud` = `<issuer>#mfa-challenge`); the user must be `ACTIVE` with MFA still
 enabled; and a challenge issued **before the account's last password change is void** (it was
 earned with the old password). Then, under the [lockout](#per-account-lockout) (`method: 'totp'`,
 counted before the code is checked): TOTP against `mfaSecret`, claiming its time step (single-use,
-see above); **only if that fails**, the code is treated as a recovery code — trimmed and
-upper-cased (so case and surrounding spaces don't matter), HMAC'd, and spent with one atomic
+see above); **only if that fails**, the code is treated as a recovery code — normalized (upper-cased,
+spaces and dashes removed, `O` read as `0` and `I`/`L` as `1`, so however it's typed off paper it
+matches), HMAC'd bound to the user, and spent with one atomic
 conditional update (`userRepository.consumeRecoveryCode(userId, codeHash)`), so two concurrent
 requests can't both spend it. A spent recovery code is marked `usedAt: <now>` but **not removed**
 from the array (kept for audit history). TOTP and recovery codes count against the same
@@ -146,8 +159,10 @@ re-encrypted under the current key.
 claimed in the shared attempt-counter store (atomic, visible to every instance); presenting the
 same token again — here or at `POST /webauthn/mfa/verify` — answers `INVALID_MFA_CHALLENGE_TOKEN`.
 
-Wrong MFA codes do **not** count toward the password lockout (`failedLoginAttempts`), so this
-endpoint never triggers password login's `ACCOUNT_LOCKED`/`onSuspiciousActivityDetected`. Brute
+Wrong MFA codes do **not** count toward the password lockout (`password-login:<userId>`), so this
+endpoint never triggers password login's lockout (`ACCOUNT_LOCKED` audit /
+`onSuspiciousActivityDetected`). Conversely, a password-login lockout doesn't block this step — it
+locks password login only, and the account stays `ACTIVE`. Brute
 force here is stopped by the per-account MFA lockout, which has its own counter.
 
 **Success**: sets session cookies + `200 { accessToken, accessTokenExpiresAt, refreshToken,
@@ -159,7 +174,8 @@ Errors:
 - `INVALID_MFA_CHALLENGE_TOKEN` (401) — thrown for several conditions that surface identically:
   the JWT itself is invalid/expired; it verifies but `mfaEnabled` has since been turned off; it
   was issued before the account's last password change; or it has already completed a login.
-- `USER_NOT_ACTIVE` (403) — user not found, or not `ACTIVE`.
+- `USER_NOT_ACTIVE` (403) — user not found, or not `ACTIVE` (e.g. an administrative lock).
+- `CSRF_ORIGIN_REJECTED` (403) — a browser request from an untrusted origin.
 - `INVALID_MFA_CODE` (400) — neither TOTP nor recovery code matched.
 - `MFA_LOCKED` (429) — see [Per-account lockout](#per-account-lockout).
 - `RATE_LIMIT_EXCEEDED` (429) / `RATE_LIMITER_UNAVAILABLE` (503) — the per-IP limit.

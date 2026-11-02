@@ -57,10 +57,36 @@ updated for it. The ones you'll notice while clicking through:
   in the client's `allowedScopes` like any other scope.
 - **MFA everywhere** — magic link and SSO now stop at the MFA challenge for
   an MFA-enabled account.
-- **CSRF** — cookie-authenticated POST/DELETEs must come from the issuer's
-  origin (or `cookies.trustedOrigins`). The harness pages are served by the
-  same process as the IdP, so this just works; `server.js` lists the origin
-  in `cookies.trustedOrigins` explicitly anyway.
+- **Cookies** — the session cookies are `__Host-access_token` /
+  `__Host-refresh_token` (Secure, host-only — the harness doesn't set
+  `NODE_ENV=development`, so they're Secure as before; browsers that treat
+  `http://localhost` as secure accept them). A Bearer header wins over the
+  cookie, a body refresh token over the refresh cookie. The server listens
+  on 127.0.0.1 only — it hands out any user's tokens.
+- **CSRF** — cookie-authenticated POST/DELETEs, and every browser request to
+  the endpoints that set or clear session cookies (`/login`, `/refresh`, `/logout`,
+  `/mfa/verify`, `/magic-link/verify`, `/webauthn/*/verify`), must come from
+  the issuer's origin (or `cookies.trustedOrigins`). The harness pages are
+  served by the same process as the IdP, so this just works; `server.js`
+  lists the origin in `cookies.trustedOrigins` explicitly anyway.
+- **Contested registrations** — registering a still-pending address again
+  keeps the earlier codes, each bound to its own registration's password;
+  verifying then also needs that password (`400
+  REGISTRATION_PASSWORD_REQUIRED` without it). Flow 1 has a password field
+  for this. Login on a not-yet-verified account answers `401
+  INVALID_CREDENTIALS`, not `403 PENDING_VERIFICATION`. Five wrong 6-digit
+  codes per address lock *code* attempts (`429 VERIFICATION_LOCKED`) — the
+  link token still works. A password reset (flow 5) also verifies a pending
+  account.
+- **Password lockout** — too many wrong passwords lock *password login*
+  only; refresh, magic link, passkeys, SSO and MFA keep working, and the
+  account stays `ACTIVE`. It's counted in the attempt-counter store
+  (`password-login:<userId>`); signing in another way doesn't reset it, a
+  password reset does.
+- **Service mesh** — the shared bootstrap secret can't register a name that
+  has its own per-service secret (`403 FORBIDDEN`), a revoked key is never
+  re-activated (`409 SERVICE_KEY_REVOKED`), and a rotated-away key verifies
+  for `serviceMesh.rotationGraceSeconds` (default 1 hour) only.
 - **Errors** — the harness mounts idp-core's `idpErrorHandler()`; unexpected
   500s answer `{ error: 'INTERNAL_ERROR' }` with no message (the detail is
   in the terminal and the activity panel).
@@ -87,7 +113,10 @@ active login cookie, MFA enabled, a registered passkey, etc.) as noted.
   code (no real email is sent; the `onVerificationEmailRequested` hook
   writes it here instead) → verify. **Expected:** `201` on register, then
   `{status:'ok'}` on verify. Check the activity panel for `REGISTERED` and
-  `EMAIL_VERIFIED`.
+  `EMAIL_VERIFIED`. Optional: click Register **twice** for the same email
+  (`REGISTRATION_REPEATED` in the activity panel) → verifying with the code
+  alone now answers `400 REGISTRATION_PASSWORD_REQUIRED`; fill in the
+  password field and verify again with the same code → `{status:'ok'}`.
 
 - [ ] **2. Login (password)** (`/flows/login`)
   Log in with the account from flow 1. **Expected:** decoded access-token
@@ -101,7 +130,9 @@ active login cookie, MFA enabled, a registered passkey, etc.) as noted.
   refresh token now rejected with `401 INVALID_REFRESH_TOKEN` when retried.
   Retry it more than ~10 s later and reuse detection kicks in: the whole
   login (token family) is revoked — the newest token stops working too — and
-  `REFRESH_TOKEN_REUSE_DETECTED` shows in the activity panel.
+  `REFRESH_TOKEN_REUSE_DETECTED` shows in the activity panel. (A refresh that
+  is *refused* — say, the account was suspended — doesn't consume the token,
+  so its retry is not mistaken for reuse.)
 
 - [ ] **4. Logout (single session) / logout all** (`/flows/sessions`)
   List sessions (do flow 2/3 a couple of times first so there's more than
@@ -129,7 +160,8 @@ active login cookie, MFA enabled, a registered passkey, etc.) as noted.
   used to confirm is refused — each TOTP code works once, so wait for the
   next 30 s step). **Expected:** a full session issued only after the TOTP
   step; recovery codes shown once at confirm time. A recovery code
-  (`XXXXXX-XXXXXX`, any case) also completes the challenge, and a challenge
+  (`XXXXX-XXXXX-XXXXX-XXXXX`, any case, dashes optional — codes from before
+  0.4.0 no longer work; regenerate) also completes the challenge, and a challenge
   token completes one login only. Optional: regenerate recovery codes
   (`{ password, code }` — a current TOTP code is required too) and disable
   MFA (`{ password, code }`; password only if the account has one). Five wrong codes in 15 minutes lock the second-factor step:
@@ -177,7 +209,9 @@ active login cookie, MFA enabled, a registered passkey, etc.) as noted.
   aren't first-party credentials) → introspect the refresh token or the
   access token as the client (`active:true`) → revoke the refresh token →
   introspect again (`active:false`). Token-endpoint errors use the RFC 6749
-  codes (`INVALID_CLIENT`, `INVALID_GRANT`, …).
+  codes (`INVALID_CLIENT`, `INVALID_GRANT`, …). A code is also refused with
+  `INVALID_GRANT` if you logged out everywhere (flow 4), reset or changed the
+  password, or withdrew/re-granted consent between authorize and exchange.
 
 - [ ] **10. SSO** (`/flows/sso`) — *needs real Google credentials, see table above*
   With credentials configured: click through the real Google consent screen
@@ -201,15 +235,24 @@ active login cookie, MFA enabled, a registered passkey, etc.) as noted.
   services' keys are listed → call A's internal endpoint, protected by
   `serviceContextMiddleware()` (`ownServiceName: 'harness-service-a'`) +
   `requireServiceCallerMiddleware('harness-service-b')` (`200` with B's
-  token, `401` without) → try to replace A's key with the *shared*
-  bootstrap secret → **expected:** `409 SERVICE_NAME_TAKEN`.
+  token, `401` without) → try to register a key for A with the *shared*
+  bootstrap secret → **expected:** `403 FORBIDDEN` (A has its own secret in
+  `bootstrapSecrets`, so the shared one can never register that name) →
+  register `harness-legacy-service` (allowed, no per-service secret) with the
+  shared secret twice → **expected:** `201` the first time that name has no
+  key, then `409 SERVICE_NAME_TAKEN` (the shared secret can claim a free name,
+  never replace an existing key; since Mongo persists, later runs see `409`
+  straight away).
 
 - [ ] **12. Rate limiting** (`/flows/rate-limit`)
   Fire 10 rapid wrong-password login attempts against one email. **Expected:**
   the first 5 return `401 INVALID_CREDENTIALS`, the rest return `429
   RATE_LIMIT_EXCEEDED` — this harness configures a deliberately low
   threshold (5/5min) specifically so this is visible in a few seconds; see
-  idp-core's own README for production defaults (5/15min). (`server.js`
+  idp-core's own README for production defaults (5/15min). This is not the
+  failed-password lockout (`maxFailedLoginAttempts`, set very high here):
+  that one locks *password login* only — refresh, existing sessions, magic
+  link, passkeys, SSO and MFA keep working. (`server.js`
   also raises the per-IP registration limit to 50/hour so repeated runs of
   flows 1 and 13 don't trip it.)
 
@@ -271,12 +314,11 @@ terminal (`logger: console` in `server.js`) if you want both.
 - **Webhooks are boot-time config**, not something this page registers at
   runtime — matches how `config.webhooks` actually works in idp-core.
 - **A few requests deliberately omit cookies (`credentials:'omit'`)**: flow 3
-  (refresh) and flow 9's token-endpoint, `/userinfo` and `/me` calls. `authContextMiddleware`
-  prefers a cookie over a body-supplied refresh token / `Authorization:
-  Bearer` header when both are present — realistic and correct behavior, but
-  in a same-origin browser tab you're usually still carrying a login cookie
-  from an earlier flow, which would otherwise silently win and mask exactly
-  the thing that page is trying to demonstrate (for `/userinfo` the
-  first-party cookie would now simply be refused). Found this by scripting the
+  (refresh) and flow 9's token-endpoint, `/userinfo` and `/me` calls. Before
+  0.4.0 idp-core preferred a cookie over a body-supplied refresh token /
+  `Authorization: Bearer` header; since 0.4.0 the explicit credential wins,
+  but in a same-origin browser tab you're usually still carrying a login
+  cookie from an earlier flow, so these calls omit it to depend only on the
+  token being demonstrated. Found this by scripting the
   flows end-to-end while building the harness, not just by inspection —
   worth knowing if you extend this harness further.

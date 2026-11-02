@@ -25,6 +25,9 @@ side needs small base64url conversion helpers. This example is adapted from the 
   alive only by refreshing doesn't count.
 - An authenticator that can verify its user (PIN, biometric): registration and passkey login
   require user verification.
+- A page on the IdP's origin or on one listed in `cookies.trustedOrigins`:
+  `/webauthn/authentication/verify` and `/webauthn/mfa/verify` set session cookies and refuse
+  browser requests from other origins (403 `CSRF_ORIGIN_REJECTED`).
 
 ## Browser-side helpers
 

@@ -20,24 +20,33 @@ package) or over HTTP against a published JWKS endpoint (for services that don't
 ```ts
 {
   bootstrapSecrets?: Record<string, string>;   // preferred: one registration secret per service name
-  bootstrapSecret?: string;                    // legacy shared secret: can register a NEW name only
+  bootstrapSecret?: string;                    // legacy shared secret: can register a NEW name only (never one in bootstrapSecrets)
   allowedServiceNames?: string[];              // when set, only these names may register at all
   tokenMode?: 'token' | 'secret' | 'both';     // default 'token'
   ownServiceName?: string;                     // this service's own name (the `aud` it expects)
   sharedSecret?: string;                       // legacy fallback for the 'secret'/'both' modes
   allowLegacySecretCallers?: boolean;          // default false — see requireServiceCallerMiddleware
+  rotationGraceSeconds?: number;               // default 3600 — how long a rotated-away (ROTATING) key still verifies
 }
 ```
 
 With `configFromEnv()`: `IDP_S2S_BOOTSTRAP_SECRETS` (`name=secret` pairs, comma-separated, e.g.
 `billing=s1,orders=s2` — a malformed pair fails startup), `IDP_S2S_BOOTSTRAP_SECRET`,
 `IDP_S2S_TOKEN_MODE` (default `token`) and `IDP_S2S_OWN_SERVICE_NAME`. `sharedSecret`,
-`allowedServiceNames` and `allowLegacySecretCallers` have no environment variable.
+`allowedServiceNames`, `allowLegacySecretCallers` and `rotationGraceSeconds` have no environment variable.
+
+**Secret strength (checked at startup, 0.4.0):** `bootstrapSecret`, `sharedSecret` and every
+`bootstrapSecrets` value must be at least 32 characters, and no per-service secret may equal the
+shared `bootstrapSecret` — they decide who may register a key (and so mint tokens as that
+service), or in `'secret'`/`'both'` mode who may call as a service. Generate each with
+`openssl rand -base64 32`.
 
 Prefer `bootstrapSecrets`. A per-service secret proves *which* service is registering, so it covers
 only its own name and can rotate that name's key. The shared `bootstrapSecret` proves only "some
 participating service": it can register a name that has no key yet, but never replace an existing
-service's key (that would let any participant impersonate it).
+service's key (that would let any participant impersonate it), and never register a name that has
+its own `bootstrapSecrets` entry at all (403 `FORBIDDEN`) — otherwise, once that service's key was
+revoked, any participant could claim its name.
 
 ## `initServiceIdentity(opts)`
 
@@ -55,7 +64,9 @@ Derives the public key from `privateKeyPem`, computes a deterministic `kid` (`<s
 16 hex chars of sha256({e,kty,n})>` — same keypair + same name always yields the same `kid`, which
 is what makes registration idempotent), then `POST`s to `<idpBaseUrl>/internal/service-keys` with
 header `x-s2s-bootstrap-secret: <bootstrapSecret>` and body `{ name, publicKey: <base64 PEM>,
-region }`.
+region }`. `idpBaseUrl` must be `https` (plain `http` only for `localhost`, `127.0.0.1`, `[::1]`, or any `http` with `NODE_ENV=development`, e.g. a docker-compose service name) —
+the bootstrap secret is sent to it and its key set decides whose tokens are trusted; anything else
+throws a plain `Error`.
 
 `bootstrapSecret` solves the chicken-and-egg problem: a service can't mint a verifiable S2S JWT
 before its public key is registered, so registration itself can't require one. Pass the service's
@@ -118,7 +129,9 @@ For a service that doesn't run this package's storage/state (pure verifier). Fet
 
 If `idpBaseUrl` is omitted, reuses the IdP URL set by `initServiceIdentity` — a pure-verifier
 service that never calls `initServiceIdentity` must pass `idpBaseUrl` explicitly every call, or a
-plain `Error` is thrown.
+plain `Error` is thrown. The URL must be `https` (`http` only for localhost, or with `NODE_ENV=development`) — over plain http
+anyone on the path could substitute the key set, and with it every service's identity; anything
+else throws a plain `Error`.
 
 Verification (shared with the in-process path below): decodes the JWT header for `kid`, looks up
 the matching key (retrying once with a forced refresh on a miss), then `jwt.verify` with
@@ -141,7 +154,9 @@ from other verify failures); `SERVICE_NOT_CONFIGURED` (500, `expectedAud` not pa
 See [Middleware](middleware.md#servicecontextmiddlewareopts) for the full signature. Uses the same
 `verifyServiceTokenWith` core as `verifyServiceTokenRemote` (same lifetime rules), but looks up keys
 **in-process** — one indexed read via `serviceKeyRepository.findPublishableByKid(kid)`, falling back
-to scanning `listPublishable()` on an adapter without it — no HTTP round trip. Note this in-process
+to scanning `listPublishable()` on an adapter without it — no HTTP round trip. A `ROTATING` key is
+accepted only within `serviceMesh.rotationGraceSeconds` of its rotation (its `statusChangedAt`;
+rows from before 0.4.0 fall back to `updatedAt`), the same rule the services JWKS applies. Note this in-process
 path never passes `expectedIss` to the verifier — issuer enforcement here relies entirely on the
 `iss`-vs-key-owner cross-check described above, not an explicit trusted-issuer allowlist.
 
@@ -174,15 +189,31 @@ Body: `{ name: string, publicKey: string (base64 PEM), region? }`. The handler t
 
 - requires `name` to match `^[a-z0-9][a-z0-9-]{0,62}$` and `region` (if given) to be 1–32
   characters of `[A-Za-z0-9_-]`;
-- refuses a name not in `serviceMesh.allowedServiceNames`, when that is set (403 `FORBIDDEN`), and a
-  per-service secret presented for a different name (401 `UNAUTHENTICATED`);
+- refuses a name not in `serviceMesh.allowedServiceNames`, when that is set (403 `FORBIDDEN`), a
+  per-service secret presented for a different name (401 `UNAUTHENTICATED`), and the shared secret
+  presented for a name that has its own `bootstrapSecrets` entry (403 `FORBIDDEN`, audited as
+  `SERVICE_KEY_REGISTRATION_REFUSED` with `reason: 'name_has_own_secret'`);
 - accepts only an **RSA public key of at least 2048 bits** — a private key PEM is refused (rotate
   it: it has left the service), as are non-RSA keys;
+- refuses a key that was **revoked** with 409 `SERVICE_KEY_REVOKED` (audited as
+  `SERVICE_KEY_REGISTRATION_REFUSED` with `reason: 'key_revoked'`) — a revoked key is never
+  re-activated, even though every service re-registers its key at boot; the service must generate a
+  new key pair. The check runs early when the repository has `findByKid`, and `upsertByKid`
+  refuses a revoked kid again atomically — before any old key is demoted;
 - is idempotent by `(name, publicKey)` → same derived `kid`, upserted;
 - for a **new key under a name that already has one**: with that service's own per-service secret
-  it's a rotation — the name's `ACTIVE` keys move to `ROTATING` (still published and accepted, so
-  in-flight tokens keep working) and keys already `ROTATING` move to `RETIRED`; with the shared
-  secret it's refused with 409 `SERVICE_NAME_TAKEN` (audited as `SERVICE_KEY_REGISTRATION_REFUSED`).
+  it's a rotation — the new key is registered **first**, then the name's `ACTIVE` keys move to
+  `ROTATING` (still published and accepted for `serviceMesh.rotationGraceSeconds`, default 3600,
+  after the rotation, so in-flight tokens and instances still on the old key keep working) and keys
+  already `ROTATING` move to `RETIRED` — each only from the status just read
+  (`setStatusByKid(kid, status, { expectedStatus })`), so a key revoked mid-rotation stays revoked;
+  with the shared secret it's refused with 409 `SERVICE_NAME_TAKEN` (audited as
+  `SERVICE_KEY_REGISTRATION_REFUSED`, `reason: 'name_taken'`);
+- for **concurrent first registrations of one new name with the shared secret** (each saw "no key
+  yet"): exactly one keeps the name — the `ACTIVE` key with the earliest `registeredAt` (then the
+  lowest `kid`), i.e. the first one inserted: the Mongo adapter takes `registeredAt`,
+  `statusChangedAt` and `lastSeenAt` from the **database** clock (`$$NOW`), not the app server's; every other registration revokes its own key and answers 409 `SERVICE_NAME_TAKEN`
+  (so that service must generate a new key pair). A per-service secret rules this out.
   To move a shared-secret service to a new key, use its per-service secret, or `revokeServiceKey()`
   its old key first.
 
@@ -191,7 +222,7 @@ Body: `{ name: string, publicKey: string (base64 PEM), region? }`. The handler t
 ```
 Status `201`; audited as `SERVICE_KEY_REGISTERED` (with `rotated`). Errors: `INVALID_REQUEST` (400)
 for a bad `name`/`region`, a missing `publicKey`, or a key that isn't an RSA ≥ 2048-bit public key;
-`UNAUTHENTICATED` (401); `FORBIDDEN` (403); `SERVICE_NAME_TAKEN` (409).
+`UNAUTHENTICATED` (401); `FORBIDDEN` (403); `SERVICE_NAME_TAKEN` (409); `SERVICE_KEY_REVOKED` (409).
 
 ## `revokeServiceKey(kid)`
 
@@ -201,14 +232,17 @@ function revokeServiceKey(kid: string): Promise<boolean>
 
 Programmatic, for your admin tooling (there is no HTTP route): marks the key `REVOKED`, so it is no
 longer published in the services JWKS nor accepted in-process. Resolves `true` if a key was found
-(audited as `SERVICE_KEY_REVOKED`). Once a name has no publishable key left, it can be registered
-again with a new one. Remote verifiers stop accepting the key when their cached JWKS next refreshes
+(audited as `SERVICE_KEY_REVOKED`). The revoked key itself can never be registered again
+(409 `SERVICE_KEY_REVOKED`). Once a name has no publishable key left, it can be registered again
+with a **new** key — by its own per-service secret, or by the shared secret if the name has no
+`bootstrapSecrets` entry. Remote verifiers stop accepting the key when their cached JWKS next refreshes
 (within 5 minutes).
 
 ## `getServicesJwksHandler` — `GET /.well-known/services-jwks.json`
 
 **Public, unauthenticated by design** — keys are public by definition. Returns every
-`ACTIVE`/`ROTATING` service key that is an RSA public key (anything else — possible in rows written
+`ACTIVE` service key, and every `ROTATING` one still within `serviceMesh.rotationGraceSeconds` of
+its rotation, that is an RSA public key (anything else — possible in rows written
 before 0.4.0 — is skipped) as a JWK, with two **non-standard extension fields** added specifically
 to support the cross-checks above: `service` (the registered service name) and `status`.
 `Cache-Control: public, max-age=60`.

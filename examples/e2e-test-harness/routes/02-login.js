@@ -6,7 +6,7 @@ export function mountLoginFlow(app, { AUTH_PREFIX }) {
             title: '2. Login (password)',
             body: `
       <div class="card">
-        <p class="step">Uses whatever account you registered+verified in flow 1 (or any active account). Sets <code>access_token</code>/<code>refresh_token</code> httpOnly cookies AND returns both in the response body (shown below) — the body values are what get decoded here since JS can't read httpOnly cookies.</p>
+        <p class="step">Uses whatever account you registered+verified in flow 1 (or any active account). Sets the <code>__Host-access_token</code>/<code>__Host-refresh_token</code> httpOnly cookies (plain <code>access_token</code>/<code>refresh_token</code> only with <code>NODE_ENV=development</code>) AND returns both in the response body (shown below) — the body values are what get decoded here since JS can't read httpOnly cookies.</p>
         <label>Email</label>
         <input id="email" value="">
         <label>Password</label>
