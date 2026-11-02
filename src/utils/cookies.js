@@ -1,4 +1,6 @@
+import crypto from 'crypto';
 import { IdpError } from '../errors/idp-error.js';
+import { hashOpaqueToken, opaqueTokenHashes, HASH_PURPOSES } from '../signing/token.service.js';
 
 /** Whether cookies are `Secure` (config.cookies.secure; default: everywhere but NODE_ENV=development). */
 export function cookiesAreSecure(state) {
@@ -58,4 +60,38 @@ export function readCookie(req, name) {
 /** The value of a session cookie (see sessionCookieName). */
 export function readSessionCookie(state, req, base) {
     return readCookie(req, sessionCookieName(state, base));
+}
+
+/**
+ * The refresh-token cookie is scoped to the session endpoints (`<mount path>/session`), so the
+ * long-lived token is sent nowhere else. A path-scoped cookie can't carry the `__Host-` prefix — the
+ * one thing a sibling subdomain can't plant — so it is `__Secure-`, and comes with a host-only
+ * BINDING cookie (`__Host-refresh_binding`, `Path=/`) holding a keyed hash of the token. A refresh
+ * cookie is only accepted with its binding: a planted one (whose binding the planter can't set) is
+ * refused. The binding alone is useless — it is not the token. With `cookies.domain` (cookies shared
+ * across subdomains by choice) both are domain cookies, as before.
+ */
+export function refreshCookieNames(state) {
+    if (!cookiesAreSecure(state)) return { token: 'refresh_token', binding: 'refresh_binding' };
+    return { token: '__Secure-refresh_token', binding: state.config.cookies?.domain ? '__Secure-refresh_binding' : '__Host-refresh_binding' };
+}
+
+/** The path the refresh cookie is scoped to: the session endpoints under wherever the router is mounted. */
+export const sessionCookiePath = (req) => `${req.baseUrl ?? ''}/session`;
+
+export const refreshCookieBinding = (state, token) => hashOpaqueToken(state, token, HASH_PURPOSES.REFRESH_COOKIE_BINDING);
+
+/**
+ * The refresh token from its cookie — undefined when there is none; COOKIE_CONFLICT when it comes
+ * twice, or without its matching binding cookie (planted).
+ */
+export function readRefreshCookie(state, req) {
+    const names = refreshCookieNames(state);
+    const token = readCookie(req, names.token);
+    if (token === undefined) return undefined;
+    const binding = readCookie(req, names.binding);
+    const expected = typeof binding === 'string' ? opaqueTokenHashes(state, token, HASH_PURPOSES.REFRESH_COOKIE_BINDING) : [];
+    const matches = expected.some((h) => h.length === binding.length && crypto.timingSafeEqual(Buffer.from(h), Buffer.from(binding)));
+    if (!matches) throw COOKIE_CONFLICT();
+    return token;
 }

@@ -102,7 +102,7 @@ test('responses are not cacheable — except the public discovery and JWKS docum
 test('CSRF: a cookie-authenticated state change must come from a trusted origin', async () => {
     const u = await user();
     const cookie = { Cookie: `access_token=${u.cookies.access_token}` };
-    const logoutAll = (headers) => fetch(`${app.baseUrl}/logout/all`, { method: 'POST', headers: { ...cookie, ...headers } });
+    const logoutAll = (headers) => fetch(`${app.baseUrl}/session/logout/all`, { method: 'POST', headers: { ...cookie, ...headers } });
 
     const evil = await logoutAll({ Origin: 'https://evil.example.com' });
     assert.equal(evil.status, 403);
@@ -125,16 +125,16 @@ test('CSRF: same-origin requests, the issuer\'s own origin, non-browser clients 
 
 test('CSRF: /refresh is held to the same rule — with the cookie, and with a token in the body (it sets session cookies)', async () => {
     const u = await user();
-    const viaCookie = await fetch(`${app.baseUrl}/refresh`, { method: 'POST', headers: { Cookie: `refresh_token=${u.cookies.refresh_token}`, Origin: 'https://evil.example.com' } });
+    const viaCookie = await fetch(`${app.baseUrl}/session/refresh`, { method: 'POST', headers: { Cookie: `refresh_token=${u.cookies.refresh_token}; refresh_binding=${u.cookies.refresh_binding}`, Origin: 'https://evil.example.com' } });
     assert.equal(viaCookie.status, 403);
     // A forged form could post the ATTACKER's refresh token and sign the victim in as the attacker.
-    const viaBody = await post('/refresh', { refreshToken: u.refreshToken }, { Origin: 'https://evil.example.com' });
+    const viaBody = await post('/session/refresh', { refreshToken: u.refreshToken }, { Origin: 'https://evil.example.com' });
     assert.equal(viaBody.status, 403);
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 200, 'non-browser clients are unaffected');
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 200, 'non-browser clients are unaffected');
 });
 
 test('/refresh validates its body (a non-string token was a 500)', async () => {
-    const res = await post('/refresh', { refreshToken: 123 });
+    const res = await post('/session/refresh', { refreshToken: 123 });
     assert.equal(res.status, 400);
     assert.equal((await res.json()).error, 'VALIDATION_ERROR');
 });
@@ -173,7 +173,7 @@ test('cookies.refreshTokenInBody: false keeps the refresh token out of JSON bodi
         const u = await user(temp.baseUrl, temp);
         assert.equal(u.refreshToken, undefined);
         assert.ok(u.cookies.refresh_token, 'still set as the httpOnly cookie');
-        const refreshed = await fetch(`${temp.baseUrl}/refresh`, { method: 'POST', headers: { Cookie: `refresh_token=${u.cookies.refresh_token}` } });
+        const refreshed = await fetch(`${temp.baseUrl}/session/refresh`, { method: 'POST', headers: { Cookie: `refresh_token=${u.cookies.refresh_token}; refresh_binding=${u.cookies.refresh_binding}` } });
         assert.equal(refreshed.status, 200);
         assert.equal((await refreshed.json()).refreshToken, undefined);
     });

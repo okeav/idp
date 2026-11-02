@@ -93,7 +93,7 @@ test('step-up: a refresh does not make a login recent — auth_time carries over
     assert.ok(Number.isInteger(original));
 
     await new Promise((r) => setTimeout(r, 1100));
-    const refreshed = await (await post('/refresh', { refreshToken: user.refreshToken })).json();
+    const refreshed = await (await post('/session/refresh', { refreshToken: user.refreshToken })).json();
     assert.equal(payloadOf(refreshed.accessToken).auth_time, original);
 
     await withStaleLogins(async () => {

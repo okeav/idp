@@ -251,7 +251,7 @@ test('the rate limiter fails CLOSED on backend error for login, MFA, password re
             assert.equal((await res.json()).error, 'RATE_LIMITER_UNAVAILABLE', path);
         }
         // Refresh keeps its explicit fail-open: the request proceeds to the token check.
-        const refresh = await post('/refresh', { refreshToken: 'not-a-real-token' });
+        const refresh = await post('/session/refresh', { refreshToken: 'not-a-real-token' });
         assert.equal(refresh.status, 401);
     } finally {
         app.state.rateLimiter = saved;

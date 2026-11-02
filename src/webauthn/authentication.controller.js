@@ -112,7 +112,7 @@ export async function verifyAuthenticationHandler(req, res, next) {
 
         await auditLog(state.logger, state.hooks, 'WEBAUTHN_LOGIN', { userId: String(user.id), credentialId: credentialDoc.credentialId });
 
-        setSessionCookies(res, state, session);
+        setSessionCookies(req, res, state, session);
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,

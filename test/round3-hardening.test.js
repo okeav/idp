@@ -45,7 +45,7 @@ async function client(extra = {}) {
 test('a duplicate session cookie spelled with a space before "=" is still a duplicate', async () => {
     const victim = await user();
     const attacker = await user();
-    const res = await fetch(`${app.baseUrl}/refresh`, { method: 'POST', headers: { Cookie: `__Host-refresh_token =${attacker.refreshToken}; __Host-refresh_token=${victim.refreshToken}` } });
+    const res = await fetch(`${app.baseUrl}/session/refresh`, { method: 'POST', headers: { Cookie: `__Secure-refresh_token =${attacker.refreshToken}; __Secure-refresh_token=${victim.refreshToken}` } });
     assert.equal(res.status, 400);
     assert.equal((await res.json()).error, 'COOKIE_CONFLICT');
 });
@@ -70,7 +70,7 @@ test('a code stays redeemable after an ordinary refresh of the session that auth
     const u = await user();
     const c = await client();
     const { code, verifier } = await authorizeCode({ baseUrl: app.baseUrl, accessToken: u.accessToken, clientId: c.clientId, redirectUri });
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 200);
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 200);
     const res = await exchangeCode({ baseUrl: app.baseUrl, client: c, code, redirectUri, verifier });
     assert.equal(res.status, 200, JSON.stringify(res.body));
 });
@@ -79,8 +79,8 @@ test('…but not after that session was signed out', async () => {
     const u = await user();
     const c = await client();
     const { code, verifier } = await authorizeCode({ baseUrl: app.baseUrl, accessToken: u.accessToken, clientId: c.clientId, redirectUri });
-    const rotated = await (await post('/refresh', { refreshToken: u.refreshToken })).json();
-    assert.equal((await post('/logout', { refreshToken: rotated.refreshToken })).status, 200);
+    const rotated = await (await post('/session/refresh', { refreshToken: u.refreshToken })).json();
+    assert.equal((await post('/session/logout', { refreshToken: rotated.refreshToken })).status, 200);
     assert.equal((await exchangeCode({ baseUrl: app.baseUrl, client: c, code, redirectUri, verifier })).status, 400);
 });
 

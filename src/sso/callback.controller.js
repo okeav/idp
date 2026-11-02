@@ -159,7 +159,7 @@ export async function ssoCallbackHandler(req, res, next) {
         const claims = await resolveClaims(state, user, { isNewUser, isNewLink, provider, extra });
         const session = await issueSession(state, { user, claims, req, loginChallenge: stateData.loginChallenge ?? undefined });
 
-        setSessionCookies(res, state, session);
+        setSessionCookies(req, res, state, session);
         res.redirect(withParams(redirect_uri, { ssoLogin: 'success' }));
     } catch (err) {
         next(err);

@@ -75,7 +75,7 @@ test('five wrong passwords lock PASSWORD login only — the account, its session
     assert.equal(stored.lockUntil, null, 'nor written on the account — it lives in the password-login attempt budget');
 
     assert.equal((await fetch(`${app.baseUrl}/me`, { headers: bearer(u.accessToken) })).status, 200, 'the session lives on');
-    const refreshed = await post('/refresh', { refreshToken: u.refreshToken });
+    const refreshed = await post('/session/refresh', { refreshToken: u.refreshToken });
     assert.equal(refreshed.status, 200, 'and still refreshes');
     assert.equal((await magicLink(u.email)).status, 200, 'and the inbox can still sign in');
 });
@@ -94,7 +94,7 @@ test('a row locked before 0.4.0 (status LOCKED + lockUntil) is treated as a pass
     const u = await user();
     const stored = await users().findByEmail(u.email);
     await users().updateById(stored.id, { status: 'LOCKED', lockUntil: new Date(Date.now() + 60_000) });
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 200);
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 200);
     assert.equal((await magicLink(u.email)).status, 200);
     // That sign-in cleared lockUntil — and the legacy status with it (else it would read as an admin lock).
     assert.equal((await users().findByEmail(u.email)).status, 'ACTIVE');
@@ -110,7 +110,7 @@ test('an administrative lock (status LOCKED, no lockUntil) still blocks every me
     const stored = await users().findByEmail(u.email);
     await users().updateById(stored.id, { status: 'LOCKED', lockUntil: null });
 
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 403);
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 403);
     assert.equal((await magicLink(u.email)).status, 423);
     await post('/password/forgot', { email: u.email });
     const { resetToken } = await waitForHookCall(app, 'onPasswordResetRequested', (c) => c.email === u.email);
@@ -124,9 +124,9 @@ test('a refresh refused for an inactive account does not burn the token', async 
     const u = await user();
     const stored = await users().findByEmail(u.email);
     await users().updateById(stored.id, { status: 'SUSPENDED' });
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 403);
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 403);
     await users().updateById(stored.id, { status: 'ACTIVE' });
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 200);
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 200);
 });
 
 test('a refresh whose claims hook throws does not burn the token; the retry succeeds', async () => {
@@ -137,8 +137,8 @@ test('a refresh whose claims hook throws does not burn the token; the retry succ
     } } }, async (temp) => {
         const u = await user(temp);
         failNext = true;
-        assert.equal((await post('/refresh', { refreshToken: u.refreshToken }, {}, temp.baseUrl)).status, 500);
-        const retry = await post('/refresh', { refreshToken: u.refreshToken }, {}, temp.baseUrl);
+        assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken }, {}, temp.baseUrl)).status, 500);
+        const retry = await post('/session/refresh', { refreshToken: u.refreshToken }, {}, temp.baseUrl);
         assert.equal(retry.status, 200, await retry.clone().text());
         assert.ok(!temp.hookCalls.onAuditLog.some((e) => e.action === 'REFRESH_TOKEN_REUSE_DETECTED'));
     });
@@ -293,8 +293,8 @@ test('endpoints that set session cookies refuse a cross-origin browser request (
     assert.equal((await post('/login', { email: u.email, password })).status, 200, 'a non-browser client');
 
     // /refresh with a body token: the attacker's own token would sign the victim in as the attacker.
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken }, evil)).status, 403);
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 200, 'the refused request did not consume the token');
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken }, evil)).status, 403);
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 200, 'the refused request did not consume the token');
 
     await post('/magic-link/request', { email: u.email });
     const token = app.hookCalls.onMagicLinkRequested.filter((c) => c.email === u.email).at(-1).magicLinkToken;

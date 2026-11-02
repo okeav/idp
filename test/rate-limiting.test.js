@@ -70,7 +70,7 @@ test('password reset request is rate limited per IP', async () => {
 });
 
 test('refresh token endpoint is rate limited per IP', async () => {
-    const request = () => fetch(`${app.baseUrl}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken: 'not-a-real-token' }) });
+    const request = () => fetch(`${app.baseUrl}/session/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken: 'not-a-real-token' }) });
 
     const r1 = await request();
     const r2 = await request();

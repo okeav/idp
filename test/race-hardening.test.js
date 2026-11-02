@@ -176,7 +176,7 @@ test('an /oauth2/authorize request in flight across "sign out everywhere" yields
     const authorize = fetch(`${app.baseUrl}/oauth2/authorize?${qs}`, { headers: bearer(u.accessToken), redirect: 'manual' });
     await g.reached;
     g.restore();
-    assert.equal((await fetch(`${app.baseUrl}/logout/all`, { method: 'POST', headers: bearer(u.accessToken) })).status, 200);
+    assert.equal((await fetch(`${app.baseUrl}/session/logout/all`, { method: 'POST', headers: bearer(u.accessToken) })).status, 200);
     g.release();
     const res = await authorize;
     assert.equal(res.status, 302);
@@ -210,13 +210,13 @@ test('a refresh in flight when reuse detection revokes its family does not keep 
     await withTemporaryApp({ config: { session: { refreshReuseGraceSeconds: 0 } } }, async (temp) => {
         const p = (path, body, headers) => post(path, body, headers, temp.baseUrl);
         const u = await activeUser(temp);
-        const r1 = (await (await p('/refresh', { refreshToken: u.refreshToken })).json()).refreshToken;
+        const r1 = (await (await p('/session/refresh', { refreshToken: u.refreshToken })).json()).refreshToken;
 
         const g = gate(temp.state.storage.sessionRepository, 'createSession', { when: 'before' });
-        const inFlight = p('/refresh', { refreshToken: r1 });
+        const inFlight = p('/session/refresh', { refreshToken: r1 });
         await g.reached;
         g.restore();
-        assert.equal((await p('/refresh', { refreshToken: u.refreshToken })).status, 401, 'replay of the rotated token: reuse detected');
+        assert.equal((await p('/session/refresh', { refreshToken: u.refreshToken })).status, 401, 'replay of the rotated token: reuse detected');
         g.release();
         const res = await inFlight;
         assert.equal(res.status, 401, 'the successor written after the family was revoked is refused');
@@ -243,7 +243,7 @@ test('a refresh in flight across MFA enrolment does not keep the other (pre-MFA)
     const other = await (await post('/login', { email: u.email, password })).json();
 
     const g = gate(app.state.storage.sessionRepository, 'createSession', { when: 'before' });
-    const inFlight = post('/refresh', { refreshToken: other.refreshToken });
+    const inFlight = post('/session/refresh', { refreshToken: other.refreshToken });
     await g.reached;
     g.restore();
     const { secret } = await (await fetch(`${app.baseUrl}/me/mfa/setup`, { method: 'POST', headers: bearer(u.accessToken) })).json();
@@ -251,7 +251,7 @@ test('a refresh in flight across MFA enrolment does not keep the other (pre-MFA)
     g.release();
 
     assert.equal((await inFlight).status, 401, 'the other session in-flight refresh is refused');
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 200, 'the enrolling session refreshes');
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 200, 'the enrolling session refreshes');
 });
 
 test('signing in another way does not reset the password-login budget', async () => {

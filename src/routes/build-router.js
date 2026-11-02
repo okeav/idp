@@ -97,9 +97,11 @@ export function buildRouter(opts = {}) {
     router.post('/register/resend-verification', validateBody(resendVerificationSchema), resendVerificationEmailHandler);
     router.post('/login', validateBody(loginSchema), loginHandler);
     router.post('/mfa/verify', validateBody(verifyMfaChallengeSchema), verifyMfaChallengeHandler);
-    router.post('/refresh', validateBody(refreshSchema), refreshTokenHandler);
-    router.post('/logout', validateBody(logoutSchema), logoutHandler); // refreshToken in the body OR the httpOnly cookie
-    router.post('/logout/all', authContextMiddleware(), logoutAllHandler);
+    // Everything that reads the refresh cookie lives under /session — the only path it is sent to
+    // (see utils/cookies.js readRefreshCookie).
+    router.post('/session/refresh', validateBody(refreshSchema), refreshTokenHandler);
+    router.post('/session/logout', validateBody(logoutSchema), logoutHandler); // refreshToken in the body OR the httpOnly cookie
+    router.post('/session/logout/all', authContextMiddleware(), logoutAllHandler);
     router.post('/password/forgot', validateBody(forgotPasswordSchema), forgotPasswordHandler);
     router.post('/password/reset', validateBody(resetPasswordSchema), resetPasswordHandler);
     router.post('/password/change', authContextMiddleware(), validateBody(changePasswordSchema), changePasswordHandler);
@@ -181,9 +183,9 @@ export function buildRouter(opts = {}) {
     if (features.oidc) {
         // The one IdP route a relying party calls with the access token it was issued.
         router.get('/userinfo', authContextMiddleware({ accept: ['oauth2-user'] }), userinfoHandler);
-        router.get('/oidc/end-session', authContextMiddleware({ optional: true }), endSessionHandler);
+        router.get('/session/end', authContextMiddleware({ optional: true }), endSessionHandler);
         // The confirmed form of the same request (see end-session.controller.js) — JSON or an HTML form.
-        router.post('/oidc/end-session', express.urlencoded({ extended: false }), authContextMiddleware({ optional: true }), endSessionHandler);
+        router.post('/session/end', express.urlencoded({ extended: false }), authContextMiddleware({ optional: true }), endSessionHandler);
         router.get('/.well-known/openid-configuration', openidConfigurationHandler);
     }
 

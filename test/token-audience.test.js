@@ -70,7 +70,7 @@ test('an OAuth2 client\'s user access token is refused on every first-party rout
         ['DELETE', '/me'],
         ['GET', '/me/sessions'],
         ['DELETE', '/me/sessions'],
-        ['POST', '/logout/all'],
+        ['POST', '/session/logout/all'],
         ['POST', '/password/change', { currentPassword: password, newPassword: 'An0ther!Passw0rd' }],
         ['GET', '/me/mfa'],
         ['POST', '/me/mfa/setup'],
@@ -140,7 +140,7 @@ test('an OAuth2 refresh token is refused at /refresh — and stays revoked', asy
     const client = await createClient();
     const tokens = await oauthTokensFor(user, client, 'openid');
 
-    const res = await fetch(`${app.baseUrl}/refresh`, json({ refreshToken: tokens.refresh_token }));
+    const res = await fetch(`${app.baseUrl}/session/refresh`, json({ refreshToken: tokens.refresh_token }));
     assert.equal(res.status, 401);
     assert.equal((await res.json()).error, 'INVALID_REFRESH_TOKEN');
 
@@ -157,7 +157,7 @@ test('a first-party refresh token is refused by the OAuth2 refresh grant — and
     assert.equal(res.status, 400);
     assert.equal((await res.json()).error, 'INVALID_GRANT');
 
-    assert.equal((await fetch(`${app.baseUrl}/refresh`, json({ refreshToken: user.refreshToken }))).status, 401);
+    assert.equal((await fetch(`${app.baseUrl}/session/refresh`, json({ refreshToken: user.refreshToken }))).status, 401);
 });
 
 test('client B cannot redeem client A\'s refresh token', async () => {
@@ -177,7 +177,7 @@ test('client B cannot redeem client A\'s refresh token', async () => {
 
 test('the legitimate refresh paths still work: first-party at /refresh, OAuth2 at /oauth2/token by its own client', async () => {
     const user = await registerVerifyLogin();
-    const r1 = await fetch(`${app.baseUrl}/refresh`, json({ refreshToken: user.refreshToken }));
+    const r1 = await fetch(`${app.baseUrl}/session/refresh`, json({ refreshToken: user.refreshToken }));
     assert.equal(r1.status, 200);
     const refreshed = await r1.json();
     assert.equal((await fetch(`${app.baseUrl}/me`, { headers: bearer(refreshed.accessToken) })).status, 200);

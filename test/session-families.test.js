@@ -50,7 +50,7 @@ async function withSessionConfig(patch, fn) {
     }
 }
 
-const refresh = (refreshToken) => post('/refresh', { refreshToken });
+const refresh = (refreshToken) => post('/session/refresh', { refreshToken });
 
 test('replaying a rotated refresh token revokes the whole family (theft detection)', async () => {
     await withSessionConfig({ refreshReuseGraceSeconds: 0 }, async () => {

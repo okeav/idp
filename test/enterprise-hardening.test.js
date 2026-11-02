@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { generate as generateTotp } from 'otplib';
 import { pkcePair } from './helpers/oauth.js';
+import express from 'express';
+import cookieParserLib from 'cookie-parser';
+import { buildRouter } from '../src/routes/build-router.js';
+import { setState } from '../src/config/state.js';
+import { refreshCookieBinding, readRefreshCookie } from '../src/utils/cookies.js';
 import { buildTestApp, withTemporaryApp, uniqueEmail, waitForHookCall, TEST_SECURITY } from './helpers/build-test-app.js';
 import { hashOpaqueToken, HASH_PURPOSES } from '../src/signing/token.service.js';
 import { json } from './helpers/serve.js';
@@ -46,7 +51,7 @@ test('with oidc.endSessionConfirmationUrl, a GET that needs confirmation redirec
     const page = `${ISSUER_ORIGIN}/signout`;
     await withTemporaryApp({ config: { oidc: { endSessionConfirmationUrl: page } } }, async (temp) => {
         const u = await loggedIn(temp);
-        const res = await fetch(`${temp.baseUrl}/oidc/end-session?state=abc&ui_locales=de`, { headers: { Cookie: `__Host-access_token=${u.accessToken}` }, redirect: 'manual' });
+        const res = await fetch(`${temp.baseUrl}/session/end?state=abc&ui_locales=de`, { headers: { Cookie: `__Host-access_token=${u.accessToken}` }, redirect: 'manual' });
         assert.equal(res.status, 302);
         const to = new URL(res.headers.get('location'));
         assert.equal(`${to.origin}${to.pathname}`, page);
@@ -267,4 +272,86 @@ test('a magic-link sign-in made with the login_challenge satisfies prompt=login'
     const { magicLinkToken } = app.hookCalls.onMagicLinkRequested.filter((x) => x.email === email).at(-1);
     const { accessToken } = await (await post(app.baseUrl, '/magic-link/verify', { token: magicLinkToken, login_challenge: loginChallenge })).json();
     assert.equal((await authorize(c.clientId, accessToken, { prompt: 'login', login_challenge: loginChallenge })).status, 200);
+});
+
+// ── the refresh cookie: scoped to /session, bound to a host-only cookie ──────
+
+const refreshPair = (res) => Object.fromEntries(res.headers.getSetCookie().filter((c) => /^__Secure-refresh_token=|^__Host-refresh_binding=/.test(c)).map((c) => c.split(';')[0].split('=')));
+const asCookie = (pair) => Object.entries(pair).map(([k, v]) => `${k}=${v}`).join('; ');
+
+async function browserLogin() {
+    const email = await registered();
+    const res = await post(app.baseUrl, '/login', { email, password }, { Origin: ISSUER_ORIGIN });
+    return refreshPair(res);
+}
+
+test('a planted refresh cookie (no binding, or another session\'s binding) is refused; the real pair refreshes and is rotated', async () => {
+    const victim = await browserLogin();
+    const attacker = await browserLogin();
+    const refresh = (cookie) => post(app.baseUrl, '/session/refresh', {}, { Cookie: cookie, Origin: ISSUER_ORIGIN });
+
+    // What a sibling subdomain can plant: __Secure- (not __Host-) refresh cookies — but not the __Host- binding.
+    for (const cookie of [
+        `__Secure-refresh_token=${attacker['__Secure-refresh_token']}`,
+        `__Secure-refresh_token=${attacker['__Secure-refresh_token']}; __Host-refresh_binding=${victim['__Host-refresh_binding']}`,
+    ]) {
+        const res = await refresh(cookie);
+        assert.equal(res.status, 400, cookie);
+        assert.equal((await res.json()).error, 'COOKIE_CONFLICT');
+    }
+
+    const ok = await refresh(asCookie(victim));
+    assert.equal(ok.status, 200);
+    const rotated = refreshPair(ok);
+    assert.notEqual(rotated['__Secure-refresh_token'], victim['__Secure-refresh_token']);
+    assert.notEqual(rotated['__Host-refresh_binding'], victim['__Host-refresh_binding']);
+    assert.equal((await refresh(asCookie(rotated))).status, 200);
+});
+
+test('logout via the cookie pair revokes the session and clears both cookies at their paths', async () => {
+    const pair = await browserLogin();
+    const res = await post(app.baseUrl, '/session/logout', {}, { Cookie: asCookie(pair), Origin: ISSUER_ORIGIN });
+    assert.equal(res.status, 200);
+    const cleared = res.headers.getSetCookie();
+    assert.ok(cleared.some((c) => c.startsWith('__Secure-refresh_token=;') && /Path=\/session(;|$)/i.test(c)), cleared.join(' | '));
+    assert.ok(cleared.some((c) => c.startsWith('__Host-refresh_binding=;') && /Path=\/(;|$)/i.test(c)));
+    assert.equal((await post(app.baseUrl, '/session/refresh', { refreshToken: pair['__Secure-refresh_token'] })).status, 401);
+});
+
+test('mounted under a prefix, the refresh cookie is scoped to <prefix>/session', async () => {
+    const bare = express();
+    bare.use((_req, _res, next) => { setState(app.state); next(); });
+    bare.use(cookieParserLib());
+    bare.use(express.json());
+    bare.use('/auth', buildRouter({}));
+    const server = await new Promise((r) => { const s = bare.listen(0, () => r(s)); });
+    try {
+        const base = `http://127.0.0.1:${server.address().port}/auth`;
+        const email = await registered();
+        const res = await post(base, '/login', { email, password });
+        const cookie = res.headers.getSetCookie().find((c) => c.startsWith('__Secure-refresh_token='));
+        assert.match(cookie, /;\s*Path=\/auth\/session(;|$)/i);
+        assert.equal((await post(base, '/session/refresh', {}, { Cookie: asCookie(refreshPair(res)) })).status, 200);
+    } finally {
+        await new Promise((r) => server.close(r));
+    }
+});
+
+test('a binding made under a previous tokenHashSecret still matches after rotation', () => {
+    const OLD = TEST_SECURITY.tokenHashSecret;
+    const NEW = 'rotated-token-hash-secret-0123456789abcdef';
+    const before = { config: { cookies: { secure: true }, security: { tokenHashSecret: OLD } } };
+    const after = { config: { cookies: { secure: true }, security: { tokenHashSecret: NEW, previousTokenHashSecrets: [OLD] } } };
+    const token = 'a'.repeat(128);
+    const req = { headers: { cookie: `__Secure-refresh_token=${token}; __Host-refresh_binding=${refreshCookieBinding(before, token)}` }, cookies: { '__Secure-refresh_token': token, '__Host-refresh_binding': refreshCookieBinding(before, token) } };
+    assert.equal(readRefreshCookie(after, req), token);
+    const forgetful = { config: { cookies: { secure: true }, security: { tokenHashSecret: NEW } } };
+    assert.throws(() => readRefreshCookie(forgetful, req), /Conflicting session cookies/);
+});
+
+test('discovery advertises /session/end; the old routes are gone', async () => {
+    const discovery = await (await fetch(`${app.baseUrl}/.well-known/openid-configuration`)).json();
+    assert.equal(discovery.end_session_endpoint, `${ISSUER_ORIGIN}/session/end`);
+    for (const path of ['/refresh', '/logout', '/logout/all']) assert.equal((await post(app.baseUrl, path, {})).status, 404, path);
+    assert.equal((await fetch(`${app.baseUrl}/oidc/end-session`)).status, 404);
 });

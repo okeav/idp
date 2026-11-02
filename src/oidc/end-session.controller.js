@@ -1,11 +1,11 @@
 import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { verifyIssuedToken, isIdTokenPayload } from '../signing/token.service.js';
-import { OAUTH_CLIENT_STATUS, CACHE_KEY_PREFIXES, COOKIE_NAMES, SESSION_KINDS } from '../config/constants.js';
+import { OAUTH_CLIENT_STATUS, CACHE_KEY_PREFIXES, SESSION_KINDS } from '../config/constants.js';
 import { auditLog } from '../hooks/index.js';
 import { clearSessionCookies } from '../password-auth/controllers.js';
 import { assertTrustedOrigin } from '../middleware/csrf.js';
-import { readSessionCookie } from '../utils/cookies.js';
+import { readRefreshCookie } from '../utils/cookies.js';
 import { sessionKindOf } from '../utils/session-kind.js';
 import { familyOf, peekRefreshRow, resolveRefreshTokenHash, revokeFamily } from '../utils/session-family.js';
 
@@ -19,14 +19,14 @@ async function ownSessionRow(state, req) {
         const row = await sessions.findByJti(req.auth.tokenMeta.jti);
         if (row && !row.revokedAt && String(row.user) === String(req.auth.userId)) return row;
     }
-    const raw = readSessionCookie(state, req, COOKIE_NAMES.REFRESH_TOKEN);
+    const raw = readRefreshCookie(state, req);
     if (!raw) return null;
     const row = await peekRefreshRow(state, await resolveRefreshTokenHash(state, raw));
     return row && sessionKindOf(row) === SESSION_KINDS.FIRST_PARTY ? row : null;
 }
 
 /**
- * GET|POST /oidc/end-session — RP-initiated logout (OIDC RP-Initiated Logout 1.0).
+ * GET|POST /session/end — RP-initiated logout (OIDC RP-Initiated Logout 1.0).
  *
  * What it ends is deliberately narrow, because a GET is something any site can trigger:
  * - the browser's own IdP session (the first-party session whose cookie came with the request) —
@@ -104,7 +104,7 @@ export async function endSessionHandler(req, res, next) {
             const revoked = await revokeFamily(state, familyOf(own).familyId, 'end_session');
             if (!revoked && (await sessions.revokeById(own.id, own.user)) && own.jti) revokedJtis.push(own.jti);
         }
-        if (signedInUserId) clearSessionCookies(res, state);
+        if (signedInUserId) clearSessionCookies(req, res, state);
         // The hinted relying party's sessions for this user — only on the user's own browser session.
         if (hint && signedInUserId && typeof sessions.revokeForClient === 'function') {
             const { jtis } = await sessions.revokeForClient(hint.aud, { userId: hint.sub });

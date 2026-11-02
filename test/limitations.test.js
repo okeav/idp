@@ -51,14 +51,14 @@ test('by default a non-browser login (no Origin, no Sec-Fetch-Site) still gets t
     const email = await registered();
     const body = await (await post(app.baseUrl, '/login', { email, password })).json();
     assert.ok(body.refreshToken);
-    const refreshed = await (await post(app.baseUrl, '/refresh', { refreshToken: body.refreshToken })).json();
+    const refreshed = await (await post(app.baseUrl, '/session/refresh', { refreshToken: body.refreshToken })).json();
     assert.ok(refreshed.refreshToken, 'refresh too');
 });
 
 test('a browser /refresh by default answers without the refresh token in the body', async () => {
     const email = await registered();
     const { refreshToken } = await (await post(app.baseUrl, '/login', { email, password })).json();
-    const res = await post(app.baseUrl, '/refresh', { refreshToken }, { Origin: ISSUER_ORIGIN });
+    const res = await post(app.baseUrl, '/session/refresh', { refreshToken }, { Origin: ISSUER_ORIGIN });
     assert.equal(res.status, 200);
     assert.equal((await res.json()).refreshToken, undefined);
 });
@@ -112,10 +112,10 @@ async function signedIn() {
 const sessionCookie = (token) => ({ Cookie: `__Host-access_token=${token}` });
 const meStatus = async (token) => (await fetch(`${app.baseUrl}/me`, { headers: { Authorization: `Bearer ${token}` } })).status;
 
-test('GET /oidc/end-session without an id_token_hint asks for confirmation and ends nothing', async () => {
+test('GET /session/end without an id_token_hint asks for confirmation and ends nothing', async () => {
     const token = await signedIn();
     // What a cross-site <img src> or top-level link would send.
-    const res = await fetch(`${app.baseUrl}/oidc/end-session`, { headers: { ...sessionCookie(token), 'Sec-Fetch-Site': 'cross-site' } });
+    const res = await fetch(`${app.baseUrl}/session/end`, { headers: { ...sessionCookie(token), 'Sec-Fetch-Site': 'cross-site' } });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { action: 'logout_confirmation_required' });
     assert.equal(res.headers.getSetCookie().length, 0, 'no cookie cleared');
@@ -124,19 +124,19 @@ test('GET /oidc/end-session without an id_token_hint asks for confirmation and e
 
 test('the confirmation is a POST from a trusted origin — JSON or an HTML form', async () => {
     const a = await signedIn();
-    const confirmed = await fetch(`${app.baseUrl}/oidc/end-session`, { method: 'POST', headers: { ...sessionCookie(a), Origin: ISSUER_ORIGIN, 'Sec-Fetch-Site': 'same-origin' } });
+    const confirmed = await fetch(`${app.baseUrl}/session/end`, { method: 'POST', headers: { ...sessionCookie(a), Origin: ISSUER_ORIGIN, 'Sec-Fetch-Site': 'same-origin' } });
     assert.equal(confirmed.status, 200);
     assert.equal(await meStatus(a), 401);
 
     const b = await signedIn();
-    const form = await fetch(`${app.baseUrl}/oidc/end-session`, { method: 'POST', body: new URLSearchParams({ state: 'x' }), headers: { ...sessionCookie(b), Origin: ISSUER_ORIGIN } });
+    const form = await fetch(`${app.baseUrl}/session/end`, { method: 'POST', body: new URLSearchParams({ state: 'x' }), headers: { ...sessionCookie(b), Origin: ISSUER_ORIGIN } });
     assert.equal(form.status, 200);
     assert.equal(await meStatus(b), 401);
 });
 
-test('a cross-origin POST to /oidc/end-session is refused', async () => {
+test('a cross-origin POST to /session/end is refused', async () => {
     const token = await signedIn();
-    const res = await fetch(`${app.baseUrl}/oidc/end-session`, { method: 'POST', headers: { ...sessionCookie(token), Origin: 'https://evil.example', 'Sec-Fetch-Site': 'cross-site' } });
+    const res = await fetch(`${app.baseUrl}/session/end`, { method: 'POST', headers: { ...sessionCookie(token), Origin: 'https://evil.example', 'Sec-Fetch-Site': 'cross-site' } });
     assert.equal(res.status, 403);
     assert.equal(await meStatus(token), 200);
 });
@@ -267,7 +267,7 @@ async function loggedIn(target = app) {
 test('a refresh racing "sign out everywhere" on a server whose clock is behind still ends', async () => {
     const u = await loggedIn();
     const g = gate(app.state.storage.sessionRepository.model, 'create', { when: 'before' });
-    const refreshing = post(app.baseUrl, '/refresh', { refreshToken: u.refreshToken });
+    const refreshing = post(app.baseUrl, '/session/refresh', { refreshToken: u.refreshToken });
     await g.reached;
     g.restore();
     await withClockOffset(-5 * 60_000, () => revokeAllUserSessions(app.state, u.userId));
@@ -301,7 +301,7 @@ test('the rotation time the reuse grace period is measured from is the database\
     // A server whose clock ran ahead used to stamp the rotation in the future, so a replay of the old
     // token stayed "within the grace period" — and unpunished — for as long as the clocks disagreed.
     const u = await loggedIn();
-    await withClockOffset(5 * 60_000, () => post(app.baseUrl, '/refresh', { refreshToken: u.refreshToken }));
+    await withClockOffset(5 * 60_000, () => post(app.baseUrl, '/session/refresh', { refreshToken: u.refreshToken }));
     const row = await app.state.storage.sessionRepository.findByRefreshTokenHash(hashOpaqueToken(app.state, u.refreshToken, HASH_PURPOSES.REFRESH_TOKEN));
     assert.equal(row.revokeReason, 'rotated');
     assert.ok(Math.abs(new Date(row.revokedAt).getTime() - Date.now()) < 60_000, `revokedAt ${new Date(row.revokedAt).toISOString()}`);
@@ -310,12 +310,12 @@ test('the rotation time the reuse grace period is measured from is the database\
 test('a replay after the grace period revokes the family (grace measured by the database)', async () => {
     await withTemporaryApp({ config: { session: { refreshReuseGraceSeconds: 1 } } }, async (temp) => {
         const u = await loggedIn(temp);
-        const rotated = await (await post(temp.baseUrl, '/refresh', { refreshToken: u.refreshToken })).json();
-        assert.equal((await post(temp.baseUrl, '/refresh', { refreshToken: u.refreshToken })).status, 401, 'replay within the grace: refused');
+        const rotated = await (await post(temp.baseUrl, '/session/refresh', { refreshToken: u.refreshToken })).json();
+        assert.equal((await post(temp.baseUrl, '/session/refresh', { refreshToken: u.refreshToken })).status, 401, 'replay within the grace: refused');
         assert.ok(await temp.state.storage.sessionRepository.rotatedWithin(hashOpaqueToken(temp.state, u.refreshToken, HASH_PURPOSES.REFRESH_TOKEN), 1));
         await new Promise((r) => setTimeout(r, 1500));
-        assert.equal((await post(temp.baseUrl, '/refresh', { refreshToken: u.refreshToken })).status, 401, 'the replay');
-        assert.equal((await post(temp.baseUrl, '/refresh', { refreshToken: rotated.refreshToken })).status, 401, 'the family was revoked');
+        assert.equal((await post(temp.baseUrl, '/session/refresh', { refreshToken: u.refreshToken })).status, 401, 'the replay');
+        assert.equal((await post(temp.baseUrl, '/session/refresh', { refreshToken: rotated.refreshToken })).status, 401, 'the family was revoked');
     });
 });
 
@@ -323,32 +323,35 @@ test('the session exempted by "sign out other sessions" survives it repeatedly; 
     const keep = await loggedIn();
     const other = await (await post(app.baseUrl, '/login', { email: keep.email, password })).json();
     await revokeOtherUserSessions(app.state, keep.userId, { exceptJti: jtiOf(keep.accessToken) });
-    const once = await (await post(app.baseUrl, '/refresh', { refreshToken: keep.refreshToken })).json();
+    const once = await (await post(app.baseUrl, '/session/refresh', { refreshToken: keep.refreshToken })).json();
     assert.ok(once.refreshToken);
     await revokeOtherUserSessions(app.state, keep.userId, { exceptJti: jtiOf(once.accessToken) });
     await revokeOtherUserSessions(app.state, keep.userId, { exceptJti: jtiOf(once.accessToken) });
-    assert.equal((await post(app.baseUrl, '/refresh', { refreshToken: once.refreshToken })).status, 200);
-    assert.equal((await post(app.baseUrl, '/refresh', { refreshToken: other.refreshToken })).status, 401);
+    assert.equal((await post(app.baseUrl, '/session/refresh', { refreshToken: once.refreshToken })).status, 200);
+    assert.equal((await post(app.baseUrl, '/session/refresh', { refreshToken: other.refreshToken })).status, 401);
 });
 
 // ── review findings ──────────────────────────────────────────────────────────
 
+/** The refresh cookie and its binding, from a sign-in response — what the browser sends to /session/*. */
+const refreshCookiesOf = (res) => res.headers.getSetCookie().filter((c) => /^__Secure-refresh_token=|^__Host-refresh_binding=/.test(c)).map((c) => c.split(';')[0]).join('; ');
+
 test('end-session recognises the browser session from the refresh cookie alone (access cookie expired)', async () => {
     const email = await registered();
     const login = await post(app.baseUrl, '/login', { email, password }, { Origin: ISSUER_ORIGIN });
-    const refreshCookie = login.headers.getSetCookie().find((c) => c.includes('refresh_token=')).split(';')[0];
+    const refreshCookie = refreshCookiesOf(login);
 
-    const asked = await fetch(`${app.baseUrl}/oidc/end-session`, { headers: { Cookie: refreshCookie } });
+    const asked = await fetch(`${app.baseUrl}/session/end`, { headers: { Cookie: refreshCookie } });
     assert.deepEqual(await asked.json(), { action: 'logout_confirmation_required' });
-    assert.equal((await post(app.baseUrl, '/refresh', {}, { Cookie: refreshCookie, Origin: ISSUER_ORIGIN })).status, 200, 'the GET ended nothing');
+    assert.equal((await post(app.baseUrl, '/session/refresh', {}, { Cookie: refreshCookie, Origin: ISSUER_ORIGIN })).status, 200, 'the GET ended nothing');
 
     // That refresh rotated the cookie: use the new one.
     const again = await post(app.baseUrl, '/login', { email, password }, { Origin: ISSUER_ORIGIN });
-    const live = again.headers.getSetCookie().find((c) => c.includes('refresh_token=')).split(';')[0];
-    const confirmed = await post(app.baseUrl, '/oidc/end-session', {}, { Cookie: live, Origin: ISSUER_ORIGIN });
+    const live = refreshCookiesOf(again);
+    const confirmed = await post(app.baseUrl, '/session/end', {}, { Cookie: live, Origin: ISSUER_ORIGIN });
     assert.equal(confirmed.status, 200);
-    assert.ok(confirmed.headers.getSetCookie().some((c) => c.startsWith('__Host-refresh_token=;')), 'cookies cleared');
-    assert.equal((await post(app.baseUrl, '/refresh', {}, { Cookie: live, Origin: ISSUER_ORIGIN })).status, 401, 'the session ended');
+    assert.ok(confirmed.headers.getSetCookie().some((c) => c.startsWith('__Secure-refresh_token=;')), 'cookies cleared');
+    assert.equal((await post(app.baseUrl, '/session/refresh', {}, { Cookie: live, Origin: ISSUER_ORIGIN })).status, 401, 'the session ended');
 });
 
 async function mfaUser() {

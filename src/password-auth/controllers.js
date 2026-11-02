@@ -13,7 +13,7 @@ import { ipKey, emailKey } from '../rate-limit/keys.js';
 import { withAttemptBudget } from '../security/attempt-budget.js';
 import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { effectiveStatus, isActiveAccount, isPasswordLocked } from '../utils/account-status.js';
-import { sessionCookieName, readSessionCookie, cookiesAreSecure, hostCookieName, readCookie } from '../utils/cookies.js';
+import { sessionCookieName, cookiesAreSecure, hostCookieName, readCookie, refreshCookieNames, sessionCookiePath, refreshCookieBinding, readRefreshCookie } from '../utils/cookies.js';
 import { bindLoginChallenge } from '../oauth2/login-challenge.js';
 
 function cookieOptions(state) {
@@ -114,12 +114,14 @@ async function isNewDeviceForUser(state, { user, deviceInfo, deviceFingerprint, 
     }
 }
 
-/** Clears both session cookies with the attributes they were set with — a clear without the same `domain`/`path` leaves a domain cookie in place. */
-function clearSessionCookies(res, state) {
+/** Clears the session cookies with the attributes they were set with — a clear without the same `domain`/`path` leaves a domain cookie in place. */
+function clearSessionCookies(req, res, state) {
     const { httpOnly, secure, sameSite, path, domain } = cookieOptions(state);
     const opts = { httpOnly, secure, sameSite, path, ...(domain ? { domain } : {}) };
+    const names = refreshCookieNames(state);
     res.clearCookie(sessionCookieName(state, COOKIE_NAMES.ACCESS_TOKEN), opts);
-    res.clearCookie(sessionCookieName(state, COOKIE_NAMES.REFRESH_TOKEN), opts);
+    res.clearCookie(names.token, { ...opts, path: sessionCookiePath(req) });
+    res.clearCookie(names.binding, opts);
 }
 
 /**
@@ -137,10 +139,13 @@ function refreshTokenInBody(state, req, value) {
     return { refreshToken: value };
 }
 
-function setSessionCookies(res, state, { accessToken, refreshTokenValue, refreshExpiresAt }) {
+/** The access-token cookie (`Path=/`), and the refresh-token cookie scoped to the session endpoints with its binding (see readRefreshCookie). */
+function setSessionCookies(req, res, state, { accessToken, refreshTokenValue, refreshExpiresAt }) {
     const opts = cookieOptions(state);
+    const names = refreshCookieNames(state);
     res.cookie(sessionCookieName(state, COOKIE_NAMES.ACCESS_TOKEN), accessToken.token, { ...opts, expires: accessToken.expiresAt });
-    res.cookie(sessionCookieName(state, COOKIE_NAMES.REFRESH_TOKEN), refreshTokenValue, { ...opts, expires: refreshExpiresAt });
+    res.cookie(names.token, refreshTokenValue, { ...opts, path: sessionCookiePath(req), expires: refreshExpiresAt });
+    res.cookie(names.binding, refreshCookieBinding(state, refreshTokenValue), { ...opts, expires: refreshExpiresAt });
 }
 
 // ── Register ────────────────────────────────────────────────────────────────
@@ -432,7 +437,7 @@ export async function loginHandler(req, res, next) {
 
         await auditLog(state.logger, state.hooks, 'LOGIN', { userId: String(user.id), email });
 
-        setSessionCookies(res, state, session);
+        setSessionCookies(req, res, state, session);
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,
@@ -532,12 +537,13 @@ export async function refreshTokenHandler(req, res, next) {
         const state = getState();
         await enforceRateLimit(state, `refresh:ip:${ipKey(req.ip)}`, state.config.rateLimiting.refreshToken);
 
-        // A token in the body is explicit and wins over the cookie.
-        const refreshTokenValue = req.body?.refreshToken || readSessionCookie(state, req, COOKIE_NAMES.REFRESH_TOKEN);
-        if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required' });
-        // Checked for a body token too: /refresh sets session cookies, so a form posting the ATTACKER's
-        // refresh token from a sibling origin would sign the victim's browser into the attacker's account.
+        // Checked first, and for a body token too: /session/refresh sets session cookies, so a form posting
+        // the ATTACKER's refresh token from a sibling origin would sign the victim's browser into the
+        // attacker's account.
         assertTrustedOrigin(state, req);
+        // A token in the body is explicit and wins over the cookie.
+        const refreshTokenValue = req.body?.refreshToken || readRefreshCookie(state, req);
+        if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required' });
 
         const tokenHash = await resolveRefreshTokenHash(state, refreshTokenValue);
         // Everything that can refuse or fail runs BEFORE the token is consumed: a refusal (an inactive
@@ -610,7 +616,7 @@ export async function refreshTokenHandler(req, res, next) {
 
         await auditLog(state.logger, state.hooks, 'TOKEN_REFRESHED', { userId: String(user.id) });
 
-        setSessionCookies(res, state, { accessToken, refreshTokenValue: newRefreshTokenValue, refreshExpiresAt });
+        setSessionCookies(req, res, state, { accessToken, refreshTokenValue: newRefreshTokenValue, refreshExpiresAt });
         res.json({ accessToken: accessToken.token, accessTokenExpiresAt: accessToken.expiresAt, ...refreshTokenInBody(state, req, newRefreshTokenValue), refreshTokenExpiresAt: refreshExpiresAt });
     } catch (err) {
         next(err);
@@ -623,7 +629,7 @@ export async function logoutHandler(req, res, next) {
         // Every browser request, body token or not: logout clears the session cookies, so a cross-site
         // form posting any token would otherwise sign the victim out (logout CSRF).
         assertTrustedOrigin(state, req);
-        const refreshTokenValue = req.body?.refreshToken || readSessionCookie(state, req, COOKIE_NAMES.REFRESH_TOKEN);
+        const refreshTokenValue = req.body?.refreshToken || readRefreshCookie(state, req);
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required to log out' });
 
         const tokenHash = await resolveRefreshTokenHash(state, refreshTokenValue);
@@ -633,7 +639,7 @@ export async function logoutHandler(req, res, next) {
         }
 
         await auditLog(state.logger, state.hooks, 'LOGOUT', { userId: String(existing?.user ?? req.auth?.userId ?? 'unknown') });
-        clearSessionCookies(res, state);
+        clearSessionCookies(req, res, state);
         res.json({ status: 'ok' });
     } catch (err) {
         next(err);

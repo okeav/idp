@@ -29,7 +29,7 @@ test('refresh rotates the token pair and invalidates the old refresh token', asy
     const email = uniqueEmail('refresh');
     const { refreshToken: firstRefresh, accessToken: firstAccess } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
 
-    const refreshRes = await fetch(`${app.baseUrl}/refresh`, {
+    const refreshRes = await fetch(`${app.baseUrl}/session/refresh`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refreshToken: firstRefresh }),
     });
@@ -41,7 +41,7 @@ test('refresh rotates the token pair and invalidates the old refresh token', asy
     assert.notEqual(secondRefresh, firstRefresh, 'refresh should rotate to a new refresh token');
 
     // Reusing the now-rotated-away refresh token must fail.
-    const reuseRes = await fetch(`${app.baseUrl}/refresh`, {
+    const reuseRes = await fetch(`${app.baseUrl}/session/refresh`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refreshToken: firstRefresh }),
     });
@@ -49,7 +49,7 @@ test('refresh rotates the token pair and invalidates the old refresh token', asy
     assert.equal((await reuseRes.json()).error, 'INVALID_REFRESH_TOKEN');
 
     // The rotated-to token should still work.
-    const followUpRes = await fetch(`${app.baseUrl}/refresh`, {
+    const followUpRes = await fetch(`${app.baseUrl}/session/refresh`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refreshToken: secondRefresh }),
     });
@@ -60,13 +60,13 @@ test('logout revokes the session; the refresh token fails on next refresh attemp
     const email = uniqueEmail('logout');
     const { refreshToken } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
 
-    const logoutRes = await fetch(`${app.baseUrl}/logout`, {
+    const logoutRes = await fetch(`${app.baseUrl}/session/logout`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refreshToken }),
     });
     assert.equal(logoutRes.status, 200);
 
-    const refreshAfterLogout = await fetch(`${app.baseUrl}/refresh`, {
+    const refreshAfterLogout = await fetch(`${app.baseUrl}/session/refresh`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refreshToken }),
     });
@@ -81,14 +81,14 @@ test('logout/all revokes every session for the user', async () => {
     const secondLoginRes = await fetch(`${app.baseUrl}/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
     const second = await secondLoginRes.json();
 
-    const logoutAllRes = await fetch(`${app.baseUrl}/logout/all`, {
+    const logoutAllRes = await fetch(`${app.baseUrl}/session/logout/all`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${first.accessToken}` },
     });
     assert.equal(logoutAllRes.status, 200);
 
     for (const rt of [first.refreshToken, second.refreshToken]) {
-        const res = await fetch(`${app.baseUrl}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken: rt }) });
+        const res = await fetch(`${app.baseUrl}/session/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken: rt }) });
         assert.equal(res.status, 401, 'every session should be revoked after logout/all');
     }
 });
@@ -102,7 +102,7 @@ test('with reresolveClaimsOnRefresh:false, /refresh carries forward the login-ti
 
         role = 'admin'; // simulate e.g. an admin changing this user's role mid-session
 
-        const refreshRes = await fetch(`${tempApp.baseUrl}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }) });
+        const refreshRes = await fetch(`${tempApp.baseUrl}/session/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }) });
         const { accessToken: secondAccess } = await refreshRes.json();
         assert.equal((await verifyAccessToken(secondAccess)).claims.role, 'member', 'stale claims carried forward — role change not reflected until next login');
     });
@@ -119,7 +119,7 @@ test('config.session.reresolveClaimsOnRefresh:true makes /refresh re-derive clai
 
             role = 'admin';
 
-            const refreshRes = await fetch(`${tempApp.baseUrl}/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }) });
+            const refreshRes = await fetch(`${tempApp.baseUrl}/session/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken }) });
             const { accessToken: secondAccess } = await refreshRes.json();
             assert.equal((await verifyAccessToken(secondAccess)).claims.role, 'admin', 'role change should take effect on the very next refresh');
         }

@@ -105,7 +105,7 @@ export async function verifyMfaWebauthnChallengeHandler(req, res, next) {
 
         await auditLog(state.logger, state.hooks, 'MFA_VERIFIED', { userId, method: 'webauthn' });
 
-        setSessionCookies(res, state, session);
+        setSessionCookies(req, res, state, session);
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,

@@ -114,7 +114,7 @@ export async function verifyMagicLinkHandler(req, res, next) {
 
         await auditLog(state.logger, state.hooks, 'MAGIC_LINK_LOGIN', { userId: String(user.id), isNewUser });
 
-        setSessionCookies(res, state, session);
+        setSessionCookies(req, res, state, session);
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,

@@ -63,25 +63,25 @@ async function registered() {
 
 test('a refresh token issued under the old secret refreshes after rotation; its successor is hashed under the new one', async () => {
     const u = await registered();
-    const res = await post(rotated.baseUrl, '/refresh', { refreshToken: u.refreshToken });
+    const res = await post(rotated.baseUrl, '/session/refresh', { refreshToken: u.refreshToken });
     assert.equal(res.status, 200);
     const { refreshToken } = await res.json();
     const row = await rotatedState.storage.sessionRepository.findByRefreshTokenHash(hashOpaqueToken(rotatedState, refreshToken, HASH_PURPOSES.REFRESH_TOKEN));
     assert.ok(row, 'stored under the new key');
     // The old token was rotated: presenting it again is still recognised as reuse.
-    assert.equal((await post(rotated.baseUrl, '/refresh', { refreshToken: u.refreshToken })).status, 401);
+    assert.equal((await post(rotated.baseUrl, '/session/refresh', { refreshToken: u.refreshToken })).status, 401);
 });
 
 test('without the old secret listed, everything hashed under it stops verifying', async () => {
     const u = await registered();
-    assert.equal((await post(forgetful.baseUrl, '/refresh', { refreshToken: u.refreshToken })).status, 401);
-    assert.equal((await post(original.baseUrl, '/refresh', { refreshToken: u.refreshToken })).status, 200, 'still a good token');
+    assert.equal((await post(forgetful.baseUrl, '/session/refresh', { refreshToken: u.refreshToken })).status, 401);
+    assert.equal((await post(original.baseUrl, '/session/refresh', { refreshToken: u.refreshToken })).status, 200, 'still a good token');
 });
 
 test('logout of an old-secret refresh token works after rotation', async () => {
     const u = await registered();
-    assert.equal((await post(rotated.baseUrl, '/logout', { refreshToken: u.refreshToken })).status, 200);
-    assert.equal((await post(original.baseUrl, '/refresh', { refreshToken: u.refreshToken })).status, 401, 'it was revoked');
+    assert.equal((await post(rotated.baseUrl, '/session/logout', { refreshToken: u.refreshToken })).status, 200);
+    assert.equal((await post(original.baseUrl, '/session/refresh', { refreshToken: u.refreshToken })).status, 401, 'it was revoked');
 });
 
 test('email-verification links and codes, reset links and magic links from before the rotation still work', async () => {

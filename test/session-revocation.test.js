@@ -62,7 +62,7 @@ async function login(instance, email, pw = password) {
 }
 
 const me = (instance, accessToken) => fetch(`${instance.baseUrl}/me`, { headers: { Authorization: `Bearer ${accessToken}` } });
-const refresh = (instance, refreshToken) => fetch(`${instance.baseUrl}/refresh`, json({ refreshToken }));
+const refresh = (instance, refreshToken) => fetch(`${instance.baseUrl}/session/refresh`, json({ refreshToken }));
 
 async function assertRefused(res, label) {
     const body = await res.json();
@@ -76,7 +76,7 @@ test('after logout-all on instance A, an existing access token is refused on ins
 
     assert.equal((await me(instanceB, first.accessToken)).status, 200, 'tokens work across instances before logout');
 
-    const out = await fetch(`${instanceA.baseUrl}/logout/all`, { method: 'POST', headers: { Authorization: `Bearer ${first.accessToken}` } });
+    const out = await fetch(`${instanceA.baseUrl}/session/logout/all`, { method: 'POST', headers: { Authorization: `Bearer ${first.accessToken}` } });
     assert.equal(out.status, 200);
 
     await assertRefused(await me(instanceB, first.accessToken), 'B, first device');
@@ -135,7 +135,7 @@ test('control: with session.verifyOnEachRequest off, the other instance only has
     stateA.config.session.verifyOnEachRequest = false;
     stateB.config.session.verifyOnEachRequest = false;
     try {
-        await fetch(`${instanceA.baseUrl}/logout/all`, { method: 'POST', headers: { Authorization: `Bearer ${session.accessToken}` } });
+        await fetch(`${instanceA.baseUrl}/session/logout/all`, { method: 'POST', headers: { Authorization: `Bearer ${session.accessToken}` } });
         assert.equal((await me(instanceB, session.accessToken)).status, 200, 'without the per-request check the token lives on until expiry');
         await assertRefused(await refresh(instanceB, session.refreshToken), 'refresh still checks storage');
     } finally {
@@ -237,6 +237,6 @@ test('OAuth2 access tokens: authorization-code tokens are revocable through thei
     const userinfo = () => fetch(`${instanceB.baseUrl}/userinfo`, { headers: { Authorization: `Bearer ${tokens.access_token}` } });
     assert.equal((await userinfo()).status, 200);
 
-    await fetch(`${instanceA.baseUrl}/logout/all`, { method: 'POST', headers: { Authorization: `Bearer ${user.accessToken}` } });
+    await fetch(`${instanceA.baseUrl}/session/logout/all`, { method: 'POST', headers: { Authorization: `Bearer ${user.accessToken}` } });
     await assertRefused(await userinfo(), 'RP access token after the user logged out everywhere');
 });

@@ -11,7 +11,7 @@ export function openidConfigurationHandler(req, res) {
         token_endpoint: `${issuer}/oauth2/token`,
         userinfo_endpoint: `${issuer}/userinfo`,
         jwks_uri: `${issuer}/.well-known/jwks.json`,
-        end_session_endpoint: `${issuer}/oidc/end-session`,
+        end_session_endpoint: `${issuer}/session/end`,
         revocation_endpoint: `${issuer}/oauth2/token/revoke`,
         introspection_endpoint: `${issuer}/oauth2/token/introspect`,
         response_types_supported: ['code'],

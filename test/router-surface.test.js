@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { buildTestApp, uniqueEmail } from './helpers/build-test-app.js';
 import { serve, json } from './helpers/serve.js';
 import { buildRouter } from '../src/routes/build-router.js';
+import { refreshCookieBinding } from '../src/utils/cookies.js';
+
+/** The refresh cookie as the browser holds it: the token (Path=/session) and its host-only binding. */
+const refreshCookies = (token) => `__Secure-refresh_token=${token}; __Host-refresh_binding=${refreshCookieBinding(app.state, token)}`;
 
 // Issue: buildRouter() used to mount /oauth2/clients* (register, list, get,
 // update, approve, rotate-secret, deactivate) with no authentication at all.
@@ -134,19 +138,19 @@ test('POST /logout accepts the refresh token from the httpOnly cookie alone (no 
     await fetch(`${app.baseUrl}/register/verify-email`, json({ email, code }));
     const { refreshToken } = await (await fetch(`${app.baseUrl}/login`, json({ email, password }))).json();
 
-    const res = await fetch(`${app.baseUrl}/logout`, { method: 'POST', headers: { Cookie: `__Host-refresh_token=${refreshToken}` } });
+    const res = await fetch(`${app.baseUrl}/session/logout`, { method: 'POST', headers: { Cookie: refreshCookies(refreshToken) } });
     assert.equal(res.status, 200, await res.text());
 
-    const reuse = await fetch(`${app.baseUrl}/refresh`, json({ refreshToken }));
+    const reuse = await fetch(`${app.baseUrl}/session/refresh`, json({ refreshToken }));
     assert.equal(reuse.status, 401, 'the cookie-identified session must actually be revoked');
 
     // An empty JSON body with the cookie works too, and a body token still works.
     const { refreshToken: second } = await (await fetch(`${app.baseUrl}/login`, json({ email, password }))).json();
-    assert.equal((await fetch(`${app.baseUrl}/logout`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: `__Host-refresh_token=${second}` }, body: '{}' })).status, 200);
+    assert.equal((await fetch(`${app.baseUrl}/session/logout`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: refreshCookies(second) }, body: '{}' })).status, 200);
     const { refreshToken: third } = await (await fetch(`${app.baseUrl}/login`, json({ email, password }))).json();
-    assert.equal((await fetch(`${app.baseUrl}/logout`, json({ refreshToken: third }))).status, 200);
+    assert.equal((await fetch(`${app.baseUrl}/session/logout`, json({ refreshToken: third }))).status, 200);
 
     // Neither cookie nor body is still a 400, and unknown fields are still rejected.
-    assert.equal((await fetch(`${app.baseUrl}/logout`, { method: 'POST' })).status, 400);
-    assert.equal((await fetch(`${app.baseUrl}/logout`, json({ refreshToken: third, extra: 1 }))).status, 400);
+    assert.equal((await fetch(`${app.baseUrl}/session/logout`, { method: 'POST' })).status, 400);
+    assert.equal((await fetch(`${app.baseUrl}/session/logout`, json({ refreshToken: third, extra: 1 }))).status, 400);
 });

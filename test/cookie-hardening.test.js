@@ -31,16 +31,20 @@ async function login(a = app) {
     return { email, setCookie, cookies, ...(await res.json()) };
 }
 
-test('session cookies are __Host- cookies: host-only, Secure, Path=/', async () => {
+test('session cookies: __Host- access token and refresh binding (Path=/); the refresh token itself only for /session', async () => {
     const u = await login();
     const access = u.setCookie.find((c) => c.startsWith('__Host-access_token='));
-    const refresh = u.setCookie.find((c) => c.startsWith('__Host-refresh_token='));
-    for (const c of [access, refresh]) {
+    const binding = u.setCookie.find((c) => c.startsWith('__Host-refresh_binding='));
+    const refresh = u.setCookie.find((c) => c.startsWith('__Secure-refresh_token='));
+    for (const c of [access, binding, refresh]) {
         assert.ok(c, u.setCookie.join(' | '));
         assert.match(c, /;\s*Secure/i);
-        assert.match(c, /;\s*Path=\//i);
+        assert.match(c, /;\s*HttpOnly/i);
         assert.doesNotMatch(c, /;\s*Domain=/i);
     }
+    for (const c of [access, binding]) assert.match(c, /;\s*Path=\/(;|$)/i);
+    assert.match(refresh, /;\s*Path=\/session(;|$)/i);
+    assert.notEqual(u.cookies['__Host-refresh_binding'], u.refreshToken, 'the binding is not the token');
 });
 
 test('a planted unprefixed cookie is ignored; an explicit Bearer header wins over any cookie', async () => {
@@ -57,10 +61,10 @@ test('a planted unprefixed cookie is ignored; an explicit Bearer header wins ove
 test('/refresh: a token in the body wins over the cookie', async () => {
     const victim = await login();
     const attacker = await login();
-    const res = await post('/refresh', { refreshToken: victim.refreshToken }, { Cookie: `__Host-refresh_token=${attacker.refreshToken}` });
+    const res = await post('/session/refresh', { refreshToken: victim.refreshToken }, { Cookie: `__Host-refresh_token=${attacker.refreshToken}` });
     assert.equal(res.status, 200);
     // The attacker's token was not the one rotated.
-    assert.equal((await post('/refresh', { refreshToken: attacker.refreshToken })).status, 200);
+    assert.equal((await post('/session/refresh', { refreshToken: attacker.refreshToken })).status, 200);
 });
 
 test('with cookies.domain: __Secure- names, and a request carrying a session cookie twice is refused', async () => {
@@ -69,7 +73,7 @@ test('with cookies.domain: __Secure- names, and a request carrying a session coo
         assert.ok(u.setCookie.some((c) => c.startsWith('__Secure-refresh_token=') && /Domain=idp\.test\.local/i.test(c)), u.setCookie.join(' | '));
 
         const attacker = await login(temp);
-        const tossed = await fetch(`${temp.baseUrl}/refresh`, {
+        const tossed = await fetch(`${temp.baseUrl}/session/refresh`, {
             method: 'POST',
             headers: { Cookie: `__Secure-refresh_token=${attacker.refreshToken}; __Secure-refresh_token=${u.refreshToken}` },
         });
@@ -78,20 +82,20 @@ test('with cookies.domain: __Secure- names, and a request carrying a session coo
         const me = await fetch(`${temp.baseUrl}/me`, { headers: { Cookie: `__Secure-access_token=${attacker.accessToken}; __Secure-access_token=${u.accessToken}` } });
         assert.equal(me.status, 400);
         // Neither token was consumed.
-        assert.equal((await post('/refresh', { refreshToken: u.refreshToken }, {}, temp.baseUrl)).status, 200);
+        assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken }, {}, temp.baseUrl)).status, 200);
     });
 });
 
 test('logout refuses a cross-origin browser request even with a token in the body (logout CSRF), and clears nothing', async () => {
     const u = await login();
-    const forged = await fetch(`${app.baseUrl}/logout`, {
+    const forged = await fetch(`${app.baseUrl}/session/logout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: 'https://evil.example.com', Cookie: `__Host-refresh_token=${u.refreshToken}` },
         body: new URLSearchParams({ refreshToken: 'junk' }).toString(),
     });
     assert.equal(forged.status, 403);
     assert.equal(forged.headers.getSetCookie().length, 0);
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 200, 'the session is intact');
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 200, 'the session is intact');
 });
 
 test('the SSO binding cookie is always host-only and __Host- when Secure, even with cookies.domain', () => {

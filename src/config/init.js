@@ -255,7 +255,7 @@ function assertCookieConfig(cookies = {}) {
 }
 
 /**
- * The end-session confirmation page POSTs back to /oidc/end-session, which only accepts that from a
+ * The end-session confirmation page POSTs back to /session/end, which only accepts that from a
  * trusted origin — so the page must be on one (and https, like every other URL the IdP sends users to).
  */
 function assertClockConfig(clock) {

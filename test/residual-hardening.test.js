@@ -63,9 +63,9 @@ test('enabling MFA signs out the account\'s other sessions, and keeps the curren
     assert.equal((await post('/me/mfa/confirm', { code: await generateTotp({ secret }) }, auth)).status, 200);
 
     assert.equal((await fetch(`${app.baseUrl}/me`, { headers: bearer(other.accessToken) })).status, 401, 'the other session ended');
-    assert.equal((await post('/refresh', { refreshToken: other.refreshToken })).status, 401);
+    assert.equal((await post('/session/refresh', { refreshToken: other.refreshToken })).status, 401);
     assert.equal((await fetch(`${app.baseUrl}/me`, { headers: auth })).status, 200, 'the enrolling session continues');
-    assert.equal((await post('/refresh', { refreshToken: u.refreshToken })).status, 200);
+    assert.equal((await post('/session/refresh', { refreshToken: u.refreshToken })).status, 200);
 });
 
 test('MFA encryption keys must be exactly the base64 of 32 bytes — trailing garbage is refused', () => {
@@ -90,7 +90,7 @@ test('a malformed session id is a 404, and a JSON-typed cookie is no token (both
 
     // cookie-parser turns `j:{...}` into an object.
     const jsonCookie = `__Host-refresh_token=${encodeURIComponent('j:{"$ne":null}')}`;
-    assert.equal((await fetch(`${app.baseUrl}/refresh`, { method: 'POST', headers: { Cookie: jsonCookie } })).status, 400);
+    assert.equal((await fetch(`${app.baseUrl}/session/refresh`, { method: 'POST', headers: { Cookie: jsonCookie } })).status, 400);
     assert.equal((await fetch(`${app.baseUrl}/me`, { headers: { Cookie: `__Host-access_token=${encodeURIComponent('j:{"a":1}')}` } })).status, 401);
 });
 
@@ -106,7 +106,7 @@ test('by default /refresh re-derives claims, so a role change takes effect withi
         assert.equal((await verifyAccessToken(login.accessToken)).claims.role, 'admin');
 
         role = 'member'; // demoted
-        const refreshed = await (await fetch(`${temp.baseUrl}/refresh`, json({ refreshToken: login.refreshToken }))).json();
+        const refreshed = await (await fetch(`${temp.baseUrl}/session/refresh`, json({ refreshToken: login.refreshToken }))).json();
         assert.equal((await verifyAccessToken(refreshed.accessToken)).claims.role, 'member');
     });
 });
