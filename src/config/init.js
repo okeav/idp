@@ -207,6 +207,9 @@ function assertIssuerAndTtls(resolved, logger) {
 
 /** A typo in sameSite used to surface as a 500 on every login; SameSite=None without Secure is dropped by browsers. */
 function assertCookieConfig(cookies = {}) {
+    // Normalised in place: 'Lax' (e.g. from IDP_COOKIE_SAME_SITE) means 'lax'; an origin's host is case-insensitive.
+    if (typeof cookies.sameSite === 'string') cookies.sameSite = cookies.sameSite.toLowerCase();
+    if (Array.isArray(cookies.trustedOrigins)) cookies.trustedOrigins = cookies.trustedOrigins.map((o) => (typeof o === 'string' && safeOrigin(o) && safeOrigin(o).toLowerCase() === o.toLowerCase() ? safeOrigin(o) : o));
     if (cookies.sameSite !== undefined && !['lax', 'strict', 'none'].includes(cookies.sameSite)) {
         throw new Error(`config.cookies.sameSite must be 'lax', 'strict' or 'none' (got ${JSON.stringify(cookies.sameSite)})`);
     }

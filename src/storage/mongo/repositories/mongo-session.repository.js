@@ -25,7 +25,7 @@ export class MongoSessionRepository {
      */
     async findByJti(jti) {
         if (!jti) return null;
-        const doc = await this.model.findOne({ jti }).select('user expiresAt revokedAt jti familyId createdAt').lean();
+        const doc = await this.model.findOne({ jti }).select('user expiresAt revokedAt revokeReason jti familyId createdAt').lean();
         return doc ? withId(doc) : null;
     }
 
@@ -50,6 +50,12 @@ export class MongoSessionRepository {
         const jtis = (await this.model.find(filter).select('jti').lean()).map((d) => d.jti).filter(Boolean);
         const result = await this.model.updateMany(filter, { revokedAt: now, revokeReason: reason });
         return { revokedCount: result.modifiedCount ?? 0, jtis };
+    }
+
+    /** Whether the family still has a live (unrevoked, unexpired) row. */
+    async isFamilyLive(familyId) {
+        if (!familyId) return false;
+        return Boolean(await this.model.exists({ familyId, revokedAt: null, expiresAt: { $gt: new Date() } }));
     }
 
     /** Whether the family was revoked as a whole (see revokeFamily). */

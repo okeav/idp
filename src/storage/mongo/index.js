@@ -60,6 +60,11 @@ export async function createMongoStorage(mongoConfig, emailDeps) {
         await assertTransactionsSupported(connection, userModel);
     }
 
+    // Several guarantees rest on unique indexes (one live reset/magic link per user, one key per kid,
+    // one user per email): build them now and fail the boot if one can't be built (e.g. duplicates
+    // left by an older version), rather than running without the guarantee.
+    await Promise.all([userModel, sessionModel, authorizationCodeModel, consentModel, oauthClientModel, verificationTokenModel, serviceKeyModel, credentialModel, attemptCounterModel].map((m) => m.init()));
+
     const sessionRepository = new MongoSessionRepository(sessionModel, accessTokenAuditModel, connection);
     // The composite transactional method needs the user model to update
     // lastLoginAt inside the same transaction — injected here rather than

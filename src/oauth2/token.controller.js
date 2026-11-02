@@ -3,7 +3,7 @@ import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { GRANT_TYPES, CACHE_KEY_PREFIXES, SESSION_KINDS, ACCESS_TOKEN_KINDS } from '../config/constants.js';
 import { isActiveAccount } from '../utils/account-status.js';
-import { issueOAuth2AccessToken, issueIdToken, hashOpaqueToken, generateOpaqueToken, verifyAccessToken } from '../signing/token.service.js';
+import { issueOAuth2AccessToken, issueIdToken, hashOpaqueToken, generateOpaqueToken, verifyAccessToken, clientTtl } from '../signing/token.service.js';
 import { sessionKindOf } from '../utils/session-kind.js';
 import { authenticateClient } from './client-auth.js';
 import { auditLog } from '../hooks/index.js';
@@ -60,7 +60,11 @@ async function assertCodeStillAuthorized(state, user, authCode) {
     const sessions = state.storage.sessionRepository;
     if (authCode.sessionJti && typeof sessions.findByJti === 'function') {
         const authorizing = await sessions.findByJti(authCode.sessionJti);
-        if (!authorizing || authorizing.revokedAt) throw INVALID_GRANT('Authorization code was revoked');
+        // A row retired by a normal refresh is fine as long as its session carries on (a live row in
+        // the same family); revoked any other way — logout, sign-out-everywhere, reuse — it is not.
+        const rotatedButLive = authorizing?.revokedAt && authorizing.revokeReason === 'rotated'
+            && await sessions.isFamilyLive(familyOf(authorizing).familyId);
+        if (!authorizing || (authorizing.revokedAt && !rotatedButLive)) throw INVALID_GRANT('Authorization code was revoked');
     }
     const issuedAt = authCode.createdAt ? new Date(authCode.createdAt) : null;
     const revokedAt = user.sessionsRevokedAt ? new Date(user.sessionsRevokedAt) : null;
@@ -147,7 +151,7 @@ async function handleAuthorizationCodeGrant(req, res) {
     const accessTokenResult = await issueOAuth2AccessToken(state, user, client, scopes);
     const refreshTokenValue = generateOpaqueToken();
     const familyCreatedAt = new Date();
-    const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, client.refreshTokenTTL || state.config.ttls.refreshToken);
+    const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, clientTtl(client, 'refreshTokenTTL', state.config.ttls.refreshToken));
 
     const refreshTokenHash = hashOpaqueToken(state, refreshTokenValue);
     await state.storage.sessionRepository.createSession({
@@ -165,7 +169,7 @@ async function handleAuthorizationCodeGrant(req, res) {
         ? await issueIdToken(state, user, client.clientId, authCode.nonce || undefined, {
             scopes,
             authTime: authCode.authTime ? Math.floor(new Date(authCode.authTime).getTime() / 1000) : undefined,
-            ttlSeconds: client.idTokenTTL || undefined,
+            ttlSeconds: clientTtl(client, 'idTokenTTL', undefined),
         })
         : null;
 
@@ -176,7 +180,7 @@ async function handleAuthorizationCodeGrant(req, res) {
         refresh_token: refreshTokenValue,
         ...(idToken ? { id_token: idToken.token } : {}),
         token_type: 'Bearer',
-        expires_in: client.accessTokenTTL || state.config.ttls.accessToken,
+        expires_in: clientTtl(client, 'accessTokenTTL', state.config.ttls.accessToken),
         scope: scopes.join(' '),
     });
 }
@@ -224,7 +228,7 @@ async function handleRefreshTokenGrant(req, res) {
     const accessTokenResult = await issueOAuth2AccessToken(state, user, client, scopes);
     const newRefreshTokenValue = generateOpaqueToken();
     const newTokenHash = hashOpaqueToken(state, newRefreshTokenValue);
-    const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, client.refreshTokenTTL || state.config.ttls.refreshToken);
+    const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, clientTtl(client, 'refreshTokenTTL', state.config.ttls.refreshToken));
 
     await state.storage.sessionRepository.createSession({
         user: user.id, tokenHash: newTokenHash, expiresAt: refreshExpiresAt,
@@ -240,7 +244,7 @@ async function handleRefreshTokenGrant(req, res) {
 
     res.json({
         access_token: accessTokenResult.token, refresh_token: newRefreshTokenValue, token_type: 'Bearer',
-        expires_in: client.accessTokenTTL || state.config.ttls.accessToken, scope: scopes.join(' '),
+        expires_in: clientTtl(client, 'accessTokenTTL', state.config.ttls.accessToken), scope: scopes.join(' '),
     });
 }
 
@@ -275,7 +279,7 @@ async function handleClientCredentialsGrant(req, res) {
     res.json({
         access_token: accessTokenResult.token,
         token_type: 'Bearer',
-        expires_in: client.accessTokenTTL || state.config.ttls.accessToken,
+        expires_in: clientTtl(client, 'accessTokenTTL', state.config.ttls.accessToken),
         scope: requestedScopes.join(' '),
     });
 }

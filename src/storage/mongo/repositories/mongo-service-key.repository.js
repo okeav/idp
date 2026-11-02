@@ -16,12 +16,17 @@ export class MongoServiceKeyRepository {
      * revoked — i.e. compromised — key was live again at the service's next restart.
      */
     async upsertByKid({ kid, name, publicKey, region }) {
-        const now = new Date();
         try {
+            // Times from the DATABASE clock ($$NOW), not this instance's: registeredAt orders concurrent
+            // first registrations of one name (the earliest keeps it), which only works if it reflects
+            // the order the inserts actually happened in.
             return await this.model.findOneAndUpdate(
                 { kid, status: { $ne: KEY_STATUS.REVOKED } },
-                { $set: { name, publicKey, status: KEY_STATUS.ACTIVE, statusChangedAt: now, region: region || 'global', lastSeenAt: now }, $setOnInsert: { registeredAt: now } },
-                { upsert: true, returnDocument: 'after' }
+                [{ $set: {
+                    kid, name, publicKey, status: KEY_STATUS.ACTIVE, region: region || 'global',
+                    statusChangedAt: '$$NOW', lastSeenAt: '$$NOW', registeredAt: { $ifNull: ['$registeredAt', '$$NOW'] },
+                } }],
+                { upsert: true, returnDocument: 'after', setDefaultsOnInsert: false, updatePipeline: true }
             );
         } catch (err) {
             if (err?.code === 11000) return null;

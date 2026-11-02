@@ -49,6 +49,15 @@ export async function issueAccessToken(state, input, opts = {}) {
  * - `oauth2-user`  — issued to an OAuth2 client on behalf of a user (authorization_code / refresh_token grants).
  * - `oauth2-client` — a client_credentials machine token; the client itself is the subject, there is no user.
  */
+/** Upper bounds for a client's own token lifetimes (also enforced at registration; this covers older rows). */
+export const MAX_CLIENT_TTL_SECONDS = Object.freeze({ accessTokenTTL: 24 * 60 * 60, idTokenTTL: 24 * 60 * 60, refreshTokenTTL: 365 * 24 * 60 * 60 });
+
+/** A client's configured lifetime for `key`, or `fallback` — never above MAX_CLIENT_TTL_SECONDS. */
+export function clientTtl(client, key, fallback) {
+    const value = Number.isInteger(client?.[key]) && client[key] > 0 ? client[key] : fallback;
+    return value === undefined ? undefined : Math.min(value, MAX_CLIENT_TTL_SECONDS[key]);
+}
+
 export function classifyAccessToken(payload) {
     if (!payload?.client_id) return ACCESS_TOKEN_KINDS.FIRST_PARTY;
     if (payload.gty === GRANT_TYPES.CLIENT_CREDENTIALS || payload.sub === payload.client_id) return ACCESS_TOKEN_KINDS.OAUTH2_CLIENT;
@@ -128,7 +137,7 @@ export async function issueIdToken(state, user, audience, nonce, opts = {}) {
 
 export async function issueOAuth2AccessToken(state, subject, client, scopes, { sessionless = false, grantType } = {}) {
     const now = Math.floor(Date.now() / 1000);
-    const ttl = client.accessTokenTTL || state.config.ttls.accessToken;
+    const ttl = clientTtl(client, 'accessTokenTTL', state.config.ttls.accessToken);
     const expiresAt = now + ttl;
     const [kid, key] = getActiveSigningKey(state.signingKeys);
 

@@ -40,7 +40,12 @@ const COOKIE_CONFLICT = () => new IdpError({
 function occurrences(req, name) {
     const raw = req.headers?.cookie;
     if (typeof raw !== 'string') return 0;
-    return raw.split(';').filter((part) => part.trim().startsWith(`${name}=`)).length;
+    // Compared the way the parser reads names — trimmed, up to the first "=" — so a variant such as
+    // `name =value` (which the parser also treats as `name`) counts as a second occurrence.
+    return raw.split(';').filter((part) => {
+        const eq = part.indexOf('=');
+        return eq !== -1 && part.slice(0, eq).trim() === name;
+    }).length;
 }
 
 /** The value of a cookie the IdP set; undefined when absent or not a string; throws if it occurs twice. */

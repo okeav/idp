@@ -73,7 +73,7 @@ export function authContextMiddleware(opts = {}) {
                 claims: payload.claims || {},
                 tokenKind: kind,
                 ...(payload.client_id ? { clientId: payload.client_id, scopes: String(payload.scope || '').split(' ').filter(Boolean) } : {}),
-                tokenMeta: { issuedAt: payload.iat, expiresAt: payload.exp, jti: payload.jti, authTime: payload.auth_time ?? null },
+                tokenMeta: { issuedAt: payload.iat, expiresAt: payload.exp, jti: payload.jti, authTime: payload.auth_time ?? null, sessionless: payload.sessionless === true },
             };
             next();
         } catch (err) {
@@ -100,7 +100,7 @@ const REVOKED = () => new IdpError({ code: 'TOKEN_REVOKED', httpStatus: 401, mes
  * deactivated (or deleted) client's machine tokens stop working at once, not when they expire.
  */
 async function assertClientStillActive(state, payload) {
-    if (payload.gty !== GRANT_TYPES.CLIENT_CREDENTIALS) return;
+    if (classifyAccessToken(payload) !== ACCESS_TOKEN_KINDS.OAUTH2_CLIENT) return;
     const client = await state.storage.oauthClientRepository.findByClientId(payload.client_id);
     if (!client || client.status !== OAUTH_CLIENT_STATUS.ACTIVE) throw REVOKED();
 }

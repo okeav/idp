@@ -391,6 +391,9 @@ const WRONG_PASSWORD = 'WRONG_PASSWORD';
  * compare, so its timing doesn't stand out.
  */
 async function checkPasswordWithBudget(state, user, password) {
+    // Nothing to guess (no password) or nothing to sign in to yet (pending): no budget to spend, and no
+    // "suspicious activity" mail an attacker could trigger at will. The compare still runs, for timing.
+    if (!user.passwordHash || !isActiveAccount(user)) return verifyPassword(password, user.passwordHash);
     const { maxFailedLoginAttempts, accountLockDurationMs } = state.config.security;
     const seconds = Math.ceil(accountLockDurationMs / 1000);
     let checked = false;
@@ -636,6 +639,7 @@ export async function resetPasswordHandler(req, res, next) {
         const activated = user.status === IDENTITY_STATUS.PENDING_VERIFICATION
             && await state.storage.userRepository.updateByIdIfStatus(record.user, IDENTITY_STATUS.PENDING_VERIFICATION, {
                 ...changes, status: IDENTITY_STATUS.ACTIVE, registrationContested: false,
+                mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [],
             });
         await state.attemptCounters.reset(passwordLoginKey(record.user));
         if (activated) {

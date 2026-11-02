@@ -68,6 +68,9 @@ function redirectToClient(res, state, redirectUri, params) {
     res.redirect(url.toString());
 }
 
+/** The session behind the request's token — none for a sessionless token (the public issueAccessToken export). */
+const sessionJtiOf = (req) => (req.auth?.tokenMeta?.sessionless ? null : req.auth?.tokenMeta?.jti ?? null);
+
 const consentKey = (challenge) => `${CACHE_KEY_PREFIXES.OAUTH_CONSENT}:${challenge}`;
 const INVALID_CONSENT = () => new IdpError({ code: 'INVALID_CONSENT_CHALLENGE', httpStatus: 400, message: 'Invalid or expired consent challenge — restart authorization' });
 
@@ -126,7 +129,7 @@ export async function authorizeHandler(req, res, next) {
             });
         }
 
-        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: req.auth.tokenMeta?.jti });
+        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: sessionJtiOf(req) });
         await auditLog(state.logger, state.hooks, 'OAUTH2_AUTHORIZE', { userId: req.auth.userId, clientId: client_id, scopes: requestedScopes });
         redirectToClient(res, state, redirect_uri, { code, state: oauthState });
     } catch (err) {
@@ -153,7 +156,7 @@ export async function confirmConsentHandler(req, res, next) {
         const pending = await takePendingAuthorization(state, req);
 
         await state.storage.consentRepository.upsert(req.auth.userId, pending.clientId, pending.scopes);
-        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: req.auth.tokenMeta?.jti });
+        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: sessionJtiOf(req) });
 
         await auditLog(state.logger, state.hooks, 'OAUTH2_CONSENT_GRANTED', { userId: req.auth.userId, clientId: pending.clientId, scopes: pending.scopes });
         redirectToClient(res, state, pending.redirectUri, { code, state: pending.state });
