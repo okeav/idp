@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { MAX_EMAIL_LENGTH } from '../config/constants.js';
+import { loginChallengeSchema } from '../oauth2/login-challenge.js';
 
 export const requestMagicLinkSchema = z.object({
     email: z.string().trim().toLowerCase().email('Must be a valid email address').max(MAX_EMAIL_LENGTH),
@@ -7,4 +8,5 @@ export const requestMagicLinkSchema = z.object({
 
 export const verifyMagicLinkSchema = z.object({
     token: z.string().min(1),
+    login_challenge: loginChallengeSchema.optional(),
 }).strict();

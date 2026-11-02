@@ -1,5 +1,8 @@
 import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'crypto';
+import { generate as generateTotp } from 'otplib';
+import { pkcePair } from './helpers/oauth.js';
 import { buildTestApp, withTemporaryApp, uniqueEmail, waitForHookCall, TEST_SECURITY } from './helpers/build-test-app.js';
 import { hashOpaqueToken, HASH_PURPOSES } from '../src/signing/token.service.js';
 import { json } from './helpers/serve.js';
@@ -177,4 +180,91 @@ test('at most 5 real tickets per account and code lifetime — more requests get
         assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, ticket: tickets[5] })).status, 429, 'the 6th ticket is a dummy');
         assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, ticket: tickets[4] })).status, 200, 'the 5th is real');
     });
+});
+
+// ── login challenges (prompt=login / max_age) ────────────────────────────────
+
+const redirectUri = 'https://rp.example.com/cb';
+const ADMIN = { 'x-test-admin': 'yes' };
+
+async function rpClient() {
+    const c = await (await post(app.baseUrl, '/oauth2/clients', {
+        name: 'RP', slug: `ent-${crypto.randomUUID()}`, redirectUris: [redirectUri],
+        allowedScopes: ['openid'], allowedGrants: ['authorization_code', 'refresh_token'],
+    }, ADMIN)).json();
+    await fetch(`${app.baseUrl}/oauth2/clients/${c.clientId}/approve`, { method: 'POST', headers: ADMIN });
+    return c;
+}
+
+function authorize(clientId, accessToken, extra = {}) {
+    const { challenge } = pkcePair();
+    const qs = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', scope: 'openid', code_challenge: challenge, code_challenge_method: 'S256', ...extra });
+    return fetch(`${app.baseUrl}/oauth2/authorize?${qs}`, { headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {}, redirect: 'manual' });
+}
+
+const challengeFor = async (clientId, accessToken, extra = { prompt: 'login' }) => (await (await authorize(clientId, accessToken, extra)).json()).login_challenge;
+
+test('prompt=login: a login made with the login_challenge satisfies the repeated request — once', async () => {
+    const c = await rpClient();
+    const u = await loggedIn();
+    const loginChallenge = await challengeFor(c.clientId, u.accessToken);
+    assert.ok(loginChallenge);
+
+    // A new login WITHOUT the challenge doesn't count, however recent.
+    const unbound = await (await post(app.baseUrl, '/login', { email: u.email, password })).json();
+    assert.equal((await authorize(c.clientId, unbound.accessToken, { prompt: 'login', login_challenge: loginChallenge })).status, 401);
+
+    const bound = await (await post(app.baseUrl, '/login', { email: u.email, password, login_challenge: loginChallenge })).json();
+    const res = await authorize(c.clientId, bound.accessToken, { prompt: 'login', login_challenge: loginChallenge });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).action, 'consent_required');
+    assert.equal((await authorize(c.clientId, bound.accessToken, { prompt: 'login', login_challenge: loginChallenge })).status, 401, 'single use');
+});
+
+test('a login_challenge is bound to its client and to the session that signed in for it', async () => {
+    const c = await rpClient();
+    const other = await rpClient();
+    const victim = await loggedIn();
+    const loginChallenge = await challengeFor(c.clientId, victim.accessToken);
+    const bound = await (await post(app.baseUrl, '/login', { email: victim.email, password, login_challenge: loginChallenge })).json();
+    assert.equal((await authorize(other.clientId, bound.accessToken, { prompt: 'login', login_challenge: loginChallenge })).status, 401, 'another client');
+
+    const attacker = await loggedIn();
+    assert.equal((await authorize(c.clientId, attacker.accessToken, { prompt: 'login', login_challenge: loginChallenge })).status, 401, 'another session');
+    // A second sign-in can't re-bind it.
+    const second = await (await post(app.baseUrl, '/login', { email: attacker.email, password, login_challenge: loginChallenge })).json();
+    assert.equal((await authorize(c.clientId, second.accessToken, { prompt: 'login', login_challenge: loginChallenge })).status, 401);
+    assert.equal((await authorize(c.clientId, bound.accessToken, { prompt: 'login', login_challenge: loginChallenge })).status, 200);
+});
+
+test('the challenge carries through the MFA step, and satisfies max_age too', async () => {
+    const c = await rpClient();
+    const u = await loggedIn();
+    const auth = { Authorization: `Bearer ${u.accessToken}` };
+    const { secret } = await (await fetch(`${app.baseUrl}/me/mfa/setup`, { method: 'POST', headers: auth })).json();
+    const { recoveryCodes } = await (await post(app.baseUrl, '/me/mfa/confirm', { code: await generateTotp({ secret }) }, auth)).json();
+
+    const loginChallenge = await challengeFor(c.clientId, null, { max_age: '0' });
+    assert.ok(loginChallenge, 'issued to an unauthenticated request too');
+    const { mfaChallengeToken } = await (await post(app.baseUrl, '/login', { email: u.email, password, login_challenge: loginChallenge })).json();
+    const done = await (await post(app.baseUrl, '/mfa/verify', { mfaChallengeToken, code: recoveryCodes[0] })).json();
+    assert.equal((await authorize(c.clientId, done.accessToken, { max_age: '0', login_challenge: loginChallenge })).status, 200);
+});
+
+test('malformed login_challenge values are refused by the schemas', async () => {
+    const c = await rpClient();
+    const u = await loggedIn();
+    assert.equal((await authorize(c.clientId, u.accessToken, { prompt: 'login', login_challenge: 'x' })).status, 400);
+    assert.equal((await post(app.baseUrl, '/login', { email: u.email, password, login_challenge: '../../etc' })).status, 400);
+});
+
+test('a magic-link sign-in made with the login_challenge satisfies prompt=login', async () => {
+    const c = await rpClient();
+    const loginChallenge = await challengeFor(c.clientId, null);
+    assert.match(loginChallenge, /^[A-Za-z0-9_-]{43}$/);
+    const email = uniqueEmail('ml-lc');
+    await post(app.baseUrl, '/magic-link/request', { email });
+    const { magicLinkToken } = app.hookCalls.onMagicLinkRequested.filter((x) => x.email === email).at(-1);
+    const { accessToken } = await (await post(app.baseUrl, '/magic-link/verify', { token: magicLinkToken, login_challenge: loginChallenge })).json();
+    assert.equal((await authorize(c.clientId, accessToken, { prompt: 'login', login_challenge: loginChallenge })).status, 200);
 });

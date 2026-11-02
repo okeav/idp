@@ -8,7 +8,7 @@ import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey } from '../rate-limit/keys.js';
 import { ssoBindingCookie } from './binding.js';
 
-const RESERVED_QUERY_KEYS = new Set(['redirect_uri']);
+const RESERVED_QUERY_KEYS = new Set(['redirect_uri', 'login_challenge']);
 const MAX_EXTRA_KEYS = 10;
 const MAX_EXTRA_KEY_LENGTH = 64;
 const MAX_EXTRA_VALUE_LENGTH = 256;
@@ -66,6 +66,7 @@ export async function initiateSsoHandler(req, res, next) {
 
         await state.cache.set(`${CACHE_KEY_PREFIXES.SSO_STATE}:${csrfState}`, {
             provider, redirect_uri, extra: sanitizeExtra(q), bindingHash: sha256b64url(binding), codeVerifier, nonce,
+            loginChallenge: typeof q.login_challenge === 'string' ? q.login_challenge : null,
         }, state.config.ttls.ssoState);
 
         const cookie = ssoBindingCookie(state, csrfState, providerConfig);

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PASSWORD_POLICY_DEFAULTS, NAME_REGEX, MAX_EMAIL_LENGTH, MAX_NAME_LENGTH } from '../config/constants.js';
+import { loginChallengeSchema } from '../oauth2/login-challenge.js';
 
 const email = () => z.string().trim().toLowerCase().email('Must be a valid email address').max(MAX_EMAIL_LENGTH);
 const name = () => z.string().trim().max(MAX_NAME_LENGTH).regex(NAME_REGEX, 'Contains invalid characters');
@@ -42,7 +43,8 @@ export const verifyEmailSchema = z.object({
 
 export const resendVerificationSchema = z.object({ email: email() }).strict();
 
-export const loginSchema = z.object({ email: email(), password: z.string().min(1).max(1024) }).strict();
+// login_challenge: from an /oauth2/authorize login_required answer — the new session is bound to it.
+export const loginSchema = z.object({ email: email(), password: z.string().min(1).max(1024), login_challenge: loginChallengeSchema.optional() }).strict();
 
 export const forgotPasswordSchema = z.object({ email: email() }).strict();
 

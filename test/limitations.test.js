@@ -191,19 +191,19 @@ test('prompt=none never shows UI: login_required / consent_required go back to t
     assert.ok(redirected(silent).searchParams.get('code'));
 });
 
-test('prompt=login (and select_account, max_age=0) requires a login made just now', async () => {
+test('prompt=login (and select_account, max_age=0) requires a login, answering with a login_challenge', async () => {
     const c = await rpClient();
     const stale = await tokenAged(10 * 60);
     for (const extra of [{ prompt: 'login' }, { prompt: 'select_account' }, { max_age: '0' }]) {
         const res = await authorize(c.clientId, stale, extra);
         assert.equal(res.status, 401, JSON.stringify(extra));
-        assert.deepEqual(await res.json(), { action: 'login_required', reason: 'prompt_login' });
+        const body = await res.json();
+        assert.equal(body.action, 'login_required');
+        assert.equal(body.reason, 'prompt_login');
+        assert.match(body.login_challenge, /^[A-Za-z0-9_-]{43}$/);
     }
-    // The IdP page signs the user in, then repeats the request: now it goes through.
-    const fresh = await tokenAged(2);
-    const res = await authorize(c.clientId, fresh, { prompt: 'login' });
-    assert.equal(res.status, 200);
-    assert.equal((await res.json()).action, 'consent_required');
+    // Even a login made a moment ago doesn't satisfy it: only one made for this request (see enterprise-hardening).
+    assert.equal((await authorize(c.clientId, await tokenAged(0), { prompt: 'login' })).status, 401);
 });
 
 test('max_age: a login older than max_age, or of unknown age, must be repeated', async () => {

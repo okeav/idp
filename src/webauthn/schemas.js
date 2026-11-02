@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { loginChallengeSchema } from '../oauth2/login-challenge.js';
 
 // WebAuthn response bodies are large, deeply-nested JSON objects defined by
 // the browser/authenticator (RegistrationResponseJSON / AuthenticationResponseJSON)
@@ -27,6 +28,7 @@ export const authenticationOptionsSchema = z.object({
 
 export const verifyAuthenticationSchema = z.object({
     response: webauthnResponseSchema,
+    login_challenge: loginChallengeSchema.optional(),
 }).strict();
 
 export const mfaWebauthnOptionsSchema = z.object({

@@ -291,7 +291,7 @@ export async function verifyMfaChallengeHandler(req, res, next) {
         if (opened?.needsUpgrade) await state.storage.userRepository.updateById(userId, { mfaSecret: await sealMfaSecret(state, opened.secret, userId) });
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'mfa' });
-        const session = await issueSession(state, { user, claims, req, sessionEpoch: challenge.sep });
+        const session = await issueSession(state, { user, claims, req, sessionEpoch: challenge.sep, loginChallenge: challenge.lch });
 
         await auditLog(state.logger, state.hooks, 'MFA_VERIFIED', { userId, method });
 

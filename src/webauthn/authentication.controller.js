@@ -108,7 +108,7 @@ export async function verifyAuthenticationHandler(req, res, next) {
         assertUsableStatus(user);
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'webauthn' });
-        const session = await issueSession(state, { user, claims, req });
+        const session = await issueSession(state, { user, claims, req, loginChallenge: req.body.login_challenge });
 
         await auditLog(state.logger, state.hooks, 'WEBAUTHN_LOGIN', { userId: String(user.id), credentialId: credentialDoc.credentialId });
 

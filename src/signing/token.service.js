@@ -172,7 +172,7 @@ export async function issueOAuth2AccessToken(state, subject, client, scopes, { s
  * challenge is refused at /mfa/verify if the user's sessions were revoked since (password reset,
  * logout-all), and the session it completes belongs to that epoch.
  */
-export async function issueMfaChallengeToken(state, subjectId, { sessionEpoch } = {}) {
+export async function issueMfaChallengeToken(state, subjectId, { sessionEpoch, loginChallenge } = {}) {
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = now + state.config.ttls.mfaChallenge;
     const [kid, key] = getActiveSigningKey(state.signingKeys);
@@ -186,6 +186,8 @@ export async function issueMfaChallengeToken(state, subjectId, { sessionEpoch } 
         iat: now,
         exp: expiresAt,
         ...(Number.isInteger(sessionEpoch) ? { sep: sessionEpoch } : {}),
+        // An /oauth2/authorize login challenge this sign-in was started for — bound once MFA completes.
+        ...(typeof loginChallenge === 'string' ? { lch: loginChallenge } : {}),
     };
 
     return jwt.sign(claims, key.privateKeyPem, { algorithm: ALGORITHM, keyid: kid });

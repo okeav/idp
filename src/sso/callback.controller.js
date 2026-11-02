@@ -150,14 +150,14 @@ export async function ssoCallbackHandler(req, res, next) {
         // the URL fragment, which never reaches a server log or a Referer header) instead of a session.
         if (user.mfaEnabled) {
             await auditLog(state.logger, state.hooks, 'SSO_MFA_REQUIRED', { userId: String(user.id), provider });
-            const { mfaChallengeToken, expiresIn } = await mfaChallengeResponse(state, user);
+            const { mfaChallengeToken, expiresIn } = await mfaChallengeResponse(state, user, { loginChallenge: stateData.loginChallenge ?? undefined });
             return res.redirect(withParams(redirect_uri, { mfa_required: '1', mfa_challenge_token: mfaChallengeToken, expires_in: String(expiresIn) }, { fragment: true }));
         }
 
         await auditLog(state.logger, state.hooks, 'SSO_LOGIN', { userId: String(user.id), provider });
 
         const claims = await resolveClaims(state, user, { isNewUser, isNewLink, provider, extra });
-        const session = await issueSession(state, { user, claims, req });
+        const session = await issueSession(state, { user, claims, req, loginChallenge: stateData.loginChallenge ?? undefined });
 
         setSessionCookies(res, state, session);
         res.redirect(withParams(redirect_uri, { ssoLogin: 'success' }));

@@ -106,11 +106,11 @@ export async function verifyMagicLinkHandler(req, res, next) {
         // A magic link is one factor (the inbox). An account with MFA still has to present it.
         if (user.mfaEnabled) {
             await auditLog(state.logger, state.hooks, 'MAGIC_LINK_MFA_REQUIRED', { userId: String(user.id) });
-            return res.json(await mfaChallengeResponse(state, user));
+            return res.json(await mfaChallengeResponse(state, user, { loginChallenge: req.body.login_challenge }));
         }
 
         const claims = await resolveClaims(state, user, { isNewUser, method: 'magic_link' });
-        const session = await issueSession(state, { user, claims, req });
+        const session = await issueSession(state, { user, claims, req, loginChallenge: req.body.login_challenge });
 
         await auditLog(state.logger, state.hooks, 'MAGIC_LINK_LOGIN', { userId: String(user.id), isNewUser });
 

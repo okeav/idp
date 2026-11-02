@@ -5,6 +5,7 @@ import { OAUTH_CLIENT_STATUS, CLIENT_TYPES, CACHE_KEY_PREFIXES } from '../config
 import { hashOpaqueToken, HASH_PURPOSES } from '../signing/token.service.js';
 import { auditLog } from '../hooks/index.js';
 import { currentSessionEpoch } from '../utils/session-family.js';
+import { createLoginChallenge, redeemLoginChallenge } from './login-challenge.js';
 
 function validateRedirectUri(client, redirectUri) {
     if (!client.redirectUris?.includes(redirectUri)) {
@@ -76,13 +77,6 @@ function redirectToClient(res, state, redirectUri, params) {
 const PROMPT_VALUES = new Set(['none', 'login', 'consent', 'select_account']);
 
 /**
- * How long a login still counts as "just now" for `prompt=login` / `max_age=0`: the user signs in
- * on the IdP's page, which then repeats the authorize request — that repeat must find the new login
- * fresh, not ask for another one.
- */
-export const FRESH_LOGIN_SECONDS = 60;
-
-/**
  * `prompt` and `max_age` (OIDC Core §3.1.2.1). Unknown prompt values, or `none` with another, are
  * refused. `select_account` is treated as `login` (there is no account chooser: signing in again is
  * how the user picks an account). `max_age=0` means `prompt=login`.
@@ -103,11 +97,13 @@ function resolvePrompt(q) {
 }
 
 /** Why the request needs a (new) login, or null: not signed in, or the login is older than prompt/max_age allow. */
-function loginRequiredReason(req, prompt) {
+function loginRequiredReason(req, prompt, challengeRedeemed) {
     if (!req.auth?.userId) return 'unauthenticated';
+    // A login made for this very request (see login-challenge.js) satisfies prompt=login and max_age.
+    if (challengeRedeemed) return null;
+    if (prompt.login) return 'prompt_login';
     const authTime = req.auth.tokenMeta?.authTime;
     const age = Number.isInteger(authTime) ? Math.floor(Date.now() / 1000) - authTime : Infinity;
-    if (prompt.login && !(age <= FRESH_LOGIN_SECONDS)) return 'prompt_login';
     if (prompt.maxAge !== undefined && !(age <= prompt.maxAge)) return 'max_age';
     return null;
 }
@@ -148,11 +144,17 @@ export async function authorizeHandler(req, res, next) {
         assertPkce(state, client, code_challenge);
 
         const prompt = resolvePrompt(q);
-        const loginReason = loginRequiredReason(req, prompt);
+        const fresh = q.login_challenge ? await redeemLoginChallenge(state, req, q.login_challenge, client_id) : false;
+        const loginReason = loginRequiredReason(req, prompt, fresh);
         if (loginReason) {
             // prompt=none: the client asked for no UI, so the answer goes back to it (redirect_uri is validated).
             if (prompt.none) return redirectToClient(res, state, redirect_uri, { error: 'login_required', state: oauthState });
-            return res.status(401).json({ action: 'login_required', reason: loginReason });
+            // A login this request will accept must be made for it: hand out the challenge to bind it to.
+            const needsFreshLogin = prompt.login || prompt.maxAge !== undefined;
+            return res.status(401).json({
+                action: 'login_required', reason: loginReason,
+                ...(needsFreshLogin ? { login_challenge: await createLoginChallenge(state, client_id) } : {}),
+            });
         }
 
         const pending = {

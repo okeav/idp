@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isAcceptableRedirectUri } from './redirect-uri.js';
+import { loginChallengeSchema } from './login-challenge.js';
 
 const httpsUrl = (field) => z.string().max(2048).refine((v) => { try { return new URL(v).protocol === 'https:'; } catch { return false; } }, `${field} must be an https URL`);
 
@@ -29,6 +30,8 @@ export const authorizeQuerySchema = z.object({
     // OIDC Core §3.1.2.1 — see authorize.controller.js (resolvePrompt).
     prompt: z.string().max(100).optional(),
     max_age: z.string().regex(/^\d{1,10}$/, 'max_age must be a non-negative integer of seconds').optional(),
+    // Returned with a login_required answer; presented again once the user signed in for it (login-challenge.js).
+    login_challenge: loginChallengeSchema.optional(),
     ...pkceFields,
 }).refine(pkceMethodRequired, pkceMethodMessage);
 

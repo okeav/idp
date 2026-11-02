@@ -14,6 +14,7 @@ import { withAttemptBudget } from '../security/attempt-budget.js';
 import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { effectiveStatus, isActiveAccount, isPasswordLocked } from '../utils/account-status.js';
 import { sessionCookieName, readSessionCookie, cookiesAreSecure, hostCookieName, readCookie } from '../utils/cookies.js';
+import { bindLoginChallenge } from '../oauth2/login-challenge.js';
 
 function cookieOptions(state) {
     const c = state.config.cookies || {};
@@ -40,7 +41,7 @@ async function resolveClaims(state, user, ctx) {
  * (read before the first factor). A "sign out everywhere" after that read (e.g. a password reset that
  * landed while the old password was being checked) ends the session this call creates.
  */
-async function issueSession(state, { user, claims, req, sessionEpoch: epochOverride }) {
+async function issueSession(state, { user, claims, req, sessionEpoch: epochOverride, loginChallenge }) {
     const sessionEpoch = Number.isInteger(epochOverride) ? epochOverride
         : Number.isInteger(user.sessionEpoch) ? user.sessionEpoch : await currentSessionEpoch(state, user.id);
     const wasFirstLogin = !user.lastLoginAt;
@@ -92,6 +93,7 @@ async function issueSession(state, { user, claims, req, sessionEpoch: epochOverr
         lastLoginAt: new Date(),
     });
     await assertChainNotRevoked(state, user.id, sessionEpoch, refreshTokenHash, familyId);
+    await bindLoginChallenge(state, loginChallenge, familyId);
 
     if (isNewDevice) {
         notifyNewDevice({ hooks: state.hooks, logger: state.logger, req, user }).catch((err) => {
@@ -422,10 +424,11 @@ export async function loginHandler(req, res, next) {
 
         assertUsableStatus(user);
 
-        if (user.mfaEnabled) return res.json(await mfaChallengeResponse(state, user));
+        const loginChallenge = req.body.login_challenge;
+        if (user.mfaEnabled) return res.json(await mfaChallengeResponse(state, user, { loginChallenge }));
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'password' });
-        const session = await issueSession(state, { user, claims, req });
+        const session = await issueSession(state, { user, claims, req, loginChallenge });
 
         await auditLog(state.logger, state.hooks, 'LOGIN', { userId: String(user.id), email });
 
@@ -495,10 +498,10 @@ async function onPasswordLoginLocked(state, user, entry) {
  * The response every first-factor login (password, magic link, SSO) gives instead of a session when
  * the account has MFA: a short-lived challenge token to complete at /mfa/verify or /webauthn/mfa/verify.
  */
-async function mfaChallengeResponse(state, user) {
+async function mfaChallengeResponse(state, user, { loginChallenge } = {}) {
     // `user` was loaded before its first factor was checked: the challenge carries that epoch.
     const sessionEpoch = Number.isInteger(user.sessionEpoch) ? user.sessionEpoch : await currentSessionEpoch(state, user.id);
-    const mfaChallengeToken = await issueMfaChallengeToken(state, user.id, { sessionEpoch });
+    const mfaChallengeToken = await issueMfaChallengeToken(state, user.id, { sessionEpoch, loginChallenge });
     return { mfaRequired: true, mfaChallengeToken, expiresIn: state.config.ttls.mfaChallenge };
 }
 

@@ -209,3 +209,25 @@ test('buildSsoProviders: Microsoft email trust follows the authority (or an expl
     assert.equal(ms({ tenant: '72f988bf-86f1-41af-91ab-2d7cd011db47' }), true);
     assert.equal(ms({ tenant: 'common', trustEmail: true }), true);
 });
+
+test('an SSO sign-in started with a login_challenge is bound to it (prompt=login)', async () => {
+    const admin = { 'x-test-admin': 'yes' };
+    const rpRedirect = 'https://rp.example.com/cb';
+    const c = await (await post('/oauth2/clients', { name: 'RP', slug: `sso-lc-${Date.now()}`, redirectUris: [rpRedirect], allowedScopes: ['openid'], allowedGrants: ['authorization_code'] }, admin)).json();
+    await fetch(`${app.baseUrl}/oauth2/clients/${c.clientId}/approve`, { method: 'POST', headers: admin });
+    const authorize = (headers, extra) => fetch(`${app.baseUrl}/oauth2/authorize?${new URLSearchParams({ client_id: c.clientId, redirect_uri: rpRedirect, response_type: 'code', scope: 'openid', code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM', code_challenge_method: 'S256', prompt: 'login', ...extra })}`, { headers, redirect: 'manual' });
+    const { login_challenge: loginChallenge } = await (await authorize({}, {})).json();
+    assert.match(loginChallenge, /^[A-Za-z0-9_-]{43}$/);
+
+    Object.assign(profiles, google(uniqueEmail('sso-lc')));
+    const init = await realFetch(`${app.baseUrl}/sso/google?${new URLSearchParams({ redirect_uri: redirectUri, login_challenge: loginChallenge })}`, { redirect: 'manual' });
+    const state = new URL(init.headers.get('location')).searchParams.get('state');
+    const cookie = init.headers.getSetCookie().map((x) => x.split(';')[0]).join('; ');
+    const cb = await realFetch(`${app.baseUrl}/sso/google/callback?code=provider-code&state=${state}`, { redirect: 'manual', headers: { Cookie: cookie } });
+    const accessCookie = cb.headers.getSetCookie().find((x) => x.startsWith('__Host-access_token=')).split(';')[0];
+    assert.ok(!new URL(cb.headers.get('location')).searchParams.has('login_challenge'), 'not forwarded as opaque context');
+
+    const res = await authorize({ Cookie: accessCookie }, { login_challenge: loginChallenge });
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal((await res.json()).action, 'consent_required');
+});
