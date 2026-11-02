@@ -170,6 +170,14 @@ export interface IdpConfig {
         apple?: { clientId: string; teamId: string; keyId: string; privateKeyPem: string };
         linkedin?: { clientId: string; clientSecret: string };
     };
+    oauth2?: {
+        /**
+         * Which clients must use PKCE (S256) at /oauth2/authorize. `'all'` (default) — every client, the
+         * RFC 9700 recommendation (a confidential client without PKCE is open to code injection);
+         * `'public'` — public clients only (always required for them).
+         */
+        requirePkce?: 'all' | 'public';
+    };
     sso?: {
         baseCallbackUrl?: string;
         allowedRedirectOrigins?: string[];
@@ -201,6 +209,8 @@ export interface IdpConfig {
         verificationEmailByEmail?: RateLimitRule;
         /** POST /webauthn/authentication/options and /verify (unauthenticated passkey login), per IP. Default 60/5min. */
         webauthnAuthentication?: RateLimitRule;
+        /** /oauth2/token, /oauth2/token/revoke and /oauth2/token/introspect, per IP. Default 120/min. */
+        oauth2Token?: RateLimitRule;
     };
     /**
      * Outbound webhook delivery — additive to `hooks` (in-process callbacks),
@@ -357,7 +367,8 @@ export const ERROR_CODES: Record<string, string>;
  */
 export function issueAccessToken(input: { sub: string; email?: string; claims?: Record<string, unknown> }, opts?: { ttlSeconds?: number; audience?: string; sessionless?: boolean; authTime?: number }): Promise<IssuedToken>;
 export function verifyAccessToken(token: string, opts?: VerifyAccessTokenOptions): Promise<AccessTokenClaims>;
-export function issueIdToken(user: IdentityUser, audience: string, nonce?: string): Promise<IssuedToken>;
+/** `opts.scopes` decide which user claims are released (default: openid email profile); `opts.authTime` (seconds) becomes `auth_time`. */
+export function issueIdToken(user: IdentityUser, audience: string, nonce?: string, opts?: { scopes?: string[]; authTime?: number; ttlSeconds?: number }): Promise<IssuedToken>;
 export function issueOAuth2AccessToken(subject: { id: string }, client: { clientId: string; accessTokenTTL?: number }, scopes: string[], opts?: { sessionless?: boolean }): Promise<IssuedToken>;
 export function issueMfaChallengeToken(subjectId: string): Promise<string>;
 export function verifyMfaChallengeToken(token: string): { sub: string; type: 'mfa_challenge' };

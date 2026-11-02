@@ -75,6 +75,14 @@ async function issueSession(state, { user, claims, req }) {
     return { accessToken, refreshTokenValue, refreshExpiresAt: expiresAt };
 }
 
+/** Clears both session cookies with the attributes they were set with — a clear without the same `domain`/`path` leaves a domain cookie in place. */
+function clearSessionCookies(res, state) {
+    const { httpOnly, secure, sameSite, path, domain } = cookieOptions(state);
+    const opts = { httpOnly, secure, sameSite, path, ...(domain ? { domain } : {}) };
+    res.clearCookie(COOKIE_NAMES.ACCESS_TOKEN, opts);
+    res.clearCookie(COOKIE_NAMES.REFRESH_TOKEN, opts);
+}
+
 function setSessionCookies(res, state, { accessToken, refreshTokenValue, refreshExpiresAt }) {
     const opts = cookieOptions(state);
     res.cookie(COOKIE_NAMES.ACCESS_TOKEN, accessToken.token, { ...opts, expires: accessToken.expiresAt });
@@ -390,8 +398,7 @@ export async function logoutHandler(req, res, next) {
         }
 
         await auditLog(state.logger, state.hooks, 'LOGOUT', { userId: String(existing?.user ?? req.auth?.userId ?? 'unknown') });
-        res.clearCookie(COOKIE_NAMES.ACCESS_TOKEN);
-        res.clearCookie(COOKIE_NAMES.REFRESH_TOKEN);
+        clearSessionCookies(res, state);
         res.json({ status: 'ok' });
     } catch (err) {
         next(err);
@@ -594,4 +601,4 @@ export async function revokeAllSessionsHandler(req, res, next) {
     }
 }
 
-export { issueSession, setSessionCookies, resolveClaims, cookieOptions, refreshTokenExpiresAt, assertUsableStatus, mfaChallengeResponse };
+export { issueSession, setSessionCookies, clearSessionCookies, resolveClaims, cookieOptions, refreshTokenExpiresAt, assertUsableStatus, mfaChallengeResponse };

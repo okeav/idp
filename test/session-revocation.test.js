@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildTestApp, uniqueEmail } from './helpers/build-test-app.js';
 import { serve, json } from './helpers/serve.js';
+import { authorizeCode, exchangeCode } from './helpers/oauth.js';
 import { initIdentityProvider, issueAccessToken, authContextMiddleware } from '../src/index.js';
 import { setState } from '../src/config/state.js';
 import { CACHE_KEY_PREFIXES } from '../src/config/constants.js';
@@ -231,12 +232,8 @@ test('OAuth2 access tokens: authorization-code tokens are revocable through thei
     }
 
     const user = await registerVerifyLogin(uniqueEmail('oauth-user'));
-    const confirm = await fetch(`${instanceA.baseUrl}/oauth2/authorize/confirm`, {
-        ...json({ client_id: client.clientId, redirect_uri: redirectUri, scope: 'openid email' }, { Authorization: `Bearer ${user.accessToken}` }),
-        redirect: 'manual',
-    });
-    const code = new URL(confirm.headers.get('location')).searchParams.get('code');
-    const tokens = await (await fetch(`${instanceA.baseUrl}/oauth2/token`, json({ grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: client.clientId, client_secret: client.clientSecret }))).json();
+    const { code, verifier } = await authorizeCode({ baseUrl: instanceA.baseUrl, accessToken: user.accessToken, clientId: client.clientId, redirectUri, scope: 'openid email' });
+    const { body: tokens } = await exchangeCode({ baseUrl: instanceA.baseUrl, client, code, redirectUri, verifier });
     const userinfo = () => fetch(`${instanceB.baseUrl}/userinfo`, { headers: { Authorization: `Bearer ${tokens.access_token}` } });
     assert.equal((await userinfo()).status, 200);
 

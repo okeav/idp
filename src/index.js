@@ -22,8 +22,8 @@ export async function issueAccessToken(input, opts = {}) {
 export async function verifyAccessToken(token, opts) {
     return tokenService.verifyAccessToken(getState(), token, opts);
 }
-export async function issueIdToken(user, audience, nonce) {
-    return tokenService.issueIdToken(getState(), user, audience, nonce);
+export async function issueIdToken(user, audience, nonce, opts) {
+    return tokenService.issueIdToken(getState(), user, audience, nonce, opts);
 }
 export async function issueOAuth2AccessToken(subject, client, scopes, opts) {
     return tokenService.issueOAuth2AccessToken(getState(), subject, client, scopes, { sessionless: true, ...opts });

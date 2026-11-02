@@ -78,6 +78,55 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   `EMAIL_ALREADY_VERIFIED`. Both now answer the same for every address (verify: 400
   `INVALID_OR_EXPIRED_TOKEN`; resend: `{ status: 'ok' }`). **Upgrade:** a second click on an
   already-used verification link now gets 400 instead of `ok`.
+- **PKCE was optional, `plain` was accepted, and it could be downgraded (High).** A public client
+  could run the code flow with no PKCE at all, so an intercepted code was redeemable by anyone with
+  the (public) `client_id`. PKCE is now required for public clients always and, by default, for every
+  client (`oauth2.requirePkce: 'all'`; set `'public'` to exempt confidential clients). Only `S256`
+  is accepted (a challenge without `code_challenge_method=S256` is refused, since the spec default is
+  `plain`), the challenge and verifier formats are validated, the comparison is constant-time, and a
+  `code_verifier` sent for a code issued *without* a challenge is refused (RFC 9700 §4.8.2).
+  **Upgrade:** send `code_challenge` + `code_challenge_method=S256` from every client.
+- **Consent could be forged (Medium).** `POST /oauth2/authorize/confirm` granted whatever
+  `client_id`, `scope` and `redirect_uri` its body named, with nothing tying it to a request the user
+  had seen — cross-site (with `SameSite=None` cookies), or from a sibling origin, a single POST
+  granted an attacker's client every allowed scope. `GET /oauth2/authorize` now stores the validated
+  request server-side and answers `consent_required` with a single-use, user-bound
+  `consent_challenge`; confirm and deny take only `{ consent_challenge }`. **Upgrade:** your consent
+  page posts the challenge it received, not the request parameters.
+- **OIDC `nonce` protected nothing.** It was dropped at `/authorize` and taken from the *token*
+  request instead (chosen by whoever redeems the code). It is now accepted at `/authorize`, stored
+  with the code, and echoed into the ID token; a `nonce` at the token endpoint is ignored.
+- **ID tokens released email and profile regardless of scope.** Claims now follow the granted
+  scopes (`email` → `email`, `email_verified`; `profile` → `name`, `picture`, …). ID tokens also
+  carry `azp` and `auth_time`, and honour the client's `idTokenTTL`.
+- **Client authentication.** `client_secret_basic` was advertised but never read; it is now
+  implemented per RFC 6749 §2.3.1 (form-decoded; one method per request). Every failure — unknown,
+  inactive, wrong secret — answers the same 401 `INVALID_CLIENT`. New client secrets are stored as
+  HMAC-SHA256 (they are 256-bit random; bcrypt added nothing but a ~250 ms thread-pool cost per
+  attempt, a cheap way to stall the whole server); existing bcrypt hashes still verify and are
+  upgraded on use. `/oauth2/token`, `/token/revoke` and `/token/introspect` are rate limited per IP
+  (`rateLimiting.oauth2Token`) and answer with `Cache-Control: no-store`. Token-endpoint errors use
+  the RFC 6749 codes: `INVALID_CLIENT`, `INVALID_GRANT`, `INVALID_SCOPE`, `UNAUTHORIZED_CLIENT`,
+  `UNSUPPORTED_GRANT_TYPE`.
+- **Revocation and introspection were unauthenticated.** `/oauth2/token/revoke` revoked any refresh
+  token for anyone (first-party ones included); `/oauth2/token/introspect` answered any logged-in
+  user about any refresh token, and never recognised access tokens. Both now require client
+  authentication (introspection: a confidential client), act only on tokens issued to the calling
+  client, and handle access tokens (JWT) as well as refresh tokens.
+- **Revoking consent or deactivating a client left its tokens working.** Both now revoke the
+  client's sessions — that user's, or every user's — and the access tokens paired with them. New
+  storage method `SessionRepository.revokeForClient(clientId, { userId? })`.
+- **`GET /oidc/end-session` signed the user out everywhere on any token it was shown.** Any ID
+  token (handed to every relying party), and even the pre-MFA challenge token, made it revoke all of
+  the user's sessions — via a GET any site can trigger. The hint must now be an ID token; it ends
+  only the hinted client's sessions for that user, plus the browser's own IdP session if its cookie
+  came with the request (cookies are cleared). Expired hints are accepted, per the spec.
+- **Client redirect URIs** must be `https` (or `http` to a loopback host, or a reverse-DNS
+  private-use scheme for native apps) and may not contain a fragment or credentials;
+  `javascript:`/`data:` URIs were previously registrable. Authorization responses carry `iss`
+  (RFC 9207). `GET /oauth2/consent` validates its query (`?client_id[$ne]=` reached the database
+  on Express 4), and hides clients that aren't active.
+- **Logout didn't clear cookies when `cookies.domain` was set** (they were cleared host-only).
 - **The per-account MFA lockout could be raced (High).** 0.3.0 checked the lock, then the code, and
   only then counted a failure, so a burst of concurrent requests had every guess checked (1,000
   parallel guesses against a limit of 5 were all evaluated). Attempts are now counted *before* the
@@ -119,8 +168,8 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   - Challenges are redeemed with a new atomic `cache.take()` (MULTI GET+DEL on Redis) instead of
     get-then-delete, and the signature counter is written only if it advanced (atomically), so
     neither a challenge nor a cloned authenticator's assertion can be used twice concurrently.
-  - `POST /webauthn/authentication/options` ignored no one: with `email` it returned that account's
-    credential ids, telling anyone whether the address had an account with passkeys. `email` is now
+  - Given an `email`, `POST /webauthn/authentication/options` returned that account's credential
+    ids, telling anyone whether the address had an account with passkeys. `email` is now
     ignored unless `webauthn.allowCredentialsByEmail: true`, and then unknown addresses get a stable
     decoy id and no transports are listed.
   - The unauthenticated passkey-login endpoints are rate limited per IP

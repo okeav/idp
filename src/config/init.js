@@ -38,6 +38,9 @@ export async function initIdentityProvider(config) {
     assertMfaSecretConfig(resolved.mfa, mfaCipher, logger);
     assertLockoutConfig('mfa.lockout', resolved.mfa.lockout);
     assertLockoutConfig('security.verificationCodeLockout', resolved.security.verificationCodeLockout);
+    if (!['all', 'public'].includes(resolved.oauth2.requirePkce)) {
+        throw new Error("config.oauth2.requirePkce must be 'all' or 'public'");
+    }
     const { recentAuthMaxAgeSeconds } = resolved.session;
     if (!Number.isInteger(recentAuthMaxAgeSeconds) || recentAuthMaxAgeSeconds < 1) {
         throw new Error(`config.session.recentAuthMaxAgeSeconds must be a positive integer (got ${recentAuthMaxAgeSeconds})`);

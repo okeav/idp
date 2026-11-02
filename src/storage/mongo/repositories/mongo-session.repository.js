@@ -47,6 +47,23 @@ export class MongoSessionRepository {
         return { revokedCount: result.modifiedCount ?? 0 };
     }
 
+    /**
+     * Revokes every live OAuth2 session (refresh-token row) issued to `clientId` — for one user, or
+     * for all users when `userId` is omitted (client deactivated). Rows from before 0.4.0 carry no
+     * `kind` and are matched by their `{ clientId, scopes[] }` claims shape. Returns the revoked jtis.
+     */
+    async revokeForClient(clientId, { userId } = {}) {
+        const filter = {
+            'claims.clientId': clientId,
+            revokedAt: null,
+            $or: [{ kind: 'oauth2' }, { kind: null, 'claims.scopes': { $type: 'array' } }],
+            ...(userId ? { user: userId } : {}),
+        };
+        const jtis = (await this.model.find(filter).select('jti').lean()).map((d) => d.jti).filter(Boolean);
+        const result = await this.model.updateMany(filter, { revokedAt: new Date(), revokeReason: 'client_revoked' });
+        return { revokedCount: result.modifiedCount ?? 0, jtis };
+    }
+
     async listActiveForUser(userId) {
         const docs = await this.model
             .find({ user: userId, revokedAt: null, expiresAt: { $gt: new Date() } })

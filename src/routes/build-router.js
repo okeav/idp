@@ -44,7 +44,7 @@ import {
 } from '../oauth2/client.controller.js';
 import {
     authorizeQuerySchema, confirmAuthorizeSchema, denyAuthorizeSchema, tokenSchema, revokeTokenSchema,
-    introspectTokenSchema, registerOAuthClientSchema, updateOAuthClientSchema,
+    introspectTokenSchema, registerOAuthClientSchema, updateOAuthClientSchema, consentQuerySchema,
 } from '../oauth2/schemas.js';
 
 import { userinfoHandler } from '../oidc/userinfo.controller.js';
@@ -146,8 +146,9 @@ export function buildRouter(opts = {}) {
         router.post('/oauth2/authorize/deny', authContextMiddleware(), validateBody(denyAuthorizeSchema), denyConsentHandler);
         router.post('/oauth2/token', validateBody(tokenSchema), tokenHandler);
         router.post('/oauth2/token/revoke', validateBody(revokeTokenSchema), revokeTokenHandler);
-        router.post('/oauth2/token/introspect', authContextMiddleware(), validateBody(introspectTokenSchema), introspectTokenHandler);
-        router.get('/oauth2/consent', authContextMiddleware(), getConsentHandler);
+        // Revoke and introspect authenticate the calling client (RFC 7009 / RFC 7662), not a user.
+        router.post('/oauth2/token/introspect', validateBody(introspectTokenSchema), introspectTokenHandler);
+        router.get('/oauth2/consent', authContextMiddleware(), validateQuery(consentQuerySchema), getConsentHandler);
         router.get('/oauth2/consent/sessions', authContextMiddleware(), listConsentsHandler);
         router.delete('/oauth2/consent/sessions/:clientId', authContextMiddleware(), revokeConsentHandler);
     }

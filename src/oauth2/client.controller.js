@@ -3,6 +3,7 @@ import { IdpError } from '../errors/idp-error.js';
 import { OAUTH_CLIENT_STATUS, CLIENT_TYPES } from '../config/constants.js';
 import { generateClientId, generateClientSecret, hashClientSecret } from '../utils/oauth-client-credentials.js';
 import { auditLog } from '../hooks/index.js';
+import { revokeClientSessions } from './consent.controller.js';
 
 /** POST /oauth2/clients — public self-registration; lands PENDING_APPROVAL until an operator approves it. */
 export async function registerOAuthClientHandler(req, res, next) {
@@ -15,7 +16,7 @@ export async function registerOAuthClientHandler(req, res, next) {
 
         const clientId = generateClientId();
         const clientSecret = generateClientSecret();
-        const clientSecretHash = await hashClientSecret(clientSecret);
+        const clientSecretHash = hashClientSecret(clientSecret, state.config.security.tokenHashSecret);
 
         const client = await state.storage.oauthClientRepository.create({
             name, slug, clientId, clientSecretHash,
@@ -80,7 +81,7 @@ export async function rotateOAuthClientSecretHandler(req, res, next) {
         if (!client) throw new IdpError({ code: 'OAUTH_CLIENT_NOT_FOUND', httpStatus: 404, message: `Client ${req.params.clientId} not found` });
 
         const newSecret = generateClientSecret();
-        await state.storage.oauthClientRepository.updateByClientId(req.params.clientId, { clientSecretHash: await hashClientSecret(newSecret) });
+        await state.storage.oauthClientRepository.updateByClientId(req.params.clientId, { clientSecretHash: hashClientSecret(newSecret, state.config.security.tokenHashSecret) });
 
         await auditLog(state.logger, state.hooks, 'OAUTH_CLIENT_SECRET_ROTATED', { clientId: req.params.clientId });
         res.json({ clientId: req.params.clientId, clientSecret: newSecret });
@@ -95,7 +96,10 @@ export async function deactivateOAuthClientHandler(req, res, next) {
         const client = await state.storage.oauthClientRepository.updateByClientId(req.params.clientId, { status: OAUTH_CLIENT_STATUS.INACTIVE });
         if (!client) throw new IdpError({ code: 'OAUTH_CLIENT_NOT_FOUND', httpStatus: 404, message: `Client ${req.params.clientId} not found` });
 
-        await auditLog(state.logger, state.hooks, 'OAUTH_CLIENT_DEACTIVATED', { clientId: req.params.clientId });
+        // A deactivated client keeps nothing it was issued: every user's refresh tokens (and the
+        // access tokens paired with them) are revoked.
+        const revokedSessions = await revokeClientSessions(state, req.params.clientId);
+        await auditLog(state.logger, state.hooks, 'OAUTH_CLIENT_DEACTIVATED', { clientId: req.params.clientId, revokedSessions });
         res.json({ clientId: req.params.clientId, status: client.status });
     } catch (err) {
         next(err);

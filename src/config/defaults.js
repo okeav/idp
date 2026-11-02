@@ -49,6 +49,8 @@ export function withDefaults(config = {}) {
         webauthn: config.webauthn || {},
         oauthProviders: config.oauthProviders || {},
         sso: config.sso || {},
+        // requirePkce: 'all' (default) or 'public' — see oauth2/authorize.controller.js.
+        oauth2: { requirePkce: 'all', ...config.oauth2 },
         serviceMesh: { tokenMode: 'both', ...config.serviceMesh },
         rateLimiting: {
             enabled: true,
@@ -65,6 +67,7 @@ export function withDefaults(config = {}) {
             emailVerification: { ...DEFAULT_RATE_LIMITS.emailVerificationPerIp, ...config.rateLimiting?.emailVerification },
             verificationEmailByEmail: { ...DEFAULT_RATE_LIMITS.verificationEmailPerEmail, ...config.rateLimiting?.verificationEmailByEmail },
             webauthnAuthentication: { ...DEFAULT_RATE_LIMITS.webauthnAuthenticationPerIp, ...config.rateLimiting?.webauthnAuthentication },
+            oauth2Token: { ...DEFAULT_RATE_LIMITS.oauth2TokenPerIp, ...config.rateLimiting?.oauth2Token },
         },
         hooks: config.hooks || {},
         webhooks: { ...DEFAULT_WEBHOOK_CONFIG, ...config.webhooks },

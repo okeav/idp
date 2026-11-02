@@ -88,26 +88,36 @@ export async function verifyAccessToken(state, token, opts = {}) {
     return payload;
 }
 
-export async function issueIdToken(state, user, audience, nonce) {
+/**
+ * @param {{ scopes?: string[], authTime?: number, ttlSeconds?: number }} [opts] - `scopes` decide
+ *   which user claims are released (OIDC Core §5.4: `email` → email + email_verified, `profile` →
+ *   name, picture, locale …). Default: openid email profile (the pre-0.4.0 behaviour, kept for the
+ *   public export). `authTime` (seconds) becomes `auth_time`.
+ */
+export async function issueIdToken(state, user, audience, nonce, opts = {}) {
     const now = Math.floor(Date.now() / 1000);
-    const expiresAt = now + state.config.ttls.idToken;
+    const expiresAt = now + (opts.ttlSeconds ?? state.config.ttls.idToken);
     const [kid, key] = getActiveSigningKey(state.signingKeys);
+    const scopes = new Set(opts.scopes ?? ['openid', 'email', 'profile']);
 
     const claims = {
         sub: String(user.id),
-        email: user.email,
-        email_verified: user.status !== 'PENDING_VERIFICATION',
-        name: user.profile?.displayName || [user.profile?.firstName, user.profile?.lastName].filter(Boolean).join(' ') || undefined,
-        given_name: user.profile?.firstName || undefined,
-        family_name: user.profile?.lastName || undefined,
-        picture: user.profile?.avatarUrl || undefined,
-        locale: user.profile?.locale || undefined,
-        zoneinfo: user.profile?.zoneinfo || undefined,
+        ...(scopes.has('email') ? { email: user.email, email_verified: user.status !== 'PENDING_VERIFICATION' } : {}),
+        ...(scopes.has('profile') ? {
+            name: user.profile?.displayName || [user.profile?.firstName, user.profile?.lastName].filter(Boolean).join(' ') || undefined,
+            given_name: user.profile?.firstName || undefined,
+            family_name: user.profile?.lastName || undefined,
+            picture: user.profile?.avatarUrl || undefined,
+            locale: user.profile?.locale || undefined,
+            zoneinfo: user.profile?.zoneinfo || undefined,
+        } : {}),
         aud: audience,
+        azp: audience,
         iss: state.config.issuer,
         jti: crypto.randomUUID(),
         iat: now,
         exp: expiresAt,
+        ...(Number.isInteger(opts.authTime) ? { auth_time: opts.authTime } : {}),
         ...(nonce ? { nonce } : {}),
     };
     Object.keys(claims).forEach((k) => claims[k] === undefined && delete claims[k]);
@@ -186,12 +196,23 @@ export function verifyIssuedToken(state, token, opts = {}) {
             return jwt.verify(token, key.publicKeyPem, {
                 algorithms: [ALGORITHM],
                 ...(opts.issuer ? { issuer: opts.issuer } : {}),
+                ...(opts.ignoreExpiration ? { ignoreExpiration: true } : {}),
             });
         } catch {
             // try next key
         }
     }
     return null;
+}
+
+/**
+ * True for an ID token this IdP issued (verify the signature first): no `type` (access and MFA
+ * challenge tokens have one), no `client_id` (OAuth2 access tokens have one), and an audience that
+ * is a client — never the IdP itself.
+ */
+export function isIdTokenPayload(state, payload) {
+    return Boolean(payload) && payload.type === undefined && payload.client_id === undefined
+        && typeof payload.aud === 'string' && payload.aud !== state.config.issuer && typeof payload.sub === 'string';
 }
 
 async function verifyWithAnyKey(state, token, { issuer } = {}) {

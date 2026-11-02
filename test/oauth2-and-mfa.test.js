@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generate as generateTotp } from 'otplib';
 import { buildTestApp, uniqueEmail, freshTotp } from './helpers/build-test-app.js';
+import { pkcePair, authorizeCode, exchangeCode } from './helpers/oauth.js';
 import { verifyAccessToken } from '../src/index.js';
 
 let app;
@@ -44,36 +45,31 @@ test('OAuth2 authorization-code flow issues an access token with type "access_to
     const email = uniqueEmail('oauth2user');
     const { accessToken } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
 
-    // 3. /authorize with no prior consent -> consent_required (not a redirect).
-    const authorizeUrl = `${app.baseUrl}/oauth2/authorize?client_id=${client.clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=openid%20email`;
+    // 3. /authorize with no prior consent -> consent_required (not a redirect), with a consent challenge.
+    const pkce = pkcePair();
+    const authorizeUrl = `${app.baseUrl}/oauth2/authorize?client_id=${client.clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=openid%20email&code_challenge=${pkce.challenge}&code_challenge_method=S256`;
     const authorizeRes = await fetch(authorizeUrl, { headers: { Authorization: `Bearer ${accessToken}` }, redirect: 'manual' });
     assert.equal(authorizeRes.status, 200);
     const authorizeBody = await authorizeRes.json();
     assert.equal(authorizeBody.action, 'consent_required');
+    assert.ok(authorizeBody.consent_challenge);
 
     // 4. Confirm consent -> redirect carrying the authorization code.
     const confirmRes = await fetch(`${app.baseUrl}/oauth2/authorize/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-        body: JSON.stringify({ client_id: client.clientId, redirect_uri: redirectUri, scope: 'openid email' }),
+        body: JSON.stringify({ consent_challenge: authorizeBody.consent_challenge }),
         redirect: 'manual',
     });
     assert.equal(confirmRes.status, 302, await confirmRes.text());
     const location = new URL(confirmRes.headers.get('location'));
     const code = location.searchParams.get('code');
     assert.ok(code, 'redirect should carry an authorization code');
+    assert.equal(location.searchParams.get('iss'), app.state.config.issuer, 'RFC 9207 iss in the authorization response');
 
     // 5. Exchange the code for tokens.
-    const tokenRes = await fetch(`${app.baseUrl}/oauth2/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            grant_type: 'authorization_code', code,
-            redirect_uri: redirectUri, client_id: client.clientId, client_secret: client.clientSecret,
-        }),
-    });
-    const tokenBody = await tokenRes.json();
-    assert.equal(tokenRes.status, 200, JSON.stringify(tokenBody));
+    const { status: tokenStatus, body: tokenBody } = await exchangeCode({ baseUrl: app.baseUrl, client, code, redirectUri, verifier: pkce.verifier });
+    assert.equal(tokenStatus, 200, JSON.stringify(tokenBody));
     assert.ok(tokenBody.access_token);
     assert.ok(tokenBody.id_token, 'openid scope was requested, so an id_token should be issued');
 
@@ -129,7 +125,7 @@ test('OAuth2 client_credentials grant issues a machine token with type "access_t
         body: JSON.stringify({ grant_type: 'client_credentials', client_id: client.clientId, client_secret: client.clientSecret, scope: 'reports.read admin.delete' }),
     });
     assert.equal(overreachRes.status, 400);
-    assert.equal((await overreachRes.json()).error, 'INVALID_REQUEST');
+    assert.equal((await overreachRes.json()).error, 'INVALID_SCOPE');
 });
 
 test('allowedGrants is enforced: a client not registered for client_credentials is rejected', async () => {
@@ -151,10 +147,10 @@ test('allowedGrants is enforced: a client not registered for client_credentials 
         body: JSON.stringify({ grant_type: 'client_credentials', client_id: client.clientId, client_secret: client.clientSecret }),
     });
     assert.equal(tokenRes.status, 400);
-    assert.equal((await tokenRes.json()).error, 'INVALID_REQUEST');
+    assert.equal((await tokenRes.json()).error, 'UNAUTHORIZED_CLIENT');
 });
 
-test('POST /oauth2/authorize/deny rejects a redirect_uri not registered to the client (open-redirect guard)', async () => {
+test('POST /oauth2/authorize/deny redirects only to the pending request\'s registered redirect_uri, and needs that request\'s challenge', async () => {
     const redirectUri = 'https://client.example.com/callback';
     const registerRes = await fetch(`${app.baseUrl}/oauth2/clients`, {
         method: 'POST',
@@ -169,26 +165,26 @@ test('POST /oauth2/authorize/deny rejects a redirect_uri not registered to the c
 
     const email = uniqueEmail('denyuser');
     const { accessToken } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
+    const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` };
 
-    const denyRes = await fetch(`${app.baseUrl}/oauth2/authorize/deny`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+    // The old body (client_id + an attacker's redirect_uri) is no longer accepted at all.
+    const forged = await fetch(`${app.baseUrl}/oauth2/authorize/deny`, {
+        method: 'POST', headers: auth, redirect: 'manual',
         body: JSON.stringify({ client_id: client.clientId, redirect_uri: 'https://evil.example.com/steal', state: 'xyz' }),
-        redirect: 'manual',
     });
-    assert.equal(denyRes.status, 400, 'an unregistered redirect_uri must not be followed');
-    assert.equal((await denyRes.json()).error, 'INVALID_REDIRECT_URI');
+    assert.equal(forged.status, 400);
 
-    // A redirect_uri that is actually registered to the client still works.
+    const pkce = pkcePair();
+    const authzUrl = `${app.baseUrl}/oauth2/authorize?client_id=${client.clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&state=xyz&code_challenge=${pkce.challenge}&code_challenge_method=S256`;
+    const authz = await (await fetch(authzUrl, { headers: auth })).json();
     const okDenyRes = await fetch(`${app.baseUrl}/oauth2/authorize/deny`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-        body: JSON.stringify({ client_id: client.clientId, redirect_uri: redirectUri, state: 'xyz' }),
-        redirect: 'manual',
+        method: 'POST', headers: auth, redirect: 'manual', body: JSON.stringify({ consent_challenge: authz.consent_challenge }),
     });
     assert.equal(okDenyRes.status, 302);
     const location = new URL(okDenyRes.headers.get('location'));
+    assert.equal(location.origin + location.pathname, redirectUri);
     assert.equal(location.searchParams.get('error'), 'access_denied');
+    assert.equal(location.searchParams.get('state'), 'xyz');
 });
 
 test('refresh_token grant narrows to the originally-consented scopes, not the client\'s current allowedScopes', async () => {
@@ -208,20 +204,8 @@ test('refresh_token grant narrows to the originally-consented scopes, not the cl
     const { accessToken } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
 
     // User only ever consents to "openid email" — "profile" is never granted.
-    const confirmRes = await fetch(`${app.baseUrl}/oauth2/authorize/confirm`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
-        body: JSON.stringify({ client_id: client.clientId, redirect_uri: redirectUri, scope: 'openid email' }),
-        redirect: 'manual',
-    });
-    const code = new URL(confirmRes.headers.get('location')).searchParams.get('code');
-
-    const tokenRes = await fetch(`${app.baseUrl}/oauth2/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: client.clientId, client_secret: client.clientSecret }),
-    });
-    const tokenBody = await tokenRes.json();
+    const { code, verifier } = await authorizeCode({ baseUrl: app.baseUrl, accessToken, clientId: client.clientId, redirectUri, scope: 'openid email' });
+    const { body: tokenBody } = await exchangeCode({ baseUrl: app.baseUrl, client, code, redirectUri, verifier });
     assert.equal(tokenBody.scope, 'openid email');
 
     // Later, the client is granted a broader allowedScopes by an admin. A refresh must not

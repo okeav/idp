@@ -10,7 +10,11 @@ export function defineAuthorizationCodeModel(connection) {
             redirectUri: { type: String, required: true },
             scopes: [{ type: String }],
             codeChallenge: { type: String },
-            codeChallengeMethod: { type: String, enum: ['S256', 'plain'] },
+            codeChallengeMethod: { type: String, enum: ['S256', 'plain', null] },
+            // OIDC: the nonce from the authorization request, echoed into the ID token.
+            nonce: { type: String, default: null },
+            // When the user last logged in at the IdP — the ID token's auth_time.
+            authTime: { type: Date, default: null },
             expiresAt: { type: Date, required: true, index: { expireAfterSeconds: 0 } },
             used: { type: Boolean, default: false },
             usedAt: { type: Date, default: null },

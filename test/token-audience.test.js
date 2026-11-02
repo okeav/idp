@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import jwt from 'jsonwebtoken';
 import { buildTestApp, uniqueEmail } from './helpers/build-test-app.js';
 import { json } from './helpers/serve.js';
+import { authorizeCode, exchangeCode } from './helpers/oauth.js';
 import { verifyAccessToken, issueAccessToken, authContextMiddleware, tokenHandler } from '../src/index.js';
 import { getActiveSigningKey } from '../src/signing/key-registry.js';
 import { sessionKindOf } from '../src/utils/session-kind.js';
@@ -50,15 +51,9 @@ async function createClient(overrides = {}) {
 
 /** Runs the full authorization-code flow for `user` and returns the client's token response. */
 async function oauthTokensFor(user, client, scope = 'openid') {
-    const confirm = await fetch(`${app.baseUrl}/oauth2/authorize/confirm`, {
-        ...json({ client_id: client.clientId, redirect_uri: redirectUri, scope }, { Authorization: `Bearer ${user.accessToken}` }),
-        redirect: 'manual',
-    });
-    assert.equal(confirm.status, 302, await confirm.text());
-    const code = new URL(confirm.headers.get('location')).searchParams.get('code');
-    const res = await fetch(`${app.baseUrl}/oauth2/token`, json({ grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: client.clientId, client_secret: client.clientSecret }));
-    const body = await res.json();
-    assert.equal(res.status, 200, JSON.stringify(body));
+    const { code, verifier } = await authorizeCode({ baseUrl: app.baseUrl, accessToken: user.accessToken, clientId: client.clientId, redirectUri, scope });
+    const { status, body } = await exchangeCode({ baseUrl: app.baseUrl, client, code, redirectUri, verifier });
+    assert.equal(status, 200, JSON.stringify(body));
     return body;
 }
 
@@ -160,7 +155,7 @@ test('a first-party refresh token is refused by the OAuth2 refresh grant — and
 
     const res = await fetch(`${app.baseUrl}/oauth2/token`, json({ grant_type: 'refresh_token', refresh_token: user.refreshToken, client_id: client.clientId, client_secret: client.clientSecret }));
     assert.equal(res.status, 400);
-    assert.equal((await res.json()).error, 'INVALID_REFRESH_TOKEN');
+    assert.equal((await res.json()).error, 'INVALID_GRANT');
 
     assert.equal((await fetch(`${app.baseUrl}/refresh`, json({ refreshToken: user.refreshToken }))).status, 401);
 });
@@ -173,7 +168,7 @@ test('client B cannot redeem client A\'s refresh token', async () => {
 
     const stolen = await fetch(`${app.baseUrl}/oauth2/token`, json({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientB.clientId }));
     assert.equal(stolen.status, 400);
-    assert.equal((await stolen.json()).error, 'INVALID_REFRESH_TOKEN');
+    assert.equal((await stolen.json()).error, 'INVALID_GRANT');
 
     // ...and the token is burnt for A as well.
     const legit = await fetch(`${app.baseUrl}/oauth2/token`, json({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientA.clientId, client_secret: clientA.clientSecret }));
@@ -234,7 +229,7 @@ test('sessionKindOf: explicit kind wins; pre-0.4.0 rows are inferred from their 
 test('tokenHandler passes a failed grant to next() instead of rejecting (would crash Express 4)', async () => {
     const req = { body: { grant_type: 'authorization_code', client_id: 'no-such-client', code: 'x', redirect_uri: redirectUri }, headers: {} };
     let forwarded;
-    const result = tokenHandler(req, {}, (err) => { forwarded = err; });
+    const result = tokenHandler(req, { set() {} }, (err) => { forwarded = err; });
     await assert.doesNotReject(result, 'the handler promise must not reject — Express 4 ignores it and the process dies');
-    assert.equal(forwarded?.code, 'OAUTH_CLIENT_NOT_FOUND');
+    assert.equal(forwarded?.code, 'INVALID_CLIENT');
 });
