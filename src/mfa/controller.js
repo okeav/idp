@@ -105,7 +105,16 @@ export function verifyChallengeToken(state, mfaChallengeToken) {
     }
 }
 
+/**
+ * A challenge is void once the user's sessions were revoked after it was issued (password reset or
+ * change, logout-all): compared by the sessionEpoch it carries — a counter, not the app servers'
+ * clocks. A challenge without one (issued before 0.4.0) falls back to passwordChangedAt.
+ */
 export function assertChallengeCurrent(user, challengeClaims) {
+    if (Number.isInteger(challengeClaims.sep)) {
+        if (user.sessionEpoch !== challengeClaims.sep) throw INVALID_CHALLENGE();
+        return;
+    }
     const changedAt = user.passwordChangedAt ? Math.floor(new Date(user.passwordChangedAt).getTime() / 1000) : null;
     if (changedAt !== null && challengeClaims.iat < changedAt) throw INVALID_CHALLENGE();
 }
@@ -282,7 +291,7 @@ export async function verifyMfaChallengeHandler(req, res, next) {
         if (opened?.needsUpgrade) await state.storage.userRepository.updateById(userId, { mfaSecret: await sealMfaSecret(state, opened.secret, userId) });
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'mfa' });
-        const session = await issueSession(state, { user, claims, req });
+        const session = await issueSession(state, { user, claims, req, sessionEpoch: challenge.sep });
 
         await auditLog(state.logger, state.hooks, 'MFA_VERIFIED', { userId, method });
 

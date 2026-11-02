@@ -132,7 +132,10 @@ export async function revokeOtherUserSessions(state, userId, { exceptJti }) {
  */
 export async function assertChainNotRevoked(state, userId, sinceEpoch, newTokenHash, familyId) {
     const user = await state.storage.userRepository.findById(userId, { select: 'sessionEpoch sessionsRevokedExceptFamily' });
-    const current = user?.sessionEpoch ?? 0;
+    // Without a readable epoch there is no telling whether the chain was revoked: refuse (an adapter
+    // that doesn't persist the field would otherwise turn this check off silently).
+    if (user && !Number.isInteger(user.sessionEpoch)) state.logger?.error?.({ userId: String(userId) }, 'Storage adapter returned a user without an integer sessionEpoch — session refused (see storage/interfaces.js)');
+    const current = Number.isInteger(user?.sessionEpoch) ? user.sessionEpoch : Infinity;
     const since = sinceEpoch ?? 0;
     if (current <= since) return;
     if (familyId && current === since + 1 && user.sessionsRevokedExceptFamily === familyId) {

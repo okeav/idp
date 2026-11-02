@@ -1,5 +1,6 @@
 import { getState } from './config/state.js';
 import * as tokenService from './signing/token.service.js';
+import { currentSessionEpoch } from './utils/session-family.js';
 
 // ── Bootstrap ────────────────────────────────────────────────────────────
 export { initIdentityProvider } from './config/init.js';
@@ -29,7 +30,9 @@ export async function issueOAuth2AccessToken(subject, client, scopes, opts) {
     return tokenService.issueOAuth2AccessToken(getState(), subject, client, scopes, { sessionless: true, ...opts });
 }
 export async function issueMfaChallengeToken(subjectId) {
-    return tokenService.issueMfaChallengeToken(getState(), subjectId);
+    const state = getState();
+    // Bound to the user's current session epoch, like the challenges the IdP issues itself.
+    return tokenService.issueMfaChallengeToken(state, subjectId, { sessionEpoch: await currentSessionEpoch(state, subjectId) });
 }
 export function verifyMfaChallengeToken(token) {
     return tokenService.verifyMfaChallengeToken(getState(), token);

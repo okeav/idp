@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { withIds } from '../normalize.js';
 
 /** @implements {import('../../interfaces.js').UserRepository} */
@@ -18,6 +19,8 @@ export class MongoUserRepository {
     }
 
     async findById(id, opts = {}) {
+        // An id that can't be a user's (e.g. from a token minted for another system) finds nobody.
+        if (!mongoose.isValidObjectId(id)) return null;
         let query = this.model.findById(id);
         if (opts.select) query = query.select(opts.select);
         return query.exec();

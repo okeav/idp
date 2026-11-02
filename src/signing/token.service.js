@@ -167,7 +167,12 @@ export async function issueOAuth2AccessToken(state, subject, client, scopes, { s
     return { token, expiresAt: new Date(expiresAt * 1000), kid, jti: claims.jti };
 }
 
-export async function issueMfaChallengeToken(state, subjectId) {
+/**
+ * `opts.sessionEpoch`: the user's sessionEpoch as read BEFORE the first factor was checked. The
+ * challenge is refused at /mfa/verify if the user's sessions were revoked since (password reset,
+ * logout-all), and the session it completes belongs to that epoch.
+ */
+export async function issueMfaChallengeToken(state, subjectId, { sessionEpoch } = {}) {
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = now + state.config.ttls.mfaChallenge;
     const [kid, key] = getActiveSigningKey(state.signingKeys);
@@ -180,6 +185,7 @@ export async function issueMfaChallengeToken(state, subjectId) {
         jti: crypto.randomUUID(),
         iat: now,
         exp: expiresAt,
+        ...(Number.isInteger(sessionEpoch) ? { sep: sessionEpoch } : {}),
     };
 
     return jwt.sign(claims, key.privateKeyPem, { algorithm: ALGORITHM, keyid: kid });

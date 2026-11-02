@@ -1,10 +1,29 @@
 import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { verifyIssuedToken, isIdTokenPayload } from '../signing/token.service.js';
-import { OAUTH_CLIENT_STATUS, CACHE_KEY_PREFIXES } from '../config/constants.js';
+import { OAUTH_CLIENT_STATUS, CACHE_KEY_PREFIXES, COOKIE_NAMES, SESSION_KINDS } from '../config/constants.js';
 import { auditLog } from '../hooks/index.js';
 import { clearSessionCookies } from '../password-auth/controllers.js';
 import { assertTrustedOrigin } from '../middleware/csrf.js';
+import { readSessionCookie } from '../utils/cookies.js';
+import { sessionKindOf } from '../utils/session-kind.js';
+import { familyOf, peekRefreshRow, resolveRefreshTokenHash, revokeFamily } from '../utils/session-family.js';
+
+/**
+ * The browser's own first-party session row: the one behind its access token (`req.auth`) — or, once
+ * that short-lived cookie has expired, the one behind its refresh cookie. Null when there is none.
+ */
+async function ownSessionRow(state, req) {
+    const sessions = state.storage.sessionRepository;
+    if (req.auth?.userId && req.auth.tokenMeta?.jti && !req.auth.tokenMeta.sessionless && typeof sessions.findByJti === 'function') {
+        const row = await sessions.findByJti(req.auth.tokenMeta.jti);
+        if (row && !row.revokedAt && String(row.user) === String(req.auth.userId)) return row;
+    }
+    const raw = readSessionCookie(state, req, COOKIE_NAMES.REFRESH_TOKEN);
+    if (!raw) return null;
+    const row = await peekRefreshRow(state, await resolveRefreshTokenHash(state, raw));
+    return row && sessionKindOf(row) === SESSION_KINDS.FIRST_PARTY ? row : null;
+}
 
 /**
  * GET|POST /oidc/end-session — RP-initiated logout (OIDC RP-Initiated Logout 1.0).
@@ -37,11 +56,14 @@ export async function endSessionHandler(req, res, next) {
         const postLogoutRedirectUri = typeof q.post_logout_redirect_uri === 'string' ? q.post_logout_redirect_uri : undefined;
         const oidcState = typeof q.state === 'string' ? q.state : undefined;
 
+        const own = await ownSessionRow(state, req);
+        const signedInUserId = req.auth?.userId ?? (own ? String(own.user) : undefined);
+
         let hint = null;
         if (idTokenHint) {
             hint = verifyIssuedToken(state, idTokenHint, { issuer: state.config.issuer, ignoreExpiration: true });
             if (!isIdTokenPayload(state, hint)) throw new IdpError({ code: 'INVALID_REQUEST', httpStatus: 400, message: 'Invalid id_token_hint' });
-            if (req.auth?.userId && String(req.auth.userId) !== String(hint.sub)) {
+            if (signedInUserId && String(signedInUserId) !== String(hint.sub)) {
                 throw new IdpError({ code: 'INVALID_REQUEST', httpStatus: 400, message: 'id_token_hint does not belong to the signed-in user' });
             }
         }
@@ -61,7 +83,7 @@ export async function endSessionHandler(req, res, next) {
         }
 
         // Signed in, and nothing shows the user asked for this: ask them first.
-        if (req.auth?.userId && !hint && !confirmed) {
+        if (signedInUserId && !hint && !confirmed) {
             res.set('Cache-Control', 'no-store');
             return res.status(200).json({ action: 'logout_confirmation_required' });
         }
@@ -69,14 +91,14 @@ export async function endSessionHandler(req, res, next) {
         const sessions = state.storage.sessionRepository;
         const revokedJtis = [];
 
-        // The browser's own IdP session.
-        if (req.auth?.userId && req.auth.tokenMeta?.jti && typeof sessions.findByJti === 'function') {
-            const own = await sessions.findByJti(req.auth.tokenMeta.jti);
-            if (own && !own.revokedAt && (await sessions.revokeById(own.id, req.auth.userId))) revokedJtis.push(req.auth.tokenMeta.jti);
-            clearSessionCookies(res, state);
+        // The browser's own IdP session — its whole refresh family, so no rotated sibling carries on.
+        if (own) {
+            const revoked = await revokeFamily(state, familyOf(own).familyId, 'end_session');
+            if (!revoked && (await sessions.revokeById(own.id, own.user)) && own.jti) revokedJtis.push(own.jti);
         }
+        if (signedInUserId) clearSessionCookies(res, state);
         // The hinted relying party's sessions for this user — only on the user's own browser session.
-        if (hint && req.auth?.userId && typeof sessions.revokeForClient === 'function') {
+        if (hint && signedInUserId && typeof sessions.revokeForClient === 'function') {
             const { jtis } = await sessions.revokeForClient(hint.aud, { userId: hint.sub });
             revokedJtis.push(...jtis);
         }
@@ -84,7 +106,7 @@ export async function endSessionHandler(req, res, next) {
             await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${jti}`, '1', state.config.ttls.revocationCache);
         }
 
-        const userId = req.auth?.userId ?? hint?.sub;
+        const userId = signedInUserId ?? hint?.sub;
         if (userId) await auditLog(state.logger, state.hooks, 'END_SESSION', { userId: String(userId), clientId: hint?.aud ?? null, revokedSessions: revokedJtis.length });
 
         if (postLogoutRedirectUri) {

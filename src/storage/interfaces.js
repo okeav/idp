@@ -27,7 +27,8 @@
  * @property {(id: string, opts?: {exceptFamily?: string|null}) => Promise<number|null>} bumpSessionEpoch - ATOMIC:
  *   increment the user's `sessionEpoch` (a number, default 0, returned on every user read) and record
  *   `sessionsRevokedExceptFamily = exceptFamily` and `sessionsRevokedAt`; resolve the new epoch. "Revoke all sessions"
- *   is ordered by this counter, never by comparing app-server clocks.
+ *   is ordered by this counter, never by comparing app-server clocks. A user read that lacks an integer
+ *   `sessionEpoch` makes sign-in and code redemption fail (closed), with an error log.
  * @property {(id: string) => Promise<object|null>} [incrementFailedLoginAttempts] - unused since 0.4.0 (the password
  *   lockout lives in the attempt counters, key `password-login:<userId>`); kept for older callers
  * @property {(id: string, step: number) => Promise<boolean>} [claimTotpStep] - ATOMIC: set `mfaLastTotpStep = step`
@@ -85,7 +86,8 @@
  * @property {() => Promise<{deletedCount: number}>} [pruneExpired]
  *
  * @typedef {Object} ConsentRepository
- * Every consent has a `version` (number, default 0) that `upsert` and `revoke` both increment atomically.
+ * Every consent has a `version` (number, default 0) that `upsert` and `revoke` both increment atomically. A consent
+ * read without an integer `version` refuses code redemption (fail closed).
  * @property {(userId: string, clientId: string, scopes: string[]) => Promise<object>} upsert - resolves the consent
  *   AFTER the write (with its new `version`)
  * @property {(userId: string, clientId: string) => Promise<object|null>} find
@@ -160,14 +162,14 @@
  * typedefs above marked optional (`[name]`) is feature-detected.
  */
 export const REQUIRED_STORAGE_METHODS = Object.freeze({
-    userRepository: ['create', 'findById', 'findByEmail', 'findByExternalProvider', 'updateById', 'updateByIdIfStatus', 'bumpSessionEpoch', 'linkExternalProvider', 'deleteById', 'countAll', 'findMany'],
-    sessionRepository: ['createSession', 'createSessionForLogin', 'findByRefreshTokenHash', 'revokeByRefreshTokenHash', 'rotatedWithin', 'raiseFamilyEpoch', 'isFamilyLive', 'isFamilyRevoked', 'revokeById', 'revokeAllForUser', 'listActiveForUser', 'listHistoryForUser', 'existsForDevice'],
+    userRepository: ['create', 'findById', 'findByEmail', 'findByExternalProvider', 'updateById', 'updateByIdIfStatus', 'bumpSessionEpoch', 'linkExternalProvider', 'countAll', 'findMany'],
+    sessionRepository: ['createSession', 'createSessionForLogin', 'findByRefreshTokenHash', 'revokeByRefreshTokenHash', 'rotatedWithin', 'raiseFamilyEpoch', 'isFamilyLive', 'isFamilyRevoked', 'revokeById', 'revokeAllForUser', 'listActiveForUser', 'existsForDevice'],
     authorizationCodeRepository: ['create', 'consumeByCodeHash'],
     consentRepository: ['upsert', 'find', 'listForUser', 'revoke'],
     oauthClientRepository: ['create', 'findByClientId', 'findBySlug', 'updateByClientId', 'listMany', 'countAll'],
     verificationTokenRepository: ['create', 'consumeByHash', 'consumeByCode', 'findActive', 'clearCodes', 'replaceForUser', 'deleteAllForUser'],
     serviceKeyRepository: ['upsertByKid', 'listPublishable', 'setStatusByKid'],
-    credentialRepository: ['create', 'findByCredentialId', 'findByUserId', 'updateCounter', 'deleteByCredentialId', 'countForUser'],
+    credentialRepository: ['create', 'findByCredentialId', 'findByUserId', 'updateCounter', 'deleteByCredentialId'],
 });
 
 /** Throws naming every required method the adapter's `storage` object lacks. */

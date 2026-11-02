@@ -36,11 +36,13 @@ async function resolveClaims(state, user, ctx) {
 /** Builds and persists one full login session (access + refresh token pair) — shared by login, MFA-verify-challenge, and SSO callback. */
 /**
  * The session is created in the user's `sessionEpoch` as read when this sign-in loaded the user —
- * before it checked any credential. A "sign out everywhere" after that read (e.g. a password reset that
+ * before it checked any credential — or, completing an MFA challenge, the epoch the challenge carries
+ * (read before the first factor). A "sign out everywhere" after that read (e.g. a password reset that
  * landed while the old password was being checked) ends the session this call creates.
  */
-async function issueSession(state, { user, claims, req }) {
-    const sessionEpoch = Number.isInteger(user.sessionEpoch) ? user.sessionEpoch : await currentSessionEpoch(state, user.id);
+async function issueSession(state, { user, claims, req, sessionEpoch: epochOverride }) {
+    const sessionEpoch = Number.isInteger(epochOverride) ? epochOverride
+        : Number.isInteger(user.sessionEpoch) ? user.sessionEpoch : await currentSessionEpoch(state, user.id);
     const wasFirstLogin = !user.lastLoginAt;
     const deviceInfo = req.headers['user-agent'] || '';
     const deviceFingerprint = buildDeviceFingerprint(deviceInfo);
@@ -440,7 +442,9 @@ async function onPasswordLoginLocked(state, user, entry) {
  * the account has MFA: a short-lived challenge token to complete at /mfa/verify or /webauthn/mfa/verify.
  */
 async function mfaChallengeResponse(state, user) {
-    const mfaChallengeToken = await issueMfaChallengeToken(state, user.id);
+    // `user` was loaded before its first factor was checked: the challenge carries that epoch.
+    const sessionEpoch = Number.isInteger(user.sessionEpoch) ? user.sessionEpoch : await currentSessionEpoch(state, user.id);
+    const mfaChallengeToken = await issueMfaChallengeToken(state, user.id, { sessionEpoch });
     return { mfaRequired: true, mfaChallengeToken, expiresIn: state.config.ttls.mfaChallenge };
 }
 

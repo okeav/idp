@@ -143,6 +143,7 @@ export async function authorizeHandler(req, res, next) {
         validateRedirectUri(client, redirect_uri);
 
         const requestedScopes = (scope || 'openid').split(' ').filter(Boolean);
+        if (requestedScopes.length === 0) throw new IdpError({ code: 'INVALID_REQUEST', httpStatus: 400, message: 'scope must name at least one scope' });
         validateScopes(client, requestedScopes);
         assertPkce(state, client, code_challenge);
 
@@ -178,7 +179,7 @@ export async function authorizeHandler(req, res, next) {
             });
         }
 
-        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: sessionJtiOf(req), consentVersion: existingConsent.version });
+        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: sessionJtiOf(req), consentVersion: existingConsent?.version });
         await auditLog(state.logger, state.hooks, 'OAUTH2_AUTHORIZE', { userId: req.auth.userId, clientId: client_id, scopes: requestedScopes });
         redirectToClient(res, state, redirect_uri, { code, state: oauthState });
     } catch (err) {

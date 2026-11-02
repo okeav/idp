@@ -330,3 +330,77 @@ test('the session exempted by "sign out other sessions" survives it repeatedly; 
     assert.equal((await post(app.baseUrl, '/refresh', { refreshToken: once.refreshToken })).status, 200);
     assert.equal((await post(app.baseUrl, '/refresh', { refreshToken: other.refreshToken })).status, 401);
 });
+
+// ── review findings ──────────────────────────────────────────────────────────
+
+test('end-session recognises the browser session from the refresh cookie alone (access cookie expired)', async () => {
+    const email = await registered();
+    const login = await post(app.baseUrl, '/login', { email, password }, { Origin: ISSUER_ORIGIN });
+    const refreshCookie = login.headers.getSetCookie().find((c) => c.includes('refresh_token=')).split(';')[0];
+
+    const asked = await fetch(`${app.baseUrl}/oidc/end-session`, { headers: { Cookie: refreshCookie } });
+    assert.deepEqual(await asked.json(), { action: 'logout_confirmation_required' });
+    assert.equal((await post(app.baseUrl, '/refresh', {}, { Cookie: refreshCookie, Origin: ISSUER_ORIGIN })).status, 200, 'the GET ended nothing');
+
+    // That refresh rotated the cookie: use the new one.
+    const again = await post(app.baseUrl, '/login', { email, password }, { Origin: ISSUER_ORIGIN });
+    const live = again.headers.getSetCookie().find((c) => c.includes('refresh_token=')).split(';')[0];
+    const confirmed = await post(app.baseUrl, '/oidc/end-session', {}, { Cookie: live, Origin: ISSUER_ORIGIN });
+    assert.equal(confirmed.status, 200);
+    assert.ok(confirmed.headers.getSetCookie().some((c) => c.startsWith('__Host-refresh_token=;')), 'cookies cleared');
+    assert.equal((await post(app.baseUrl, '/refresh', {}, { Cookie: live, Origin: ISSUER_ORIGIN })).status, 401, 'the session ended');
+});
+
+async function mfaUser() {
+    const u = await loggedIn();
+    const auth = { Authorization: `Bearer ${u.accessToken}` };
+    const { secret } = await (await fetch(`${app.baseUrl}/me/mfa/setup`, { method: 'POST', headers: auth })).json();
+    const { generate } = await import('otplib');
+    const { recoveryCodes } = await (await post(app.baseUrl, '/me/mfa/confirm', { code: await generate({ secret }) }, auth)).json();
+    return { ...u, recoveryCodes };
+}
+
+test('an MFA challenge from before "sign out everywhere" is refused — no clock involved', async () => {
+    const u = await mfaUser();
+    const { mfaChallengeToken } = await (await post(app.baseUrl, '/login', { email: u.email, password })).json();
+    await revokeAllUserSessions(app.state, u.userId);
+    const res = await post(app.baseUrl, '/mfa/verify', { mfaChallengeToken, code: u.recoveryCodes[0] });
+    assert.equal(res.status, 401);
+    assert.equal((await res.json()).error, 'INVALID_MFA_CHALLENGE_TOKEN');
+    // A challenge issued after it completes normally.
+    const fresh = (await (await post(app.baseUrl, '/login', { email: u.email, password })).json()).mfaChallengeToken;
+    assert.equal((await post(app.baseUrl, '/mfa/verify', { mfaChallengeToken: fresh, code: u.recoveryCodes[1] })).status, 200);
+});
+
+test('an MFA challenge is refused after "sign out everywhere" even on a server whose clock is behind', async () => {
+    const u = await mfaUser();
+    const { mfaChallengeToken } = await (await post(app.baseUrl, '/login', { email: u.email, password })).json();
+    await withClockOffset(-10_000, () => revokeAllUserSessions(app.state, u.userId));
+    assert.equal((await post(app.baseUrl, '/mfa/verify', { mfaChallengeToken, code: u.recoveryCodes[0] })).status, 401);
+});
+
+test('/oauth2/authorize with an empty scope list is a 400, not a 500', async () => {
+    const c = await rpClient();
+    const token = await tokenAged(5);
+    for (const extra of [{ scope: ' ' }, { scope: ' ', prompt: 'none' }]) {
+        const res = await authorize(c.clientId, token, extra);
+        assert.equal(res.status, 400, JSON.stringify(extra));
+    }
+});
+
+test('an adapter that does not return sessionEpoch or consent version fails closed', async () => {
+    await withTemporaryApp({}, async (temp) => {
+        const email = await registered(temp);
+        const users = temp.state.storage.userRepository;
+        const findById = users.findById.bind(users);
+        users.findById = async (...args) => {
+            const u = await findById(...args);
+            return u ? Object.assign(u.toObject ? u.toObject() : { ...u }, { id: String(u.id ?? u._id), sessionEpoch: undefined }) : u;
+        };
+        try {
+            assert.equal((await post(temp.baseUrl, '/login', { email, password })).status, 401);
+        } finally {
+            users.findById = findById;
+        }
+    });
+});

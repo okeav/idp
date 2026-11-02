@@ -101,7 +101,7 @@ export async function verifyMfaWebauthnChallengeHandler(req, res, next) {
         await spendChallenge(state, challenge);
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'webauthn-mfa' });
-        const session = await issueSession(state, { user, claims, req });
+        const session = await issueSession(state, { user, claims, req, sessionEpoch: challenge.sep });
 
         await auditLog(state.logger, state.hooks, 'MFA_VERIFIED', { userId, method: 'webauthn' });
 

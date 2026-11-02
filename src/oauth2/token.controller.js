@@ -67,12 +67,13 @@ async function assertCodeStillAuthorized(state, user, authCode) {
         if (!authorizing || (authorizing.revokedAt && !rotatedButLive)) throw INVALID_GRANT('Authorization code was revoked');
     }
     // Counters, not timestamps: the code may have been issued on another server than this one.
-    if ((user.sessionEpoch ?? 0) > (authCode.sessionEpoch ?? 0)) throw INVALID_GRANT('Authorization code was revoked');
+    // A missing epoch or version (an adapter that doesn't persist them) refuses rather than passes.
+    if (!Number.isInteger(user.sessionEpoch) || user.sessionEpoch > (authCode.sessionEpoch ?? 0)) throw INVALID_GRANT('Authorization code was revoked');
 
     const consent = await state.storage.consentRepository.find(user.id, authCode.clientId);
     const live = consent && !(consent.expiresAt && new Date(consent.expiresAt) <= new Date());
     const covered = live && (authCode.scopes || []).every((s) => (consent.scopes || []).includes(s));
-    if (!covered || (consent.version ?? 0) !== (authCode.consentVersion ?? 0)) throw INVALID_GRANT('Authorization code was revoked');
+    if (!covered || !Number.isInteger(consent.version) || consent.version !== authCode.consentVersion) throw INVALID_GRANT('Authorization code was revoked');
 }
 
 /**
@@ -299,6 +300,7 @@ async function findClientSession(state, client, token) {
         }
         if (payload.client_id !== client.clientId) return null;
         if (payload.sessionless) return { payload, session: null };
+        if (typeof sessions.findByJti !== 'function') return null;
         const session = await sessions.findByJti(payload.jti);
         return session ? { payload, session } : null;
     }
