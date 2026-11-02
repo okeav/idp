@@ -14,7 +14,8 @@ window, regardless of whether individual requests succeed. It's a **distinct con
 passwords, counted per account in the attempt-counter store (`password-login:<userId>`) — the
 account stays `ACTIVE` and every other sign-in method keeps working; see [Password & Email Auth](password-email-auth.md#failed-password-lockout)), from
 the per-account MFA lockout (`config.mfa.lockout` — see [MFA](mfa.md#per-account-lockout)), and
-from the per-address email-verification code and per-account password-change lockouts
+from the email-verification code budgets (per verification ticket, or per address) and the
+per-account password-change lockout
 (`security.verificationCodeLockout`, `security.passwordChangeLockout`). Those lockouts are
 counted in storage and are independent of `rateLimiting.enabled`.
 
@@ -68,7 +69,7 @@ touched. (Think twice: several of these limits — `emailVerification`, `oauth2T
 | `passwordReset` | `POST /password/forgot` | per IP | 3 / hour | closed |
 | `passwordResetByEmail` | `POST /password/forgot` | per address | 3 / hour | closed |
 | `mfaChallenge` | `/mfa/verify` and `/webauthn/mfa/verify` (one shared key) | per IP | 5 / 15 min | closed |
-| `refreshToken` | `POST /refresh` | per IP | 30 / min | **open** |
+| `refreshToken` | `POST /session/refresh` | per IP | 30 / min | **open** |
 | `magicLink` | `POST /magic-link/request` | per IP | 3 / hour | closed |
 | `magicLinkByEmail` | `POST /magic-link/request` | per address | 3 / hour | closed |
 | `register` | `POST /register` and `/register/resend-verification` | per IP | 10 / hour | closed |

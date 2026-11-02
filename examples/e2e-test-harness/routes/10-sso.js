@@ -78,13 +78,13 @@ export function mountSsoFlow(app, { BASE_URL, IDP_BASE_URL, googleConfigured }) 
         <pre class="result">${JSON.stringify(meResult, null, 2)}</pre>
       </div>
       <div class="card">
-        <p class="step">Call <code>/auth/refresh</code> to see (and decode) the actual JWT this SSO login produced — the callback itself only sets cookies, it doesn't return a JSON token body, so this is how to reveal it.</p>
+        <p class="step">Call <code>/auth/session/refresh</code> to see (and decode) the actual JWT this SSO login produced — the callback itself only sets cookies, it doesn't return a JSON token body, so this is how to reveal it.</p>
         <button onclick="reveal()">Reveal token via refresh</button>
         <div id="token-display"></div>
       </div>
       <script>
         async function reveal() {
-          const result = await callApi('${IDP_BASE_URL}/refresh', { method: 'POST', body: {} });
+          const result = await callApi('${IDP_BASE_URL}/session/refresh', { method: 'POST', body: {} });
           if (result.body?.accessToken) renderTokenPair('token-display', result.body);
           else document.getElementById('token-display').innerHTML = '<pre class="result err">' + JSON.stringify(result.body, null, 2) + '</pre>';
         }

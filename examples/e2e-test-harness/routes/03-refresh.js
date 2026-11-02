@@ -23,7 +23,7 @@ export function mountRefreshFlow(app, { AUTH_PREFIX }) {
         let previousToken = null;
         async function doRefresh() {
           const current = document.getElementById('refreshToken').value;
-          const result = await callApi('${AUTH_PREFIX}/refresh', { method: 'POST', body: { refreshToken: current }, credentials: 'omit' });
+          const result = await callApi('${AUTH_PREFIX}/session/refresh', { method: 'POST', body: { refreshToken: current }, credentials: 'omit' });
           showResult('result', result);
           if (result.body?.refreshToken) {
             previousToken = current; // capture what we just spent, before overwriting the box
@@ -33,7 +33,7 @@ export function mountRefreshFlow(app, { AUTH_PREFIX }) {
         }
         async function retryPrevious() {
           if (!previousToken) { alert('Do a successful refresh first so there is a "previous" token to retry.'); return; }
-          const result = await callApi('${AUTH_PREFIX}/refresh', { method: 'POST', body: { refreshToken: previousToken }, credentials: 'omit' });
+          const result = await callApi('${AUTH_PREFIX}/session/refresh', { method: 'POST', body: { refreshToken: previousToken }, credentials: 'omit' });
           showResult('result', result);
         }
       </script>`,

@@ -65,7 +65,7 @@ await initIdentityProvider({
   hooks: {
     // Called on every login that mints a session (password, MFA-verify, SSO, magic-link,
     // WebAuthn) and — by default since 0.4.0 (session.reresolveClaimsOnRefresh) — on every
-    // POST /refresh too (ctx.method === 'refresh'), so a capability change takes effect at the
+    // POST /session/refresh too (ctx.method === 'refresh'), so a capability change takes effect at the
     // next access-token rotation. Keep it fast. See the Event hooks table in Bootstrap & Config.
     resolveAuthContext: async (user, ctx) => {
       let account = await Account.findOne({ userId: user.id });

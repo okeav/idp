@@ -60,12 +60,13 @@ await initIdentityProvider({
   hooks: {
     // No real mailer wired up — print what would have been sent. (This hook isn't
     // awaited by /register, so a slow mailer can't reveal which addresses exist.)
-    onVerificationEmailRequested: ({ email, verificationCode }) => {
-      console.log(`[dev email] Verify ${email} — code: ${verificationCode}`);
+    // verificationCode is null from the address's 4th email in a code lifetime: send the link only.
+    onVerificationEmailRequested: ({ email, verificationCode, verificationToken }) => {
+      console.log(`[dev email] Verify ${email} — ${verificationCode ? `code: ${verificationCode} or ` : ''}token: ${verificationToken}`);
     },
     onAuditLog: (event) => console.log(`[audit] ${event.action}`, event),
     // Called on every login (password/MFA/SSO/magic-link/WebAuthn) and every
-    // /refresh to build the access token's opaque `claims` — a real app resolves
+    // /session/refresh to build the access token's opaque `claims` — a real app resolves
     // role/permissions from its own data model here.
     resolveAuthContext: async () => ({ claims: { role: 'member' } }),
   },
@@ -143,8 +144,9 @@ curl -X POST http://localhost:3000/auth/login \
   `Secure` cookie over plain `http://`. This fails quietly: `curl`/Postman don't enforce `Secure`
   at all, so a login that looks like it worked in a terminal can still be broken in an actual
   browser. Only matters for the cookie path — an `Authorization: Bearer` client is unaffected.
-  (With Secure the cookies are `__Host-access_token` / `__Host-refresh_token`; without it, plain
-  `access_token` / `refresh_token`.) The issuer may be `http` only for `localhost` / `127.0.0.1` /
+  (With Secure the cookies are `__Host-access_token`, `__Secure-refresh_token` (`Path=/auth/session`)
+  and `__Host-refresh_binding`; without it, plain `access_token`, `refresh_token` and
+  `refresh_binding`.) The issuer may be `http` only for `localhost` / `127.0.0.1` /
   `[::1]` (or anywhere with `NODE_ENV=development`) — otherwise `initIdentityProvider()` requires `https`.
 
 ## Related

@@ -138,7 +138,7 @@ Errors: `USER_NOT_FOUND` (404); `MFA_NOT_ENABLED` (400); `CURRENT_PASSWORD_INCOR
 **No auth required** — identity comes from the challenge token, not `req.auth`. Completes the
 `mfaRequired` response `loginHandler` returns when `user.mfaEnabled`. Body:
 `{ mfaChallengeToken: string, code: string (6-32 chars) }` — a TOTP code or a recovery code
-(`XXXXX-XXXXX-XXXXX-XXXXX`, 23 chars with the dashes). Rate limited, fail-closed: `mfa-challenge:ip:<req.ip>` against
+(`XXXXX-XXXXX-XXXXX-XXXXX`, 23 chars with the dashes). A `login_challenge` given to the first factor rides in the challenge token (claim `lch`) and is bound to the session created here, as with `/webauthn/mfa/verify` — see [Login challenges](oauth2-authorization-server.md#login-challenges). Rate limited, fail-closed: `mfa-challenge:ip:<req.ip>` against
 `config.rateLimiting.mfaChallenge` (5/15min default). It sets session cookies, so every browser
 request is subject to the [CSRF origin check](middleware.md#csrf-origin-check) (403
 `CSRF_ORIGIN_REJECTED` from an origin that is neither the issuer's nor in `cookies.trustedOrigins`).

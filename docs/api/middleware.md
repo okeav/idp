@@ -104,8 +104,9 @@ effect on **every instance immediately**, not just the one that handled it.
   `issueAccessToken()`/`issueOAuth2AccessToken()` exports (see
   [Tokens & Signing](tokens-rs256.md)). Tokens from login, MFA, SSO, magic link, WebAuthn,
   refresh, and the `authorization_code`/`refresh_token` OAuth2 grants are session-bound.
-- A storage adapter whose `sessionRepository` has no `findByJti` falls back to the cache-only
-  behaviour below, with a startup warning.
+- `sessionRepository.findByJti` is a required storage method since 0.4.0 (an adapter without it
+  is refused at startup), so the cache-only behaviour below applies only with
+  `verifyOnEachRequest: false` or a `sessionless` token.
 
 This check is what `verifyAccessToken` alone does **not** do — a resource server that calls
 `verifyAccessToken` directly accepts a revoked session's token until it expires.
@@ -129,7 +130,7 @@ with no error (and `req.auth` left `undefined`) when **no token is presented at 
 rejecting. A malformed/expired/revoked token still rejects even in optional mode — "optional"
 means "anonymous is allowed," not "an invalid token is silently ignored." Used by
 `/oauth2/authorize` (behaves differently for logged-in vs. anonymous callers) and
-`/oidc/end-session` (`GET` and `POST`).
+`/session/end` (`GET` and `POST`).
 
 Throws:
 - `AUTH_REQUIRED` (401) — no token presented, `optional` not set.
@@ -199,7 +200,7 @@ Anything else is refused with 403 `CSRF_ORIGIN_REJECTED`. The check runs in
 with an `Authorization: Bearer` header are unaffected — a browser never attaches one on its own.
 
 **Endpoints that set or clear session cookies check every request** (0.4.0), whatever its
-credential: `POST /login`, `/refresh` (refresh token from the cookie *or* the body), `/logout`
+credential: `POST /login`, `/session/refresh` (refresh token from the cookie *or* the body), `/session/logout`
 (likewise — a cross-site form could otherwise clear the victim's session), `/mfa/verify`,
 `/magic-link/verify`, `/webauthn/authentication/verify` and `/webauthn/mfa/verify`. Otherwise a
 form on a sibling origin could post the *attacker's* credentials and sign the victim's browser into
@@ -208,8 +209,10 @@ the attacker's account (login CSRF).
 **Cookie tossing.** A sibling subdomain can't read your cookies, but it can *set* one for the
 parent domain with the same name; the browser then sends both, and the server would read the
 planted session. Hence the [`__Host-` cookie names](password-email-auth.md#shared-session-mechanics)
-(they can only be set by this exact host), the duplicate-cookie refusal (400 `COOKIE_CONFLICT`)
-when `cookies.domain` rules `__Host-` out, and explicit credentials winning over cookies (a Bearer
+(they can only be set by this exact host), the refresh cookie's host-only binding cookie (the
+refresh cookie is path-scoped to `/session`, so it can't be `__Host-`; only the value whose keyed
+hash the binding holds is used, and a planted value without one is ignored), the duplicate-cookie refusal (400
+`COOKIE_CONFLICT`) when `cookies.domain` rules `__Host-` out, and explicit credentials winning over cookies (a Bearer
 header over the access-token cookie, a body refresh token over the refresh cookie). Non-browser clients (no `Origin`/`Sec-Fetch-Site`) are still
 unaffected, but a browser frontend on another origin must be listed in `cookies.trustedOrigins`
 even if it doesn't use cookies.

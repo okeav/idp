@@ -138,7 +138,7 @@ A missing/expired state or missing binding cookie is a 400 `INVALID_SSO_STATE` f
 itself (see [SSO / Social Login](../api/sso-social-login.md)).
 
 If your frontend (on `app.example.com`) then makes cookie-authenticated `POST`/`PUT`/`PATCH`/
-`DELETE` calls to the IdP (`/auth/logout`, `/auth/refresh`, …), list its origin in
+`DELETE` calls to the IdP (`/auth/session/logout`, `/auth/session/refresh`, …), list its origin in
 `cookies.trustedOrigins`, or they're refused with 403 `CSRF_ORIGIN_REJECTED` — see
 [Bootstrap & Config](../api/bootstrap-config.md).
 

@@ -38,19 +38,20 @@ above is present, not just the four most commonly used ones (`config`/`logger`/`
 
 Wires, in order: config defaults (`withDefaults`) → validation of `security` and every
 `rateLimiting` rule (and the dummy password hash, generated at `security.bcryptRounds`) → logger → MFA secret cipher + config validation, lockout settings, SSO
-settings, `hookTimeoutMs`, `oauth2.requirePkce`, `cookies`, `issuer` + `ttls` + secret separation, service-mesh secrets, `serviceMesh.rotationGraceSeconds`, `session.*` numbers (all before anything connects,
+settings, `hookTimeoutMs`, `oauth2.requirePkce`, `cookies`, `issuer` + `ttls` + secret separation, `oidc.endSessionConfirmationUrl`, `clock`, service-mesh secrets, `serviceMesh.rotationGraceSeconds`, `session.*` numbers (all before anything connects,
 so bad config fails the boot) → webhook dispatcher (validates every endpoint) → hooks (wrapped so
 notification hooks also fire webhook deliveries) → cache adapter → rate limiter (sharing the cache
 adapter's Redis connection when applicable) → signing-key registry (every key validated) → storage
-(Mongo by default, or `config.storage.factory` if provided) → storage contract check.
+(Mongo by default, or `config.storage.factory` if provided) → storage contract check → clock-skew
+check against the database (see [Clock skew](#clock-skew-configclock)).
 
 Some storage capabilities are optional, and an adapter missing them still boots with a
 `logger.warn` at startup: no `attemptCounterRepository` → the attempt budgets (the per-account MFA
 lockout, the password-login lockout, the verification-code and password-change limits) count
 in-process only (not shared across instances); no `userRepository.claimTotpStep` /
 `consumeRecoveryCode` → TOTP replay and recovery-code reuse are checked with a non-atomic
-read-then-write; no `sessionRepository.findByJti` while `session.verifyOnEachRequest` is on → falls
-back to the per-process revocation cache. See [Repository Adapters](repository-adapters.md).
+read-then-write; no `storage.databaseTime()` → clock skew isn't checked
+(see [Clock skew](#clock-skew-configclock)). See [Repository Adapters](repository-adapters.md).
 
 The **required** methods are checked as soon as storage is built (since 0.4.0): an adapter missing
 any method listed in `REQUIRED_STORAGE_METHODS` (`src/storage/interfaces.js`), or `close`, is closed
@@ -93,6 +94,7 @@ errors):
 | `cookies.sameSite` not `'lax'`, `'strict'` or `'none'` (case-insensitive — normalised to lower case, so `Lax` from an env var is fine) | `config.cookies.sameSite must be 'lax', 'strict' or 'none' (got ...)` |
 | `cookies.sameSite: 'none'` with `cookies.secure` false (explicitly, or by the `NODE_ENV=development` default) — browsers drop such cookies | `config.cookies.sameSite 'none' requires secure cookies ...` |
 | `cookies.refreshTokenInBody` not `true`, `false` or `'auto'` | `config.cookies.refreshTokenInBody must be true, false or 'auto' (got ...)` |
+| `cookies.sessionPath` not an absolute path (starting with `/`, no spaces or `;`) | `config.cookies.sessionPath must be an absolute path (e.g. /auth/session) — the path the session routes are served under` |
 | `cookies.trustedOrigins` not an array of exact origins (`https://app.example.com` — no path, no trailing slash; the host's case is normalised) | `config.cookies.trustedOrigins must be an array of exact origins ...` |
 | `serviceMesh.bootstrapSecret`, `serviceMesh.sharedSecret` or any `serviceMesh.bootstrapSecrets` value shorter than 32 characters | `config.serviceMesh.<name> must be at least 32 characters` |
 | A `serviceMesh.bootstrapSecrets` value equal to the shared `bootstrapSecret` | `config.serviceMesh.bootstrapSecrets.<name> must differ from the shared bootstrapSecret` |
@@ -105,7 +107,12 @@ errors):
 | `rateLimiting.adapter: 'redis'` with neither `rateLimiting.redis.host` nor a Redis cache to share | `Rate limiter adapter "redis" needs config.rateLimiting.redis.host, or config.cache.adapter "redis" to share its connection ...` |
 | A signing key with an unknown `status`, an unparseable PEM, a non-RSA key, under 2048 bits, or a `privateKey` that doesn't match its `publicKey` | `config.signingKeys.keys["<kid>"] ...` |
 | No `ACTIVE`/`ROTATING` key has a `privateKey` | `config.signingKeys: at least one ACTIVE (or ROTATING) key needs a privateKey to sign with` |
-| The storage adapter lacks a required method (or `close`) | `Storage adapter is missing required methods: userRepository.bumpSessionEpoch, ... — see src/storage/interfaces.js` |
+| `oidc.endSessionConfirmationUrl` not an `https` URL (`http` only for localhost) | `config.oidc.endSessionConfirmationUrl must be an https URL (http only for localhost)` |
+| `oidc.endSessionConfirmationUrl` on an origin other than the issuer's or one of `cookies.trustedOrigins` | `config.oidc.endSessionConfirmationUrl must be on the issuer's origin or one of cookies.trustedOrigins ...` |
+| `clock.maxSkewSeconds` not an integer ≥ 1, `warnSkewSeconds` not an integer ≥ 0, `checkIntervalSeconds` not an integer ≥ 10 | `config.clock.<name> must be an integer >= N (got ...)` |
+| `clock.warnSkewSeconds` greater than `maxSkewSeconds` | `config.clock.warnSkewSeconds must not exceed maxSkewSeconds` |
+| This server's clock differs from the database's by more than `clock.maxSkewSeconds` (adapters with `databaseTime()`; the storage is closed first) | `This server's clock is N s ahead of / behind the database's (limit M s) — token and code lifetimes would be wrong. Sync the clock (NTP).` |
+| The storage adapter lacks a required method (or `close`), or provides an `attemptCounterRepository` without `get`, `recordFailure` and `reset` | `Storage adapter is missing required methods: userRepository.bumpSessionEpoch, ... — see src/storage/interfaces.js` |
 
 **Upgrading from 0.3.x:** check your secrets (≥ 32 characters, `tokenHashSecret` ≠
 `emailHashPepper`; service-mesh secrets too), `bcryptRounds` and signing keys (RSA ≥ 2048 bits,
@@ -178,6 +185,10 @@ else must be recognisable or `configFromEnv()` throws:
 | `IDP_MFA_REQUIRE_ENCRYPTED` | `mfa.requireEncrypted` | unset: `true` when a key or cipher is configured, otherwise `false` |
 | `IDP_MFA_ALLOW_PLAINTEXT` | `mfa.allowPlaintext` | `false` |
 | `IDP_SESSION_VERIFY_ON_EACH_REQUEST` | `session.verifyOnEachRequest` | `true` |
+| `IDP_OIDC_END_SESSION_CONFIRMATION_URL` | `oidc.endSessionConfirmationUrl` | unset — see [OIDC end-session](oidc.md#get--post-sessionend--endsessionhandler) |
+| `IDP_CLOCK_MAX_SKEW_SECONDS` | `clock.maxSkewSeconds` | `30` (integer ≥ 1) |
+| `IDP_CLOCK_WARN_SKEW_SECONDS` | `clock.warnSkewSeconds` | `2` (integer ≥ 0) |
+| `IDP_CLOCK_CHECK_INTERVAL_SECONDS` | `clock.checkIntervalSeconds` | `600` (integer ≥ 10) |
 | `IDP_SSO_GOOGLE_CLIENT_ID`, `_CLIENT_SECRET` | `oauthProviders.google` | provider left `undefined` without a client id |
 | `IDP_SSO_MICROSOFT_CLIENT_ID`, `_CLIENT_SECRET`, `_TENANT` | `oauthProviders.microsoft` | tenant `common` |
 | `IDP_SSO_MICROSOFT_TRUST_EMAIL` | `oauthProviders.microsoft.trustEmail` | `false` |
@@ -238,9 +249,10 @@ interface IdpConfig {
   cookies?: {
     secure?: boolean;    // default: NODE_ENV !== 'development'
     sameSite?: 'lax' | 'strict' | 'none'; // default 'lax'; 'none' requires secure
-    domain?: string;     // set → cookies are __Secure-… and shared with subdomains; unset → __Host-… (host-only)
+    domain?: string;     // set → session cookies are __Secure-… and shared with subdomains; unset → host-only (see password-email-auth.md, cookie names)
     trustedOrigins?: string[];   // default [] — your frontends' exact origins (see "CSRF" below)
     refreshTokenInBody?: boolean | 'auto'; // default 'auto' — refresh token in JSON bodies only for non-browser clients (see below)
+    sessionPath?: string; // default: `<router mount path>/session`, from the request — pins the refresh cookie's Path (e.g. '/auth/session')
   };
 
   registration?: {
@@ -265,7 +277,7 @@ interface IdpConfig {
     accountLockDurationMs?: number;   // default 1_800_000 (30 min) — the counting window and the lock's length
     bcryptRounds?: number;            // default 12; integer 10–15 (also the cost of the dummy hash for unknown accounts)
     allowWeakBcryptRounds?: boolean;  // tests only — allows bcryptRounds down to 4
-    verificationCodeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number }; // defaults 5, 3600, 900 — wrong 6-digit codes per address
+    verificationCodeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number; maxTotalFailedAttempts?: number }; // defaults 5, 86400, 86400 (window and lock raised to at least ttls.emailVerification) — wrong 6-digit codes per verification ticket, and per address for attempts without one; maxTotalFailedAttempts (default 20): wrong codes per address in all (a year-long cap), then only the link works
     passwordChangeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number };   // defaults 5, 3600, 3600 — wrong current passwords at /password/change
   };
 
@@ -291,6 +303,14 @@ interface IdpConfig {
     microsoft?: { clientId: string; clientSecret: string; tenant?: string /* default 'common' */; trustEmail?: boolean /* default false */ };
     apple?: { clientId: string; teamId: string; keyId: string; privateKeyPem: string };
     linkedin?: { clientId: string; clientSecret: string };
+  };
+  oidc?: {
+    endSessionConfirmationUrl?: string; // default unset — your "sign out?" page; GET /session/end redirects there (https, on the issuer's origin or a trustedOrigins origin)
+  };
+  clock?: {                          // this server's clock vs the database's — see "Clock skew" below
+    maxSkewSeconds?: number;         // default 30 — refuse to start past it; log an error past it later
+    warnSkewSeconds?: number;        // default 2 — log a warning past it
+    checkIntervalSeconds?: number;   // default 600 (minimum 10) — how often it is re-measured
   };
   oauth2?: {
     requirePkce?: 'all' | 'public';  // default 'all' — PKCE (S256) for every client; 'public' exempts confidential clients
@@ -350,8 +370,9 @@ silently refuses to store or send a `Secure` cookie on a non-HTTPS origin — bu
 and most HTTP clients don't enforce `Secure` at all, so a login flow that looks like it works from
 the terminal can still be completely broken in an actual browser with no error surfaced anywhere.
 Set `NODE_ENV=development`, or pass `cookies: { secure: false }` explicitly, when testing a
-cookie-based (browser) login flow locally. (With Secure the cookies are named `__Host-access_token`
-/ `__Host-refresh_token`; without it, plain `access_token` / `refresh_token` — see
+cookie-based (browser) login flow locally. (With Secure the cookies are named `__Host-access_token`,
+`__Secure-refresh_token` and `__Host-refresh_binding`; without it, plain `access_token`,
+`refresh_token` and `refresh_binding` — see
 [cookie names](password-email-auth.md#shared-session-mechanics).) Only relevant if you're relying on
 the session cookies at all — an `Authorization: Bearer` client (see
 [Register, Login, Refresh, Logout](../examples/register-login-refresh-logout.md)) never touches
@@ -361,7 +382,7 @@ cookies and is unaffected.
 
 A state-changing request (anything but `GET`/`HEAD`/`OPTIONS`) whose credential is the session
 **cookie** must come from a trusted origin, or it's refused with 403 `CSRF_ORIGIN_REJECTED`. The
-endpoints that *set* or clear session cookies — `/login`, `/refresh`, `/logout`, `/mfa/verify`, `/magic-link/verify`,
+endpoints that *set* or clear session cookies — `/login`, `/session/refresh`, `/session/logout`, `/mfa/verify`, `/magic-link/verify`,
 `/webauthn/authentication/verify`, `/webauthn/mfa/verify` — apply the check to every request,
 whatever its credential (login CSRF). `Sec-Fetch-Site:
 same-origin` passes; otherwise the `Origin` header must be the issuer's origin or one of
@@ -379,7 +400,7 @@ Each entry must be an exact origin — `https://app.example.com`, not `https://a
 
 ### `cookies.refreshTokenInBody`
 
-Whether the refresh token is also returned in the JSON body of `/login`, `/refresh`, `/mfa/verify`,
+Whether the refresh token is also returned in the JSON body of `/login`, `/session/refresh`, `/mfa/verify`,
 `/magic-link/verify`, `/webauthn/authentication/verify` and `/webauthn/mfa/verify` (it is always set
 as the httpOnly refresh cookie):
 
@@ -396,6 +417,34 @@ token in the body. A browser-only app that must cover such browsers sets `false`
 `IDP_COOKIE_REFRESH_TOKEN_IN_BODY` accepts `auto` or a boolean. **Upgrading from 0.3.x:** the
 default was `true`; a browser app that reads `refreshToken` from the JSON body must set `true` (or
 rely on the refresh cookie instead).
+
+### Clock skew (`config.clock`)
+
+Revocation ordering uses counters and the database's clock, but expiry doesn't: token `exp`, code
+and link lifetimes and lockout windows are compared against the clock of the server checking them.
+So each server measures its clock against the database's — `storage.databaseTime()`, the midpoint
+of the round trip; the Mongo adapter reads `hello.localTime` — at startup, refusing to start past
+`clock.maxSkewSeconds` (default 30) and warning past `warnSkewSeconds` (default 2), then again every
+`checkIntervalSeconds` (default 600), logging an error past the maximum (and a warning past the
+warning level). Servers measured against the same clock stay within 2 × `maxSkewSeconds` of each
+other. Closing the storage stops the periodic check. A storage adapter without `databaseTime()`
+boots with a startup warning and no check.
+
+For a health check, `checkClockSkew()` measures it on demand:
+
+```js
+import { checkClockSkew } from '@okeav/idp-core';
+
+app.get('/healthz', async (req, res) => {
+  const clock = await checkClockSkew(); // { skewMs, ok, level }
+  res.status(clock.ok ? 200 : 503).json({ clock });
+});
+```
+
+`skewMs` is this server's clock minus the database's (`null` with `level: 'unknown'` when the
+adapter has no `databaseTime()`); `level` is `'ok'`, `'warn'` (past `warnSkewSeconds`) or `'error'`
+(past `maxSkewSeconds`, the only level with `ok: false`). It rejects if the database can't be
+reached.
 
 ### Rotating `security.tokenHashSecret`
 
@@ -521,7 +570,7 @@ session on your behalf (password login, MFA-verify, SSO callback, magic-link ver
 login), configure `hooks.resolveAuthContext(user, ctx)` to build that `claims` object — called
 right before token issuance, defaults to `() => ({})`.
 
-Since 0.4.0 `POST /refresh` calls it again on every refresh (`session.reresolveClaimsOnRefresh`,
+Since 0.4.0 `POST /session/refresh` calls it again on every refresh (`session.reresolveClaimsOnRefresh`,
 default `true`, with `ctx.method: 'refresh'`), so a demotion or suspension in your app takes effect
 at the next access-token rotation. Keep the hook fast. Set it `false` to carry the login-time
 `claims` forward verbatim for the whole session family (up to `session.absoluteLifetimeSeconds`).
@@ -561,7 +610,7 @@ those hooks hand off quickly (enqueue rather than send inline).
 
 **`resolveAuthContext` is the one exception — it is not wrapped in that safety net.** It's called
 directly (`await hooks.resolveAuthContext(user, ctx)`, no try/catch, no timeout) from every login
-path that mints a session, and from `/refresh` while `reresolveClaimsOnRefresh` is on. A
+path that mints a session, and from `/session/refresh` while `reresolveClaimsOnRefresh` is on. A
 throwing/rejecting `resolveAuthContext` propagates and turns that request into an error response
 instead of being swallowed. It also isn't in `defaultHooks()` at all — omitting it entirely is
 equivalent to it resolving `{}` (no claims), not to a registered no-op.
@@ -569,13 +618,13 @@ equivalent to it resolving `{}` (no claims), not to a registered no-op.
 | Hook | Fires on | Payload |
 |---|---|---|
 | `onAuditLog(event)` | Every audit-worthy action | `{ action, ...eventFields, timestamp }` — `action` values include `REGISTERED`, `REGISTRATION_REPEATED` (a still-pending address registered again), `EMAIL_VERIFIED`, `EMAIL_VERIFICATION_LOCKED`, `VERIFICATION_TOKEN_REGENERATED`, `LOGIN`, `LOGOUT`, `LOGOUT_ALL`, `TOKEN_REFRESHED`, `REFRESH_TOKEN_REUSE_DETECTED`, `PASSWORD_RESET`, `PASSWORD_CHANGED`, `PASSWORD_CHANGE_LOCKED`, `ACCOUNT_LOCKED` (password login locked by failed attempts), `PROFILE_UPDATED`, `ACCOUNT_DELETED`, `SESSION_REVOKED`, `SESSIONS_REVOKED_ALL`, `MAGIC_LINK_REQUESTED`, `MAGIC_LINK_LOGIN`, `MAGIC_LINK_MFA_REQUIRED`, `WEBAUTHN_CREDENTIAL_REGISTERED`, `WEBAUTHN_CREDENTIAL_DELETED`, `WEBAUTHN_LOGIN`, `MFA_SETUP_INITIATED`, `MFA_ENABLED`, `MFA_DISABLED`, `MFA_RECOVERY_CODES_REGENERATED`, `MFA_VERIFIED`, `MFA_LOCKED` (see [MFA](mfa.md#per-account-lockout)), `SSO_INITIATED`, `SSO_LOGIN`, `SSO_REGISTERED`, `SSO_PROVIDER_LINKED`, `SSO_PENDING_ACCOUNT_CLAIMED`, `SSO_MFA_REQUIRED`, `OAUTH2_AUTHORIZE`, `OAUTH2_CONSENT_GRANTED`, `OAUTH2_CONSENT_DENIED`, `OAUTH2_TOKEN_ISSUED`, `OAUTH2_TOKEN_REVOKED`, `OAUTH2_CODE_REUSE_DETECTED`, `CONSENT_REVOKED`, `END_SESSION`, the `OAUTH_CLIENT_*` admin actions, and `SERVICE_KEY_REGISTERED`/`SERVICE_KEY_REGISTRATION_REFUSED` (`reason` e.g. `name_has_own_secret`, `name_taken`, `key_revoked`)/`SERVICE_KEY_REVOKED` |
-| `onVerificationEmailRequested` | Registration (including re-registering a still-pending address) and resend-verification — not awaited | `{ email, firstName?, lastName?, verificationToken, verificationCode }` |
+| `onVerificationEmailRequested` | Registration (including re-registering a still-pending address) and resend-verification — not awaited | `{ email, firstName?, lastName?, verificationToken, verificationCode }` — **`verificationCode` is `null`** once the address has had 3 codes in the code lifetime: send the link only (see [Password & Email Auth](password-email-auth.md#codes-per-address)) |
 | `onPasswordResetRequested` | Forgot-password — not awaited | `{ email, resetToken, firstName?, lastName? }` |
 | `onPasswordChanged` | Password change/reset completed | `{ userId, email, firstName, lastName, locale, when, deviceInfo, ipAddress }` |
 | `onSuspiciousActivityDetected` | Password login locked after too many failed logins (fires once, when the lock starts) | `{ userId, email, firstName, lastName, locale, when, failedAttempts, unlocksAt }` |
 | `onNewDeviceLogin` | Login from a browser/OS combination not seen before for this user | `{ userId, email, firstName, lastName, locale, when, deviceInfo, ipAddress }` |
 | `onMagicLinkRequested` | Magic-link login requested — not awaited | `{ email, magicLinkToken, firstName?, lastName?, isNewUser }` |
-| `resolveAuthContext(user, ctx)` | Password login, MFA-verify, SSO callback, magic-link verify, WebAuthn login, and `/refresh` (while `reresolveClaimsOnRefresh`) | Returns `{ claims }`; `ctx = { isNewUser, isNewLink?, method?, provider?, extra? }`. `method` is `password`, `mfa`, `magic_link`, `webauthn`, `webauthn-mfa` or `refresh`; SSO passes `provider` instead. SSO's `extra` holds up to 10 short string query params from the initiating request — attacker-controllable, never trust them |
+| `resolveAuthContext(user, ctx)` | Password login, MFA-verify, SSO callback, magic-link verify, WebAuthn login, and `/session/refresh` (while `reresolveClaimsOnRefresh`) | Returns `{ claims }`; `ctx = { isNewUser, isNewLink?, method?, provider?, extra? }`. `method` is `password`, `mfa`, `magic_link`, `webauthn`, `webauthn-mfa` or `refresh`; SSO passes `provider` instead. SSO's `extra` holds up to 10 short string query params from the initiating request — attacker-controllable, never trust them |
 
 This package never talks to a message bus, SMTP server, or push provider directly — wire your own
 inside these hooks. See [Outbound Webhooks](webhooks.md) for the additive HTTP-delivery mechanism

@@ -91,7 +91,7 @@ async function revokeAllSessions(accessToken) {
 // Functionally similar, but doesn't report a count and is what you'd wire to
 // a plain "Log out everywhere" button that doesn't need the number.
 async function logoutEverywhere(accessToken) {
-  const res = await fetch(`${BASE}/logout/all`, { method: 'POST', headers: authHeader(accessToken) });
+  const res = await fetch(`${BASE}/session/logout/all`, { method: 'POST', headers: authHeader(accessToken) });
   return res.json(); // { status: 'ok' }
 }
 ```

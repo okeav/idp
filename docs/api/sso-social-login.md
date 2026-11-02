@@ -82,7 +82,10 @@ immediately. Unrelated to this package's own RS256 signing keys.
 the cache. 429 `RATE_LIMIT_EXCEEDED` / 503 `RATE_LIMITER_UNAVAILABLE`.
 
 Query: `redirect_uri` (required — the **consumer's own** post-login redirect target, not the OAuth
-provider's callback URL; must pass the allowlist above), plus any other query params, which are
+provider's callback URL; must pass the allowlist above), `login_challenge` (optional — from an
+`/oauth2/authorize` `login_required` answer; kept with the state, and the session the callback
+creates — or the MFA challenge it hands out — is bound to it; see
+[Login challenges](oauth2-authorization-server.md#login-challenges)), plus any other query params, which are
 captured into an `extra` bag and handed back to `resolveAuthContext`'s `ctx.extra` at callback
 time — never interpreted by this package. Only short string values are kept: at most 10 keys,
 keys ≤ 64 and values ≤ 256 characters; anything else (nested objects from Express 4's query
@@ -90,7 +93,7 @@ parser, long values) is dropped. **They come from whoever built the link — tre
 untrusted** and never grant anything on them alone.
 
 Generates a random `state` (32 bytes, base64url) and a random **binding** value, and stores
-`{ provider, redirect_uri, extra, bindingHash, codeVerifier, nonce }` in the cache keyed by the
+`{ provider, redirect_uri, extra, bindingHash, codeVerifier, nonce, loginChallenge }` in the cache keyed by the
 state (`config.ttls.ssoState`, default 600s). Sets the binding in an httpOnly cookie named
 `__Host-idp_sso_<first 16 chars of state>` (plain `idp_sso_…` only when cookies aren't Secure; one
 per attempt, so two logins in two tabs don't collide; `SameSite=Lax`, or `SameSite=None; Secure`

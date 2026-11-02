@@ -30,6 +30,7 @@ src/storage/interfaces.js`. In the listings below, the methods without `?` are t
 interface StorageContract {
   connection?: unknown;      // adapter-specific raw handle (e.g. Mongoose connection) — optional
   close(): Promise<void>;    // required by every adapter, for teardown
+  databaseTime?(): Promise<{ time: Date }>; // optional (0.4.0) — the database server's clock, for the clock-skew guard
   userRepository: UserRepository;
   sessionRepository: SessionRepository;
   authorizationCodeRepository: AuthorizationCodeRepository;
@@ -123,7 +124,7 @@ generic `metadata` object — see
 ```ts
 createSession(input): Promise<Session>
 findByRefreshTokenHash(hash): Promise<Session | null>
-findByJti?(jti): Promise<{ user, expiresAt: Date, revokedAt: Date | null, revokeReason?, familyId?, createdAt? } | null>  // optional (0.3.0) — see below
+findByJti(jti): Promise<{ user, expiresAt: Date, revokedAt: Date | null, revokeReason?, familyId, createdAt? } | null>  // since 0.3.0; required since 0.4.0 — see below
 revokeByRefreshTokenHash(hash, opts?: { onlyIfActive?: boolean; reason?: string }): Promise<Session | null>  // revokedAt from the DATABASE clock (0.4.0)
 rotatedWithin(hash, seconds: number): Promise<boolean>     // required (0.4.0) — see below
 raiseFamilyEpoch(familyId, epoch: number): Promise<void>   // required (0.4.0) — see below
@@ -152,7 +153,7 @@ and return them from `findByRefreshTokenHash` / `revokeByRefreshTokenHash`:
 
 | Field | Meaning |
 |---|---|
-| `kind` | `'first_party'` (this IdP's own login) or `'oauth2'` (an OAuth2 client's grant; `claims.clientId` names the client). `POST /refresh` accepts only `first_party` rows and the OAuth2 `refresh_token` grant only `oauth2` rows issued to the calling client. Rows without `kind` (written before 0.4.0) are classified by their claims: `{ clientId: string, scopes: [] }` is OAuth2, anything else first-party. |
+| `kind` | `'first_party'` (this IdP's own login) or `'oauth2'` (an OAuth2 client's grant; `claims.clientId` names the client). `POST /session/refresh` accepts only `first_party` rows and the OAuth2 `refresh_token` grant only `oauth2` rows issued to the calling client. Rows without `kind` (written before 0.4.0) are classified by their claims: `{ clientId: string, scopes: [] }` is OAuth2, anything else first-party. |
 | `authTime` | When the user actually logged in to start this chain; copied across rotations and emitted as the access token's `auth_time` (used by `requireRecentAuth`). |
 | `familyId` | Every row produced by rotating one login's (or one authorization code's — `code:<codeId>`) refresh token shares it. |
 | `familyCreatedAt` | Start of the family; no row may outlive `familyCreatedAt + session.absoluteLifetimeSeconds`. |
@@ -160,7 +161,7 @@ and return them from `findByRefreshTokenHash` / `revokeByRefreshTokenHash`:
 | `revokeReason` | Written by `revokeByRefreshTokenHash` from `opts.reason` (see below). |
 | `sessionEpoch` | The user's `sessionEpoch` when this chain was authenticated (number, default 0); copied across rotations, raised by `raiseFamilyEpoch`. A row whose epoch is behind the user's belongs to a revoked chain. |
 
-**`findByRefreshTokenHash(hash)`** is called on **every** refresh (0.4.0): `/refresh` and the OAuth2
+**`findByRefreshTokenHash(hash)`** is called on **every** refresh (0.4.0): `/session/refresh` and the OAuth2
 `refresh_token` grant read the row first and run every check — kind/client binding, user status,
 family lifetime, `resolveAuthContext` — before consuming it, so a refused refresh doesn't burn the
 token. It must return the row whether or not it is revoked (the caller checks `revokedAt` and
@@ -209,7 +210,7 @@ out.
 
 **`revokeForClient(clientId, { userId? })`** — revokes the live OAuth2 rows issued to `clientId`
 (one user's, or every user's when `userId` is omitted) and returns their `jti`s. Used by consent
-revocation, client deactivation and `GET /oidc/end-session`. Match pre-0.4.0 rows (no `kind`) by
+revocation, client deactivation and `GET /session/end`. Match pre-0.4.0 rows (no `kind`) by
 their `{ clientId, scopes[] }` claims shape, as the Mongo adapter does. Without it, those operations
 log a warning and leave the client's tokens working.
 
@@ -223,13 +224,13 @@ row stores its paired access token's `jti`). `authContextMiddleware` calls it on
 authenticated request** while `config.session.verifyOnEachRequest` is on (the default), so it must
 be an indexed lookup (Mongo: `{ jti: 1 }`; `@okeav/idp-core-postgres`: `idp_sessions_jti_idx`).
 `user` is compared with the token's `sub` via `String()`; return `null` for no match; throw only on
-a real backend failure (→ 503 `SESSION_STORE_UNAVAILABLE`). Without it, the middleware falls back
-to the per-process revocation cache, with a startup warning — logout-all and password reset then
-don't revoke access tokens before they expire. See [Middleware](middleware.md). Since 0.4.0 it is
-also used outside the middleware, so return the row's `familyId`, `revokeReason` (and `createdAt`) too: MFA
-enrolment reads the enrolling session's family through it (to exempt it from the `sessionEpoch`
-bump), and the code grant checks that the session which authorized a code is still live
-(`revokedAt`). Without `findByJti`, both checks are skipped.
+a real backend failure (→ 503 `SESSION_STORE_UNAVAILABLE`). See [Middleware](middleware.md).
+**Required since 0.4.0** (it was optional in 0.3.x, with a per-process fallback): it is also used
+outside the middleware, so return the row's `familyId` (required), `revokeReason` and `createdAt`
+too — MFA enrolment reads the enrolling session's family through it (to exempt it from the
+`sessionEpoch` bump), the code grant checks that the session which authorized a code is still live
+(`revokedAt`), `/oauth2/authorize` redeems a login challenge only from the session family bound to
+it, and end-session finds the browser's own session.
 
 ### `AuthorizationCodeRepository`
 ```ts
@@ -294,21 +295,22 @@ create(kind: 'password_reset' | 'email_verification' | 'magic_link', input): Pro
 consumeByHash(kind, hash, userId?): Promise<Token | null>
 consumeByCode(kind, code, userId): Promise<Token | null>
 findActive(kind, by: { tokenHash?: string; verificationCode?: string }, userId): Promise<Token | null>  // required (0.4.0)
-clearCodes(kind, userId): Promise<void>                       // required (0.4.0)
+clearCodes?(kind, userId): Promise<void>                      // no longer called (required in earlier 0.4.0 builds)
 replaceForUser(kind, userId, input): Promise<void>            // required (0.4.0), ATOMIC
 deleteAllForUser(kind, userId): Promise<void>
 pruneExpired?(): Promise<{ deletedCount: number }>
 ```
 One repository backs all three token kinds — `email_verification` additionally supports a 6-digit
 numeric code alongside the opaque token hash; `password_reset` and `magic_link` are hash-only.
+([Verification tickets](password-email-auth.md#verification-tickets) live in the attempt-counter
+store, not here.)
 Both consume methods must be ATOMIC and honour `expiresAt`.
 
 - **`findActive(kind, { tokenHash } | { verificationCode }, userId)`** — the live (unused,
   unexpired) row matching the hash or the code, **without** consuming it (`null` if neither is
   given). verify-email reads the row, checks the contested password, and only then consumes it.
-- **`clearCodes(kind, userId)`** — set `verificationCode` to `null` on every row of that kind for
-  the user, leaving `tokenHash` (the link) usable. Called when the per-address code budget is
-  spent: the guessable code dies, the unguessable link keeps working.
+- **`clearCodes(kind, userId)`** — no longer called and no longer required: a spent code budget
+  doesn't clear the codes any more (see [verification tickets](password-email-auth.md#verification-tickets)).
 - **`replaceForUser(kind, userId, input)`** — make `input` the user's **one** live token of `kind`
   (`password_reset`, `magic_link`), atomically even under concurrent requests: delete-then-create
   could leave two live links. The Mongo adapter upserts on `{ kind, user }` (resetting `usedAt`),
@@ -391,9 +393,19 @@ Current keys:
 - `mfa:<userId>` — the [per-account MFA lockout](mfa.md#per-account-lockout);
 - `password-login:<userId>` — the failed-password lockout (`security.maxFailedLoginAttempts` per
   `security.accountLockDurationMs`, locked as long);
-- `email-verification:<email hash>` — the per-address email-verification **code** budget
-  (`security.verificationCodeLockout`; keyed by address so it says nothing about whether an account
-  exists);
+- `email-verification:<email hash>` — the per-address email-verification **code** budget, for
+  attempts without a verification ticket (`security.verificationCodeLockout`; keyed by address so it
+  says nothing about whether an account exists);
+- `email-verification:ticket:<ticket hash>` — the same budget for attempts carrying a live
+  verification ticket for the address;
+- `verification-ticket:<email hash>:<ticket hash>` — a stored verification ticket (`max: 1`,
+  living `ttls.emailVerification`; read with `get`, retired with `reset` on verification);
+- `verification-tickets:<email hash>` — tickets stored for the address (at most 5 per
+  `ttls.emailVerification`);
+- `email-verification-total:<email hash>` — the address's year-long cap on wrong codes
+  (`verificationCodeLockout.maxTotalFailedAttempts`, default 20, over a year-long window);
+- `verification-codes:<email hash>` — 6-digit codes issued for the address (at most 3 per
+  `ttls.emailVerification`; later verification emails carry only the link);
 - `password-change:<userId>` — wrong current passwords at `/password/change`
   (`security.passwordChangeLockout`);
 - `mfa-challenge-used:<jti>` — marks an MFA challenge token spent (`max: 1`), so it completes one
@@ -407,24 +419,28 @@ When the count reaches `max` and no lock is set, set `lockedUntil = now + lockSe
 post-update record. Concurrent callers must each see a distinct count (exactly one sees
 `count === max`). An error thrown from any method fails the attempt closed.
 
-Without it, `initIdentityProvider()` substitutes an in-process counter and logs a warning — correct
+When an adapter provides `attemptCounterRepository`, it must have `get`, `recordFailure` and
+`reset` — `initIdentityProvider()` refuses it otherwise (as a missing required method). Without
+one, `initIdentityProvider()` substitutes an in-process counter (which drops expired entries every
+1000 writes, since callers choose some keys, e.g. an address) and logs a warning — correct
 for one instance, but each instance of a scaled deployment then keeps its own counts (and its own
 record of spent challenge tokens). `@okeav/idp-core-postgres` 0.2.0 implements both this and
 `findByJti` (its `0002_` migration adds the `idp_attempt_counters` table); the MSSQL and DynamoDB
-adapters don't yet and get the fallbacks.
+adapters don't have an attempt counter yet and get the in-process fallback (and must add `findByJti`,
+required since 0.4.0, to boot at all).
 
 ## Optional methods and their fallbacks
 
 | Method | Since | Without it |
 |---|---|---|
-| `attemptCounterRepository` | 0.3.0 | In-process counters (MFA and password-login lockouts, verification-code and password-change budgets, spent MFA challenge tokens) — per instance. **Startup warning.** |
-| `SessionRepository.findByJti` | 0.3.0 | Per-process revocation cache only; logout-all/password reset don't revoke access tokens before they expire. **Startup warning** (when `verifyOnEachRequest` is on). |
+| `attemptCounterRepository` | 0.3.0 | In-process counters (MFA and password-login lockouts, verification-code and password-change budgets, verification tickets, spent MFA challenge tokens) — per instance, so a verification ticket is recognised only by the instance that issued it. **Startup warning.** |
 | `UserRepository.claimTotpStep` / `consumeRecoveryCode` | 0.4.0 | Non-atomic read-then-write — correct sequentially, racy under concurrency. **Startup warning.** |
 | `SessionRepository.revokeFamily` | 0.4.0 | Refresh-token and authorization-code reuse is refused but nothing else is revoked. |
 | `AuthorizationCodeRepository.markReused` | 0.4.0 | A redemption racing a replay of its code relies on the family tombstone (`isFamilyRevoked`) alone. |
 | `SessionRepository.revokeForClient` | 0.4.0 | Consent revocation / client deactivation leave the client's tokens working (warning logged each time); end-session skips them. |
 | `AuthorizationCodeRepository.findUsedByCodeHash` | 0.4.0 | A redeemed code presented again is refused, but its tokens aren't revoked. |
 | `ServiceKeyRepository.findPublishableByKid` | 0.4.0 | S2S verification scans `listPublishable()`. |
+| `databaseTime()` (on the storage object) | 0.4.0 | Clock skew between app servers isn't checked (`config.clock`). **Startup warning.** Return the database server's current time, `{ time: Date }` — Mongo: `hello.localTime`; SQL: `SELECT now()`. |
 | `ServiceKeyRepository.findByKid` | 0.4.0 | A revoked key is still refused (by `upsertByKid`, before any demotion), just without the early check. |
 
 Changed **required** behaviour in 0.4.0, with no fallback: persist the new session fields (`kind`,
@@ -435,8 +451,8 @@ Changed **required** behaviour in 0.4.0, with no fallback: persist the new sessi
 `sessionsRevokedExceptFamily`/`registrationContested` on users, a `version` on consents (incremented
 by `upsert` and `revoke`; `upsert` resolves the updated consent) and `passwordHash` on
 email-verification tokens; implement `UserRepository.updateByIdIfStatus` and `bumpSessionEpoch`,
-`SessionRepository.rotatedWithin`, `raiseFamilyEpoch`, `isFamilyRevoked` and `isFamilyLive` (with `revokeFamily`
-tombstoning every row, `familyRevokedAt`), `VerificationTokenRepository.findActive`, `clearCodes`
+`SessionRepository.findByJti` (returning `familyId`), `rotatedWithin`, `raiseFamilyEpoch`, `isFamilyRevoked` and `isFamilyLive` (with `revokeFamily`
+tombstoning every row, `familyRevokedAt`), `VerificationTokenRepository.findActive`
 and `replaceForUser` (with a unique constraint on one live `password_reset` / `magic_link` per
 user), and `ServiceKeyRepository.setStatusByKid` (recording `statusChangedAt`, honouring
 `expectedStatus`); make `upsertByKid` return `null` for a REVOKED kid;

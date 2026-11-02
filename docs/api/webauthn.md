@@ -147,7 +147,7 @@ there's no natural "known user" key for a usernameless ceremony.
 
 **`POST /webauthn/authentication/verify`** (no auth)
 
-Body: `{ response: <AuthenticationResponseJSON> }`. Decodes the challenge back out of
+Body: `{ response: <AuthenticationResponseJSON>, login_challenge?: string }` (`login_challenge`: see [Login challenges](oauth2-authorization-server.md#login-challenges) — the new session is bound to it). Decodes the challenge back out of
 `response.response.clientDataJSON`, consumes the stored challenge (atomically), verifies the
 assertion against the stored credential (looked up by `response.id`) with user verification
 required, advances the credential's signature counter (conditional write — replay protection),

@@ -157,7 +157,7 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
   // user's failedLoginAttempts/lockUntil — that clears a lock recorded before 0.4.0) even
   // without a real transaction, since nothing above the storage layer retries.
   //
-  // sessionRepository.findByJti(jti) is optional but strongly recommended: it
+  // sessionRepository.findByJti(jti) is required (0.4.0) and must return familyId: it
   // runs on every authenticated request (session.verifyOnEachRequest), so back
   // it with an index on the session's jti, e.g.
   //   async findByJti(jti) { return sessionsByJti.get(jti) ?? null; } // → { user, expiresAt, revokedAt, familyId, createdAt } | null
@@ -189,8 +189,7 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
   // { expectedStatus }, change the key only from that status; findByKid is optional.
   // Email-verification tokens carry passwordHash (persist it, return it on read/consume),
   // and users carry registrationContested. verificationTokenRepository also needs (0.4.0)
-  // findActive(kind, { tokenHash } | { verificationCode }, userId) — read without consuming —,
-  // clearCodes(kind, userId) — null every row's verificationCode, keep the links — and
+  // findActive(kind, { tokenHash } | { verificationCode }, userId) — read without consuming — and
   // replaceForUser(kind, userId, input) — the ONE live password_reset / magic_link row per
   // user, atomically (back it with a unique constraint on (kind, user) for those kinds).
 
@@ -218,6 +217,9 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
 
   return {
     close: async () => { users.clear(); },
+    // Optional (0.4.0): the database server's clock, for the clock-skew guard. A real adapter asks
+    // the database (Postgres: SELECT now()); an in-process store has only this process's clock.
+    databaseTime: async () => ({ time: new Date() }),
     userRepository,
     attemptCounterRepository,
     // ...the other seven repositories — initIdentityProvider() refuses the adapter, naming each
@@ -235,18 +237,19 @@ await initIdentityProvider({
 });
 ```
 
-Leave out `findByJti`, `attemptCounterRepository`, or `claimTotpStep`/`consumeRecoveryCode` and
-`initIdentityProvider()` still boots, but logs a warning and falls back: access tokens survive
-logout-all/password reset until they expire, the MFA and password-login lockouts (and the record
-of spent MFA challenge tokens) are counted per instance, and TOTP/recovery-code reuse is checked with a racy
+Leave out `attemptCounterRepository`, or `claimTotpStep`/`consumeRecoveryCode` and
+`initIdentityProvider()` still boots, but logs a warning and falls back: the MFA and password-login
+lockouts, the verification-code budgets and tickets (and the record of spent MFA challenge tokens)
+are counted per instance, and TOTP/recovery-code reuse is checked with a racy
 read-then-write. Leave out `revokeFamily`, `revokeForClient` or
 `authorizationCodeRepository.findUsedByCodeHash` and token reuse is refused but not punished, and
-revoking consent or deactivating a client leaves its tokens working. Fine for a single-process
+revoking consent or deactivating a client leaves its tokens working. Leave out `databaseTime` and
+clock skew between servers isn't checked (`config.clock`). Fine for a single-process
 test store; implement all of them for anything real — the full table is in
 [Repository Adapters](../api/repository-adapters.md#optional-methods-and-their-fallbacks). Every
 other method is **required** (`REQUIRED_STORAGE_METHODS` in `src/storage/interfaces.js`, plus
-`close`), including the 0.4.0 additions `updateByIdIfStatus`, `bumpSessionEpoch`, `rotatedWithin`,
-`raiseFamilyEpoch`, `isFamilyRevoked`, `isFamilyLive`, `findActive`, `clearCodes` and
+`close`), including the 0.4.0 additions `updateByIdIfStatus`, `bumpSessionEpoch`, `findByJti` (optional in
+0.3.x), `rotatedWithin`, `raiseFamilyEpoch`, `isFamilyRevoked`, `isFamilyLive`, `findActive` and
 `replaceForUser`: `initIdentityProvider()` checks for them once the factory returns, and throws
 `Storage adapter is missing required methods: ...` listing every one that's absent.
 
@@ -258,7 +261,7 @@ adapter is responsible for whatever atomicity guarantees it needs on its own.
 ## Related
 
 - [Repository Adapters](../api/repository-adapters.md) — the full eight-interface contract, plus
-  the optional methods (`findByJti`, `AttemptCounterRepository`, `claimTotpStep`,
+  the optional methods (`AttemptCounterRepository`, `claimTotpStep`,
   `revokeFamily`, ...) and what happens without each.
 - [Bootstrap & Config](../api/bootstrap-config.md) — `config.storage`/`config.mongo`.
 - [Storing App-Specific User Data](consumer-managed-app-data.md) — the default pattern for a

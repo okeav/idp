@@ -76,7 +76,7 @@ Claims are released **per granted scope only** (OIDC Core §5.4), read from `req
 Undefined fields are stripped before the response — absent profile data simply doesn't appear in
 the JSON (never sent as `null`).
 
-## `GET` / `POST /oidc/end-session` — `endSessionHandler`
+## `GET` / `POST /session/end` — `endSessionHandler`
 
 RP-initiated logout (OIDC RP-Initiated Logout 1.0). Both methods are mounted behind
 `authContextMiddleware({ optional: true })` — they work with or without the browser's first-party
@@ -87,7 +87,7 @@ in the body for `POST` (JSON — your app's `express.json()` — or `application
 parsed by the route itself).
 
 Because a GET is something any site can trigger, what it ends is deliberately narrow — **it never
-signs the user out of every device** (that's `POST /logout/all`):
+signs the user out of every device** (that's `POST /session/logout/all`):
 
 1. **`id_token_hint`**, if present, must be an **ID token** this IdP issued — an access token or
    MFA-challenge token is refused. Its signature and issuer are verified, but an **expired hint is
@@ -103,7 +103,15 @@ signs the user out of every device** (that's `POST /logout/all`):
 3. **Confirmation.** A `GET` from a signed-in browser **without** an `id_token_hint` ends nothing
    and answers `200 { "action": "logout_confirmation_required" }` (`Cache-Control: no-store`):
    nothing shows that the user asked for it. Your IdP frontend asks the user, then sends the same
-   parameters as a `POST /oidc/end-session`, which carries on below. The POST must come from a
+   parameters as a `POST /session/end`, which carries on below. With
+   **`oidc.endSessionConfirmationUrl`** set (`IDP_OIDC_END_SESSION_CONFIRMATION_URL`), that `GET`
+   instead redirects (`302`, `Cache-Control: no-store`) to your confirmation page — the browser was
+   sent here by a relying party, so it needs a page, not JSON. Only `client_id`, `state`,
+   `ui_locales` and `logout_hint` are forwarded, and never over a parameter the configured URL
+   already has; the page asks the user and POSTs them back (of these, the handler itself uses
+   `state`). The URL must be `https` (`http`
+   only for localhost) and on the issuer's origin or one of `cookies.trustedOrigins`, since the POST
+   is refused from anywhere else — `initIdentityProvider()` checks both. The POST must come from a
    trusted origin — the issuer's origin or one of `cookies.trustedOrigins` (a browser request from
    anywhere else → 403 `CSRF_ORIGIN_REJECTED`; see the
    [CSRF origin check](middleware.md#csrf-origin-check)). A `GET` with a valid hint for the
@@ -112,7 +120,9 @@ signs the user out of every device** (that's `POST /logout/all`):
    session is revoked and the session cookies are cleared. The browser counts as signed in when
    only its refresh cookie is left (the access cookie has expired): a `GET` then asks for
    confirmation as above, and the confirmed `POST` revokes that session's whole refresh-token
-   family and clears the cookies.
+   family and clears the cookies. (The refresh cookie is scoped to `<mount path>/session`, which is
+   why the endpoint lives there — see
+   [shared session mechanics](password-email-auth.md#shared-session-mechanics).)
 5. **The hinted client's sessions for that user** — only when a valid hint comes **together with
    that same user's first-party session** (normally the browser's cookie): every session issued to the hint's
    client (`aud`) for the hint's `sub` is then revoked (`SessionRepository.revokeForClient`). A
@@ -136,12 +146,25 @@ The confirmed request, from the IdP's own page once the user has agreed:
 
 ```js
 // The same parameters the GET carried (here, none but `state`).
-await fetch('/auth/oidc/end-session', {
+await fetch('/auth/session/end', {
   method: 'POST',
   credentials: 'include', // the session cookie identifies the browser's IdP session
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ state }),
 }); // → 200 { status: 'ok' }, session cookies cleared
+```
+
+Or, with `oidc.endSessionConfirmationUrl`, a confirmation page that posts the parameters it was
+redirected with as a form (parameters the handler doesn't know are ignored):
+
+```js
+// On the confirmation page (e.g. https://idp.example.com/signout), when the user clicks "Sign out":
+const form = Object.assign(document.createElement('form'), { method: 'POST', action: '/auth/session/end' });
+for (const [name, value] of new URLSearchParams(location.search)) {
+  form.append(Object.assign(document.createElement('input'), { type: 'hidden', name, value }));
+}
+document.body.append(form);
+form.submit(); // urlencoded POST → 200 { status: 'ok' }
 ```
 
 (A confirmation is only ever asked for without an `id_token_hint`, and a

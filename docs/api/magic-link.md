@@ -70,7 +70,7 @@ only on the endpoint that sends your emails.
 
 ## `verifyMagicLinkHandler`
 
-**Body**: `{ token: string }`.
+**Body**: `{ token: string, login_challenge?: string }` — `login_challenge` when this sign-in answers an `/oauth2/authorize` `login_required` (see [Login challenges](oauth2-authorization-server.md#login-challenges)); the session, or the MFA challenge, is bound to it.
 
 Sets session cookies, so every browser request is subject to the
 [CSRF origin check](middleware.md#csrf-origin-check): an `Origin` that is neither the issuer's nor
@@ -119,7 +119,7 @@ Complete it at `POST /mfa/verify` (TOTP or recovery code) or `POST /webauthn/mfa
   "userId": "...", "isNewUser": true
 }
 ```
-Also sets the session cookies (`__Host-access_token`/`__Host-refresh_token` — same names and `cookieOptions()` as every other login
+Also sets the session cookies (`__Host-access_token`, `__Secure-refresh_token` + `__Host-refresh_binding` — same names and `cookieOptions()` as every other login
 method — see [Password & Email Auth](password-email-auth.md)). `refreshToken` is in the body only
 as [`cookies.refreshTokenInBody`](bootstrap-config.md#cookiesrefreshtokeninbody) allows — by
 default, only for non-browser clients.

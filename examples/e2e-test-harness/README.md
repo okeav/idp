@@ -57,10 +57,13 @@ updated for it. The ones you'll notice while clicking through:
   in the client's `allowedScopes` like any other scope.
 - **MFA everywhere** — magic link and SSO now stop at the MFA challenge for
   an MFA-enabled account.
-- **Cookies** — the session cookies are `__Host-access_token` /
-  `__Host-refresh_token` (Secure, host-only — the harness doesn't set
-  `NODE_ENV=development`, so they're Secure as before; browsers that treat
-  `http://localhost` as secure accept them). A Bearer header wins over the
+- **Cookies** — the session cookies are `__Host-access_token`,
+  `__Secure-refresh_token` (`Path=/auth/session`, sent only to the session
+  endpoints) and `__Host-refresh_binding` (Secure — the harness doesn't set
+  `NODE_ENV=development`; browsers that treat `http://localhost` as secure
+  accept them). The routes that use the refresh cookie live under
+  `/auth/session`: `/session/refresh`, `/session/logout`,
+  `/session/logout/all`, `/session/end`. A Bearer header wins over the
   cookie, a body refresh token over the refresh cookie. The server listens
   on 127.0.0.1 only — it hands out any user's tokens.
 - **Refresh token in the JSON body** — `cookies.refreshTokenInBody` now
@@ -68,7 +71,7 @@ updated for it. The ones you'll notice while clicking through:
   httpOnly cookie. The harness sets it `true` so flow 2 can show the raw
   token and flow 3 can paste it back; a real browser app keeps the default.
 - **CSRF** — cookie-authenticated POST/DELETEs, and every browser request to
-  the endpoints that set or clear session cookies (`/login`, `/refresh`, `/logout`,
+  the endpoints that set or clear session cookies (`/login`, `/session/refresh`, `/session/logout`,
   `/mfa/verify`, `/magic-link/verify`, `/webauthn/*/verify`), must come from
   the issuer's origin (or `cookies.trustedOrigins`). The harness pages are
   served by the same process as the IdP, so this just works; `server.js`
@@ -76,11 +79,18 @@ updated for it. The ones you'll notice while clicking through:
 - **Contested registrations** — registering a still-pending address again
   keeps the earlier codes, each bound to its own registration's password;
   verifying then also needs that password (`400
-  REGISTRATION_PASSWORD_REQUIRED` without it). Flow 1 has a password field
+  REGISTRATION_PASSWORD_REQUIRED` without it, `400 INVALID_OR_EXPIRED_TOKEN`
+  with a wrong one). Flow 1 has a password field
   for this. Login on a not-yet-verified account answers `401
-  INVALID_CREDENTIALS`, not `403 PENDING_VERIFICATION`. Five wrong 6-digit
-  codes per address lock *code* attempts (`429 VERIFICATION_LOCKED`) — the
-  link token still works. A password reset (flow 5) also verifies a pending
+  INVALID_CREDENTIALS`, not `403 PENDING_VERIFICATION`. Register answers
+  `{ status: 'ok', verificationTicket }` and sets a
+  `__Host-verification_ticket` cookie; wrong 6-digit codes are budgeted per
+  ticket (5), and attempts without one per address (`429
+  VERIFICATION_LOCKED`), so a stranger can't lock out the browser that
+  registered; 20 wrong codes per address in all disable codes for it. Codes
+  aren't cleared by a lock, and the link token always works. From the 4th
+  verification email for an address in a code lifetime the hook gets
+  `verificationCode: null` (link only); flow 1 then verifies with the token. A password reset (flow 5) also verifies a pending
   account.
 - **Password lockout** — too many wrong passwords lock *password login*
   only; refresh, magic link, passkeys, SSO and MFA keep working, and the
@@ -115,7 +125,8 @@ active login cookie, MFA enabled, a registered passkey, etc.) as noted.
 - [ ] **1. Register → verify email** (`/flows/register`)
   Register a new account → the page shows the dev-mode-captured verification
   code (no real email is sent; the `onVerificationEmailRequested` hook
-  writes it here instead) → verify. **Expected:** `201` on register, then
+  writes it here instead) → verify. **Expected:** `201 { status: 'ok',
+  verificationTicket }` on register, then
   `{status:'ok'}` on verify. Check the activity panel for `REGISTERED` and
   `EMAIL_VERIFIED`. Optional: click Register **twice** for the same email
   (`REGISTRATION_REPEATED` in the activity panel) → verifying with the code

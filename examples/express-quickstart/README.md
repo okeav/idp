@@ -43,13 +43,16 @@ Quickstart IDP listening on http://localhost:3000
 curl -X POST http://localhost:3000/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"you@example.com","password":"Str0ng!Passw0rd"}'
+# -> { "status": "ok", "verificationTicket": "..." } — the same answer for any address.
+#    The ticket is also set as a cookie; curl keeps no cookies, so pass it back as "ticket"
+#    below and your code attempts get their own budget instead of the per-address one.
 
 # The server console prints the verification code (no real mailer wired up):
 #   [dev email] Verify you@example.com — code: 123456 (or token: ...)
 
 curl -X POST http://localhost:3000/auth/register/verify-email \
   -H "Content-Type: application/json" \
-  -d '{"email":"you@example.com","code":"123456"}'
+  -d '{"email":"you@example.com","code":"123456","ticket":"<verificationTicket>"}'
 
 curl -X POST http://localhost:3000/auth/login \
   -H "Content-Type: application/json" \
@@ -57,6 +60,15 @@ curl -X POST http://localhost:3000/auth/login \
 # -> { "accessToken": "...", "refreshToken": "...", "userId": "..." }
 #    (curl sends no Origin / Sec-Fetch-Site header, so refreshToken is in the body;
 #     a browser gets it only as the httpOnly refresh cookie — cookies.refreshTokenInBody: 'auto')
+
+# Rotate the refresh token (the old one stops working), then sign out with the new one:
+curl -X POST http://localhost:3000/auth/session/refresh \
+  -H "Content-Type: application/json" \
+  -d '{"refreshToken":"<refreshToken>"}'
+
+curl -X POST http://localhost:3000/auth/session/logout \
+  -H "Content-Type: application/json" \
+  -d '{"refreshToken":"<the new refreshToken>"}'
 ```
 
 Every request handled goes through `server.js`'s `onAuditLog` hook and prints

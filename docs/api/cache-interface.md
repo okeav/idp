@@ -118,7 +118,7 @@ Values are JSON-serialized on `set` (raw strings are stored as-is) and JSON-pars
 session store: a cached "revoked" rejects immediately, a miss falls through to the storage lookup,
 and a cache error is logged and left to storage to decide (a storage error → 503
 `SESSION_STORE_UNAVAILABLE` — see [Middleware](middleware.md)). Otherwise — verification off, a
-`sessionless` token, or an adapter without `findByJti` — the cache is the whole check, via the
+or a `sessionless` token — the cache is the whole check, via the
 internal `isRevoked(cache, key)` helper:
 
 - A cache **miss** (key genuinely absent) legitimately means "not revoked" → returns `false`.

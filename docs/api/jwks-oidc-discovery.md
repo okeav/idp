@@ -69,7 +69,7 @@ Returns the OIDC discovery document, all endpoints derived from `config.issuer`.
   "token_endpoint": "https://idp.example.com/oauth2/token",
   "userinfo_endpoint": "https://idp.example.com/userinfo",
   "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
-  "end_session_endpoint": "https://idp.example.com/oidc/end-session",
+  "end_session_endpoint": "https://idp.example.com/session/end",
   "revocation_endpoint": "https://idp.example.com/oauth2/token/revoke",
   "introspection_endpoint": "https://idp.example.com/oauth2/token/introspect",
   "response_types_supported": ["code"],
@@ -101,8 +101,10 @@ Notes on what the document advertises:
   (`select_account` behaves as `login`). See
   [OAuth2 Authorization Server](oauth2-authorization-server.md#prompt-and-max_age).
 - **`end_session_endpoint`.** A `GET` from a signed-in browser without an `id_token_hint` asks for
-  confirmation (`POST` to the same URL) instead of ending the session — see
-  [OIDC](oidc.md#get--post-oidcend-session--endsessionhandler).
+  confirmation (`POST` to the same URL; with `oidc.endSessionConfirmationUrl`, a redirect to that
+  page) instead of ending the session. It is `${issuer}/session/end` — before 0.4.0
+  `/oidc/end-session` — so relying parties should read it from discovery rather than hard-code it. See
+  [OIDC](oidc.md#get--post-sessionend--endsessionhandler).
 - **`authorization_response_iss_parameter_supported`.** Authorization responses carry an `iss`
   parameter (RFC 9207); clients should check it equals `issuer`.
 - **Claims** in an ID token follow the granted scopes (`email` → `email`, `email_verified`;

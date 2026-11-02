@@ -109,10 +109,11 @@ authorizeUrl.search = new URLSearchParams({
 `GET /oauth2/authorize` answers JSON (or a redirect), so the IdP's own frontend calls it with the
 user's session and acts on the result:
 
-- `401 { action: 'login_required', reason }` — not logged in at the IdP (`reason:
-  'unauthenticated'`), or the login is too old for the request's `prompt=login` / `max_age`
-  (`'prompt_login'` / `'max_age'`): show your login UI, then retry the same URL (a login within the
-  last 60 seconds satisfies `prompt=login` and `max_age=0`).
+- `401 { action: 'login_required', reason, login_challenge? }` — not logged in at the IdP
+  (`reason: 'unauthenticated'`), or the request's `prompt=login` / `max_age` needs a new login
+  (`'prompt_login'` / `'max_age'`): show your login UI, then retry the same URL. When the answer
+  carries a `login_challenge`, pass it to the sign-in and add it to the retried URL — only a login
+  made with it satisfies `prompt=login` / `max_age` (see below).
 - `200 { action: 'consent_required', consent_challenge, client, scopes, missingScopes }` — show a
   consent screen (step 3a).
 - `302` to `https://app.example.com/callback?code=...&state=...&iss=...` — the user already
@@ -124,6 +125,25 @@ authorize URL. With `prompt=none` there is never a login or consent screen: inst
 `error=login_required` or `error=consent_required` (plus `state` and `iss`). `prompt=consent`
 always shows the consent screen. See
 [OAuth2 Authorization Server](../api/oauth2-authorization-server.md#prompt-and-max_age).
+
+On the IdP's own page, handling a `login_challenge`:
+
+```js
+const res = await fetch(authorizeUrl, { credentials: 'include' });
+if (res.status === 401) {
+  const { login_challenge } = await res.json();
+  // Sign in, passing the challenge along (also accepted by /magic-link/verify and
+  // /webauthn/authentication/verify, and as ?login_challenge= on GET /sso/:provider;
+  // an MFA step carries it through the challenge token).
+  await fetch(`${BASE}/login`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, ...(login_challenge ? { login_challenge } : {}) }),
+  });
+  // Repeat the authorize request with the challenge: accepted once, from this new session only.
+  if (login_challenge) authorizeUrl.searchParams.set('login_challenge', login_challenge);
+  // ...then call authorizeUrl again and act on the result as above.
+}
+```
 
 ### 3a. The consent page
 

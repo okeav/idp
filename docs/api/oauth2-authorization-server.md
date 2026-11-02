@@ -33,7 +33,7 @@ Access tokens are classified by who they were issued to (see [Middleware](middle
 
 | Kind | Issued by | `sub` | `aud` | Extra claims |
 |---|---|---|---|---|
-| `first-party` | this IdP's own login / `/refresh` | user id | the issuer | — |
+| `first-party` | this IdP's own login / `/session/refresh` | user id | the issuer | — |
 | `oauth2-user` | `authorization_code` / `refresh_token` grants | user id | the `client_id` | `client_id`, `scope` |
 | `oauth2-client` | `client_credentials` grant | the `client_id` | the `client_id` | `client_id`, `scope`, `gty: 'client_credentials'` |
 
@@ -94,10 +94,11 @@ gets these errors:
 
 Then one of three outcomes:
 
-1. **Login required** → `401 { action: 'login_required', reason }` — `reason` is
-   `'unauthenticated'` (no session), `'prompt_login'` or `'max_age'` (see below). Your frontend
-   sends the user through your own login UI and replays the same authorize URL afterwards. (With
-   `prompt=none` this is a redirect instead.)
+1. **Login required** → `401 { action: 'login_required', reason, login_challenge? }` — `reason` is
+   `'unauthenticated'` (no session), `'prompt_login'` or `'max_age'` (see below); `login_challenge`
+   is present when the request has `prompt=login`, `prompt=select_account` or `max_age` (see
+   [Login challenges](#login-challenges)). Your frontend sends the user through your own login UI
+   and replays the same authorize URL afterwards. (With `prompt=none` this is a redirect instead.)
 2. **Missing consent** (or `prompt=consent`) → `200 { action: 'consent_required', consent_challenge, client: { name,
    logoUrl, websiteUrl, privacyPolicyUrl }, scopes, missingScopes }` with `Cache-Control:
    no-store`. The whole validated request (client, redirect URI, scopes, `state`, `nonce`, PKCE
@@ -119,17 +120,42 @@ OIDC Core §3.1.2.1. Discovery lists `prompt_values_supported: ["none", "login",
 | Parameter | Behaviour |
 |---|---|
 | `prompt=none` | Never asks for UI. Where a login would be required it redirects to `redirect_uri` with `error=login_required`; where consent would be required, `error=consent_required` (both with `state` and `iss`). Otherwise it issues a code as usual. |
-| `prompt=login` | The user's login must have happened within the last 60 seconds (`FRESH_LOGIN_SECONDS`), else `401 { action: 'login_required', reason: 'prompt_login' }`. |
+| `prompt=login` | Satisfied only by a login made for this request: the repeated authorize request carries the `login_challenge` the `login_required` answer handed out, from the session that sign-in created. Otherwise `401 { action: 'login_required', reason: 'prompt_login', login_challenge }` (`reason: 'unauthenticated'` when not signed in). |
 | `prompt=select_account` | Treated as `prompt=login` — there is no account chooser; signing in again is how the user picks an account. |
 | `prompt=consent` | Shows the consent screen (`consent_required`) even when a consent covering the scopes exists. |
 | `max_age=0` | Same as `prompt=login`. |
-| `max_age=N` | If the login (`auth_time`, from the access token) is more than N seconds old, or unknown, → `401 { action: 'login_required', reason: 'max_age' }`. |
+| `max_age=N` | If the login (`auth_time`, from the access token) is more than N seconds old, or unknown, → `401 { action: 'login_required', reason: 'max_age', login_challenge }`. This applies after a challenge is redeemed too: the login made for it must also be younger than N seconds, so the ID token's `auth_time` passes the client's own check. |
 
 The login's age comes from the session's access token (`auth_time`, which a refresh keeps
-unchanged). The 60-second window is what lets the flow complete: your IdP page signs the user in,
-then repeats the same authorize request, which must find that new login fresh rather than ask for
-another one. A login in the last 60 seconds therefore satisfies `prompt=login` for any authorize
-request, not only the one that triggered it.
+unchanged).
+
+### Login challenges
+
+`prompt=login` (and `max_age=0`, `prompt=select_account`) asks for a login **for this authorization
+request**, not merely a recent one. A `login_required` answer to a request with `prompt=login`,
+`prompt=select_account` or any `max_age` therefore carries a `login_challenge`
+(43 characters, base64url; single use; valid 15 minutes; kept in the cache adapter and bound to the
+`client_id`):
+
+1. Your IdP frontend gets `401 { action: 'login_required', reason, login_challenge }`.
+2. It passes `login_challenge` to whichever sign-in it runs — in the JSON body of `POST /login`,
+   `POST /magic-link/verify` or `POST /webauthn/authentication/verify`, or as a query parameter of
+   `GET /sso/:provider`. For an account with MFA nothing more is needed: the challenge rides in the
+   MFA challenge token, and `/mfa/verify` or `/webauthn/mfa/verify` binds it when it creates the
+   session.
+3. The session that sign-in creates is bound to the challenge (the first sign-in to present it
+   wins).
+4. The frontend repeats the authorize request with `login_challenge=<value>` added. It is accepted
+   only from the session bound to it (the same refresh-token family, so a refresh in between is
+   fine), for the same client, once.
+
+A challenge that is unknown, expired, already used, bound to another session or issued for another
+client is ignored — the request is answered as if it carried none, i.e. a new `login_required` with
+a new challenge. A malformed one fails the query schema (400 `VALIDATION_ERROR`). There is no time
+window: a login made without the challenge, however recent, doesn't satisfy `prompt=login` or
+`max_age=0`. A positive `max_age` is checked against the login's age whether or not a challenge
+was redeemed — passing the challenge along is harmless there, and lets the same frontend code
+serve both.
 
 Every authorization response (code or error) carries **`iss`** — the issuer (RFC 9207). Clients
 should check it against the issuer they started the flow with, to detect authorization-server
@@ -280,7 +306,7 @@ the old token cannot be used again).
   is accepted. A first-party refresh token (from `/login`), or another client's, fails
   `INVALID_GRANT` — and is revoked (reason `misused`, not a rotation), since presenting it here
   means it leaked. Conversely, the
-  first-party `POST /refresh` refuses OAuth2 refresh tokens.
+  first-party `POST /session/refresh` refuses OAuth2 refresh tokens.
 - **Reuse detection.** A token that was already rotated, presented again after
   `session.refreshReuseGraceSeconds` (default 10 s), revokes its whole family and emits
   `REFRESH_TOKEN_REUSE_DETECTED`; within the grace window (measured by the database's clock —

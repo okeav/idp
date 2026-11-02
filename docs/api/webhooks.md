@@ -48,7 +48,7 @@ verify an address:
 |---|---|
 | `onPasswordResetRequested` | `resetToken` |
 | `onMagicLinkRequested` | `magicLinkToken` |
-| `onVerificationEmailRequested` | `verificationToken`, `verificationCode` |
+| `onVerificationEmailRequested` | `verificationToken`, `verificationCode` (`null` from an address's fourth verification email in a code lifetime — link only) |
 
 These fields are **stripped** from deliveries to every endpoint unless it sets
 `includeCredentials: true`. Set it only on the endpoint that actually sends those emails; an

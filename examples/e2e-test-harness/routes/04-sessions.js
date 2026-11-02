@@ -22,7 +22,7 @@ export function mountSessionsFlow(app, { AUTH_PREFIX }) {
       </div>
 
       <div class="card">
-        <p class="step">Logout (uses the refresh-token cookie, <code>__Host-refresh_token</code>, automatically — this ends YOUR current browser session, so "list sessions" will 401 right after, which is correct: you have no valid cookie anymore).</p>
+        <p class="step">Logout (<code>${AUTH_PREFIX}/session/logout</code> uses the refresh-token cookie, <code>__Secure-refresh_token</code> with its <code>__Host-refresh_binding</code>, automatically — this ends YOUR current browser session, so "list sessions" will 401 right after, which is correct: you have no valid cookie anymore).</p>
         <button class="danger" onclick="logout()">Logout (this session)</button>
         <pre id="logout-result" class="result"></pre>
       </div>
@@ -49,11 +49,11 @@ export function mountSessionsFlow(app, { AUTH_PREFIX }) {
           list();
         }
         async function logout() {
-          const result = await callApi('${AUTH_PREFIX}/logout', { method: 'POST', body: {} });
+          const result = await callApi('${AUTH_PREFIX}/session/logout', { method: 'POST', body: {} });
           showResult('logout-result', result);
         }
         async function logoutAll() {
-          const result = await callApi('${AUTH_PREFIX}/logout/all', { method: 'POST' });
+          const result = await callApi('${AUTH_PREFIX}/session/logout/all', { method: 'POST' });
           showResult('logout-all-result', result);
         }
       </script>`,

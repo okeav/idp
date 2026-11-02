@@ -66,8 +66,10 @@ await initIdentityProvider({
     hooks: {
         // No real mailer wired up — print what would have been sent so you
         // can copy the code/link straight out of the terminal.
+        // verificationCode is null once the address has had 3 codes in the code's lifetime —
+        // a real email then carries only the link (verificationToken).
         onVerificationEmailRequested: ({ email, verificationCode, verificationToken }) => {
-            console.log(`[dev email] Verify ${email} — code: ${verificationCode} (or token: ${verificationToken})`);
+            console.log(`[dev email] Verify ${email} — ${verificationCode ? `code: ${verificationCode} (or token: ${verificationToken})` : `link only — token: ${verificationToken}`}`);
         },
         onPasswordResetRequested: ({ email, resetToken }) => {
             console.log(`[dev email] Password reset for ${email} — token: ${resetToken}`);

@@ -29,7 +29,7 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   at the first-party `POST /refresh` (minting a first-party session with no client authentication),
   a first-party refresh token was accepted by the OAuth2 `refresh_token` grant, and any client could
   redeem another client's refresh token. Session rows now carry `kind: 'first_party' | 'oauth2'`;
-  `/refresh` accepts only `first_party`, and the OAuth2 grant only `oauth2` rows issued to the calling
+  `/session/refresh` accepts only `first_party`, and the OAuth2 grant only `oauth2` rows issued to the calling
   client. A token presented in the wrong place stays revoked. Rows written before 0.4.0 are classified
   by their stored claims (`{ clientId, scopes[] }` = OAuth2). **Upgrade (custom storage adapters):**
   persist the new `kind` field on session rows.
@@ -63,8 +63,9 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   attacker who re-registered right after the victim got the newest email in the victim's inbox to
   activate the attacker's password. Now each verification code is bound to the password of the
   registration that sent it; once an address has been registered more than once before verification,
-  `/register/verify-email` also needs that password (`{ email, code, password }`; without it, or
-  with the wrong one, 400 `REGISTRATION_PASSWORD_REQUIRED` and the code stays usable), so the inbox
+  `/register/verify-email` also needs that password (`{ email, code, password }`; without it, 400
+  `REGISTRATION_PASSWORD_REQUIRED`; with a wrong one, 400 `INVALID_OR_EXPIRED_TOKEN` like a wrong
+  code — either way the code stays usable), so the inbox
   owner activates their own password and another registration's code is useless to them. Login on a
   pending account answers 401 `INVALID_CREDENTIALS` whatever the password (a distinct "pending"
   answer told the planted password's owner when someone else registered). The stored HMAC of a code
@@ -125,7 +126,7 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   now come from the issuer's origin or one of `cookies.trustedOrigins` (or be `Sec-Fetch-Site:
   same-origin`); otherwise 403 `CSRF_ORIGIN_REJECTED`. Requests without `Origin`/`Sec-Fetch-Site`
   (non-browser clients) and Bearer-authenticated requests are unaffected. The endpoints that *set*
-  or clear session cookies — `/login`, `/refresh`, `/logout`, `/mfa/verify`, `/magic-link/verify`,
+  or clear session cookies — `/login`, `/session/refresh`, `/session/logout`, `/mfa/verify`, `/magic-link/verify`,
   `/webauthn/authentication/verify`, `/webauthn/mfa/verify` — apply the same check to every browser
   request, body token or not (login CSRF: a form on a sibling origin signing the victim into the
   attacker's account; logout CSRF: a cross-site form clearing the victim's session). **Upgrade:** list your frontends'
@@ -134,9 +135,11 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
 - **Cookie tossing (Medium).** A sibling subdomain (or a script on one) could set an `access_token`
   / `refresh_token` cookie for the parent domain; the browser sends both, the planted one first, and
   the IdP read the attacker's session — signing the victim (or an OAuth2 consent) into the
-  attacker's account. Session cookies are now **`__Host-access_token` / `__Host-refresh_token`**
-  (host-only, Secure, `Path=/` — only this exact host can set them). With `cookies.domain` (cookies
-  shared across subdomains) `__Host-` is impossible: they are `__Secure-…`, and a request carrying
+  attacker's account. The access-token cookie is now **`__Host-access_token`** (host-only, Secure,
+  `Path=/` — only this exact host can set it); the refresh-token cookie is `__Secure-refresh_token`
+  with a host-only binding cookie (see "The refresh cookie went to every route" below). With
+  `cookies.domain` (cookies shared across subdomains) `__Host-` is impossible: they are
+  `__Secure-…`, and a request carrying
   a session cookie twice is refused with 400 `COOKIE_CONFLICT` (names compared the way the parser
   reads them — trimmed, up to the first `=` — so `name =x; name=y` is a duplicate). Without Secure (`NODE_ENV=development`
   or `cookies.secure: false`) the plain names remain. The SSO binding cookie is always host-only
@@ -154,7 +157,7 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   body — and `IdpError` had no `status`, so Express's default handler answered 500 for every
   401/429. `IdpError` now carries `status`/`statusCode`/`expose`, and the new `idpErrorHandler()`
   export answers `{ error, message }` for client errors and a bare `{ error: 'INTERNAL_ERROR' }` (logged)
-  for everything else, with fixed messages for malformed or oversized bodies. `POST /refresh` now
+  for everything else, with fixed messages for malformed or oversized bodies. `POST /session/refresh` now
   validates its body (a non-string token was a 500). `idpErrorHandler()` without a `logger` logs
   through the one given to `initIdentityProvider` (5xx errors used to be dropped silently).
   **Upgrade:** mount `idpErrorHandler()` after the router, or apply the same rule in your own
@@ -174,7 +177,7 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   both worked. Passwords over 72 bytes (UTF-8) are now refused at register, reset and change.
 - **Profile fields.** `avatarUrl` (released as the ID token's `picture`) must be `https` —
   `javascript:` and `data:` URLs were accepted; `locale` and `zoneinfo` must be well-formed.
-- **The refresh token was readable by page script.** Login, `/refresh`, `/mfa/verify`,
+- **The refresh token was readable by page script.** Login, `/session/refresh`, `/mfa/verify`,
   `/magic-link/verify` and the passkey login/MFA responses returned it in the JSON body as well as
   in its httpOnly cookie, so an XSS could read the long-lived token the cookie was protecting.
   `cookies.refreshTokenInBody` is now `true | false | 'auto'`, default **`'auto'`**: the token is
@@ -307,22 +310,49 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   per IP (`rateLimiting.ssoInitiate`).
 - **The 6-digit email-verification code could be brute-forced (High).** `/register/verify-email`
   had no rate limit and no attempt limit, against a code valid for 24 hours. Wrong 6-digit codes now
-  count per **address** (`security.verificationCodeLockout`, default 5 per hour, then locked 15
-  min), counted for unknown and already-verified addresses too, so a lock says nothing about
-  whether a pending registration exists. The attempt that exhausts the budget clears the codes of
-  every outstanding row (new required `VerificationTokenRepository.clearCodes`) and further code
-  attempts get 429 `VERIFICATION_LOCKED` — but the emailed **link** keeps working: its 256-bit
-  token can't be guessed, so it has no budget, and the owner can still verify while someone
-  hammers the code. Attempts are counted *before* the code is checked, so a concurrent burst gets
+  count against a budget (`security.verificationCodeLockout`, default 5 per 24 hours — the code's
+  lifetime — then locked 24 hours; 429 `VERIFICATION_LOCKED`): per verification ticket, or per
+  **address** for attempts without one (see the next item). The per-address budget is counted for
+  unknown and already-verified addresses too, so a lock says nothing about whether a pending
+  registration exists. The emailed **link** has no budget: its 256-bit token can't be guessed. Attempts are counted *before* the code is checked, so a concurrent burst gets
   no more guesses than the budget. Codes are now stored as HMACs (codes issued before 0.4.0,
   stored in plain text, keep working until they expire). New per-IP limits on `/register`,
   `/register/resend-verification` (`rateLimiting.register`) and `/register/verify-email`
   (`rateLimiting.emailVerification`), and a per-address limit on verification emails
   (`rateLimiting.verificationEmailByEmail`), all fail-closed.
+- **A stranger could use up the registrant's verification-code attempts.** With one budget per
+  address, anyone who knew the address could spend it, and spending it cleared the outstanding
+  codes. `/register` and `/register/resend-verification` now answer `{ status: 'ok',
+  verificationTicket }` and set a host-only httpOnly cookie `__Host-verification_ticket` (plain
+  `verification_ticket` without Secure). A ticket is issued for the **address** (keyed by the
+  email's blind index) and stored in the attempt-counter store for every caller, whether or not the
+  address has an account — what a ticket does never depends on the account, so it reveals nothing.
+  At most 5 are stored per address per code lifetime (later ones are handed out but not stored);
+  a caller that already holds a live ticket cookie for the address keeps it on register and resend.
+  `/register/verify-email` takes an optional `ticket` field (else the cookie). Code attempts
+  carrying a live ticket for the address spend the ticket's own budget; attempts without one spend
+  the per-address budget, which a stranger can use up without affecting the registrant's browser.
+  A spent budget no longer clears the codes (`VerificationTokenRepository.clearCodes` is no longer
+  called or required). `security.verificationCodeLockout` now defaults to a 24-hour window and
+  24-hour lock (were 1 hour and 15 minutes), and both are raised to at least
+  `ttls.emailVerification` wherever they are used. On top of the budgets, a **year-long cap per
+  address**: new `security.verificationCodeLockout.maxTotalFailedAttempts` (default 20) counts every
+  checked wrong code for the address, ticket or not, over a year-long window — after it, codes no
+  longer work for that address and only the link does. So an address's codes are guessed at most 20
+  times in all, each guess tried against the few codes live at the time. And at most **3 six-digit
+  codes** are issued per address per code lifetime: later verification emails carry only the link,
+  and `onVerificationEmailRequested` receives `verificationCode: null`. 429 `VERIFICATION_LOCKED`'s
+  message now points to the link in the verification email. `EMAIL_VERIFICATION_LOCKED` carries
+  `withTicket`. **Upgrade:** a browser frontend that calls the IdP with cookies needs no change; a
+  client without cookies passes `verificationTicket` back as `ticket`. **Email templates must
+  handle `verificationCode: null`** — always include the link (`verificationToken`), and the code
+  only when present. With an in-process attempt
+  counter (an adapter without `attemptCounterRepository`), a ticket works only on the instance that
+  issued it.
 - **Account enumeration.** `/register/verify-email` answered 404 `USER_NOT_FOUND` for unknown
   addresses and `ok` for verified ones; `/register/resend-verification` answered 400
   `EMAIL_ALREADY_VERIFIED`. Both now answer the same for every address (verify: 400
-  `INVALID_OR_EXPIRED_TOKEN`; resend: `{ status: 'ok' }`). **Upgrade:** a second click on an
+  `INVALID_OR_EXPIRED_TOKEN`; resend: `{ status: 'ok', verificationTicket }`). **Upgrade:** a second click on an
   already-used verification link now gets 400 instead of `ok`.
 - **PKCE was optional, `plain` was accepted, and it could be downgraded (High).** A public client
   could run the code flow with no PKCE at all, so an intercepted code was redeemable by anyone with
@@ -381,13 +411,20 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   now only with an `id_token_hint` for that same signed-in user. Without one, a signed-in browser's
   GET ends nothing and answers `200 { "action": "logout_confirmation_required" }`; the IdP's
   frontend asks the user, then sends the same parameters (JSON or
-  `application/x-www-form-urlencoded`) to the new `POST /oidc/end-session`, which must come from a
+  `application/x-www-form-urlencoded`) to the new `POST /session/end` (formerly `/oidc/end-session`), which must come from a
   trusted origin (the issuer's or `cookies.trustedOrigins`; otherwise 403 `CSRF_ORIGIN_REJECTED`).
   A browser whose access cookie has expired but whose refresh cookie remains counts as signed in:
   its GET asks for confirmation, and the confirmed POST revokes that session's whole refresh-token
   family and clears the cookies. The rest is unchanged (a hint alone ends nothing;
-  `post_logout_redirect_uri` needs a hint and a registered URI). **Upgrade:** an IdP frontend that
-  links to end-session handles `logout_confirmation_required`.
+  `post_logout_redirect_uri` needs a hint and a registered URI). New `oidc.endSessionConfirmationUrl`
+  (`IDP_OIDC_END_SESSION_CONFIRMATION_URL`): when set, that GET redirects (`302`) to your
+  confirmation page, forwarding only `client_id`, `state`, `ui_locales` and `logout_hint` (never
+  over a parameter the configured URL already has), and the page POSTs them back — a relying
+  party sends the browser to end-session, so it needs a page rather than JSON. It must be `https`
+  (`http` only for localhost) and on the issuer's origin or one of `cookies.trustedOrigins`, where
+  the POST is accepted; startup checks both. **Upgrade:** an IdP frontend that links to end-session
+  handles `logout_confirmation_required`, or set `oidc.endSessionConfirmationUrl` to a page that
+  posts the parameters back.
 - **Client redirect URIs** must be `https` (or `http` to a loopback host, or a reverse-DNS
   private-use scheme for native apps) and may not contain a fragment or credentials;
   `javascript:`/`data:` URIs were previously registrable. Authorization responses carry `iss`
@@ -397,7 +434,7 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
 - **Stolen refresh tokens went undetected (Medium).** Replaying an already-rotated refresh token was
   simply refused, so whoever rotated first (the thief) kept the chain. Refresh tokens now belong to a
   *family* (one login, or one authorization code); a rotated token presented again revokes the whole
-  family — on `/refresh` and the OAuth2 grant alike — and emits `REFRESH_TOKEN_REUSE_DETECTED`.
+  family — on `/session/refresh` and the OAuth2 grant alike — and emits `REFRESH_TOKEN_REUSE_DETECTED`.
   Within `session.refreshReuseGraceSeconds` (default 10 s; two tabs refreshing at once) a replay is
   only refused. Redeeming an authorization code twice now revokes everything the first redemption
   issued (`OAUTH2_CODE_REUSE_DETECTED`).
@@ -485,7 +522,7 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   `familyCreatedAt`, `familyRevokedAt`; authorization codes `sessionJti`, `reuseDetectedAt`; users
   `sessionsRevokedExceptFamily`. **Required, with no fallback** (custom adapters fail without
   them): `UserRepository.updateByIdIfStatus`, `SessionRepository.isFamilyRevoked` and `isFamilyLive`,
-  `VerificationTokenRepository.findActive`, `clearCodes` and `replaceForUser` (with a unique
+  `VerificationTokenRepository.findActive` and `replaceForUser` (with a unique
   constraint on one live `password_reset` / `magic_link` per user); `ServiceKeyRepository
   .setStatusByKid` takes `{ expectedStatus }`. See `docs/api/repository-adapters.md`.
 - **The per-account MFA lockout could be raced (High).** 0.3.0 checked the lock, then the code, and
@@ -564,19 +601,68 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   session rows and authorization codes; a consent `version`, incremented on every grant and
   revocation and recorded on codes; and the rotation's `revokedAt` written with the database's
   clock, with the grace window measured by the database (`rotatedWithin`). Expiry checks (token,
-  code, link and lockout lifetimes) still use each server's clock, like any JWT `exp` — keep clocks
-  roughly in sync. `sessionsRevokedAt` is now informational.
+  code, link and lockout lifetimes) still use each server's clock, like any JWT `exp` — bounded by
+  the clock-skew guard below. `sessionsRevokedAt` is now informational.
+- **Clock skew between servers was unchecked.** Servers whose clocks disagree let tokens, codes and
+  lockouts live longer — or die sooner — than configured. Each server now measures its clock
+  against the database's at startup, **refusing to start** past `clock.maxSkewSeconds` (default 30)
+  and warning past `clock.warnSkewSeconds` (default 2), and again every
+  `clock.checkIntervalSeconds` (default 600, minimum 10), logging an error past the maximum. Env:
+  `IDP_CLOCK_MAX_SKEW_SECONDS`, `IDP_CLOCK_WARN_SKEW_SECONDS`, `IDP_CLOCK_CHECK_INTERVAL_SECONDS`.
+  The database's time comes from the new optional storage method `databaseTime(): Promise<{ time:
+  Date }>` (Mongo: `hello.localTime`); an adapter without it gets a startup warning and no check.
+  New export `checkClockSkew()` for health checks: `{ skewMs, ok, level }`, `level` one of `'ok'`,
+  `'warn'`, `'error'` (the only one with `ok: false`) or `'unknown'` (no `databaseTime()`).
+  **Upgrade:** run NTP on your app servers; custom storage adapters add `databaseTime()`.
 - **`prompt` and `max_age` were ignored at `/oauth2/authorize`**, so an existing session was
   reused however old. They are now honoured (OIDC Core §3.1.2.1): `prompt=none` never shows UI — it
   redirects to the client's `redirect_uri` with `error=login_required` or `error=consent_required`
   (plus `state` and `iss`); `prompt=login`, `prompt=select_account` and `max_age=0` need a login
-  within the last 60 seconds (`FRESH_LOGIN_SECONDS`), else `401 { action: 'login_required',
-  reason: 'prompt_login' }` — the IdP page signs the user in and repeats the authorize request;
-  `max_age=N` refuses a login older than N seconds, or of unknown age (`reason: 'max_age'`);
+  made for this request, else `401 { action: 'login_required', reason: 'prompt_login',
+  login_challenge }`; `max_age=N` refuses a login older than N seconds, or of unknown age
+  (`reason: 'max_age'`, also with a `login_challenge`) — a redeemed challenge doesn't lift that:
+  the login made for it must also be younger than N seconds.
+  The `login_challenge` (43 characters, base64url, single use, valid 15 minutes) is what binds the
+  login to the request: the IdP frontend passes it to whichever sign-in it runs —
+  `login_challenge` in the body of `POST /login`, `/magic-link/verify` or
+  `/webauthn/authentication/verify`, or the query of `GET /sso/:provider`; through MFA it rides
+  in the MFA challenge token — and repeats the authorize request with `login_challenge` added,
+  which is accepted only from the session that sign-in created (same refresh-token family), for
+  the same client, once. A recent login without the challenge does not satisfy `prompt=login`
+  (earlier 0.4.0 builds accepted any login from the last 60 seconds; `FRESH_LOGIN_SECONDS` is
+  gone).
   `prompt=consent` shows the consent screen even when consent exists. Not signed in now answers
   `reason: 'unauthenticated'` (`action` is unchanged). Unknown `prompt` values, `none` combined with
   another, or a `scope` holding no scope at all → 400 `INVALID_REQUEST`. Discovery adds
-  `prompt_values_supported`.
+  `prompt_values_supported`. **Upgrade:** for `prompt=login` / `max_age`, the IdP frontend
+  passes `login_challenge` through its sign-in and back to the authorize request.
+- **The refresh cookie went to every route.** It was `Path=/` (required by `__Host-`), so the
+  long-lived token accompanied every request to the IdP's host. It is now
+  **`__Secure-refresh_token` with `Path=<router mount path>/session`** (plain `refresh_token`
+  without Secure; `Domain` set with `cookies.domain`). A path-scoped cookie can't be `__Host-`, so
+  it comes with **`__Host-refresh_binding`** (`Path=/`; `__Secure-refresh_binding` with
+  `cookies.domain`; plain `refresh_binding` without Secure) holding a keyed hash of the token
+  (`HASH_PURPOSES.REFRESH_COOKIE_BINDING`). The IdP uses the refresh-cookie value whose keyed hash
+  the binding holds; values without one — as one planted from a sibling subdomain would be — are
+  ignored, so they can neither be used nor block refresh, logout or end-session (with no usable
+  value, 400 `REFRESH_TOKEN_REQUIRED`). Every refresh-cookie value is considered (planted ones listed
+  first can't crowd out the real one), and in host-only mode more than one binding cookie means no
+  refresh cookie is used (a browser holds one).
+  400 `COOKIE_CONFLICT` only when two different tokens each come with a matching binding — possible
+  only with `cookies.domain`. Logout clears the session cookies even when it answers
+  `REFRESH_TOKEN_REQUIRED` or `COOKIE_CONFLICT`, and also clears the `Path=/` refresh cookie of
+  earlier 0.4.0 builds. New `cookies.sessionPath` (an absolute path, checked at startup)
+  pins the refresh cookie's path; by default it is taken from the request's mount path. The routes
+  that read the refresh cookie moved under `/session`: `POST /refresh` → **`POST
+  /session/refresh`**, `POST /logout` → **`POST /session/logout`**, `POST /logout/all` → **`POST
+  /session/logout/all`**, `GET|POST /oidc/end-session` → **`GET|POST /session/end`** (discovery's
+  `end_session_endpoint` is `${issuer}/session/end`). `/session/refresh` now checks the request
+  origin before reading any cookie. The access-token cookie is unchanged (`__Host-access_token`,
+  `Path=/`). Entries above that describe 0.3.x behaviour use the old paths. **Upgrade (breaking):**
+  call the new paths from your frontend, and update proxy rules, CDN paths and anything that names
+  the old paths or the cookies; relying parties that hard-code the end-session URL instead of
+  reading discovery must update it. Refresh cookies set before this change are not read, so
+  browser users sign in again.
 - **`mfa.requireEncrypted` defaulted to `false`**, so a plain-text TOTP secret (from ≤ 0.2.x, or
   written straight into the database) was used as-is even with a key configured. It now defaults to
   `true` whenever `mfa.encryptionKey` or `mfa.secretCipher` is set (`false` without one — the
@@ -615,7 +701,14 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   (incremented by `upsert` and `revoke`; `upsert` resolves the updated consent).
   `revokeByRefreshTokenHash` must write `revokedAt` from the database clock. A user read must return
   an integer `sessionEpoch` and a consent read an integer `version` — otherwise sign-in and code
-  redemption fail closed, with an error logged. `userRepository.deleteById`,
+  redemption fail closed, with an error logged. `sessionRepository.findByJti` (optional in 0.3.x,
+  with a per-process fallback) is now **required** and must return `familyId`: it also binds
+  authorization codes to their session, exempts the enrolling session at MFA enrolment, redeems
+  login challenges and finds the browser's session at end-session. An `attemptCounterRepository`,
+  when provided, must have `get`, `recordFailure` and `reset` (startup refuses it otherwise); the
+  in-process fallback drops expired entries every 1000 writes. Optional: `databaseTime()` on the
+  storage object (the clock-skew guard).
+  `userRepository.deleteById`,
   `sessionRepository.listHistoryForUser` and `credentialRepository.countForUser` are not called and
   not required. See `docs/api/repository-adapters.md`.
 - `ERROR_CODES` now lists `COOKIE_CONFLICT`, `REGISTRATION_PASSWORD_REQUIRED`,
@@ -627,17 +720,15 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
 
 ### Known limitations
 
-See README, "Known limitations":
+The four limitations earlier 0.4.0 builds listed here — the `Path=/` refresh cookie, unchecked
+clock skew, a verification-code budget any stranger could use up, and the 60-second `prompt=login`
+window — are resolved above. What remains (README, "Known limitations"):
 
-- The refresh cookie is `Path=/`, so it accompanies every request to the IdP's host: the `__Host-`
-  prefix requires it, and `__Host-` (which stops a sibling subdomain planting the cookie) matters
-  more than path scoping.
-- Expiry times are compared against each server's clock, as with any JWT — keep clocks roughly in
-  sync.
-- Anyone who knows an address can use up its email-verification code budget (the codes are
-  cleared; the emailed link keeps working, so verification emails must include the link).
-- `prompt=login` accepts a login made within the last 60 seconds rather than tracking each
-  authorization request.
+- Clock skew is bounded (each server within `clock.maxSkewSeconds` of the database), not
+  eliminated; adapters without `databaseTime()` aren't checked.
+- Verification-code attempts without a ticket (another device, cookies cleared) share the
+  per-address budget a stranger can use up, and 20 wrong codes from anyone disable codes for the
+  address for a year; the emailed link always works.
 
 ## [0.3.0] - 2026-10-05
 

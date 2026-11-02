@@ -88,9 +88,9 @@ validation list.
 | `RATE_LIMIT_EXCEEDED` | 429 | Generic — thrown by `enforceRateLimit` |
 | `RATE_LIMITER_UNAVAILABLE` | 503 | Generic — rate-limiter backend errored (or `MemoryRateLimiter` is full) on a fail-closed key — every limit except token refresh; see [Rate Limiter Interface](rate-limiter-interface.md) |
 | `FEATURE_DISABLED` | 404 | Generic — `setupMfaHandler`/`confirmMfaHandler` with `config.mfa.enabled: false` |
-| `CSRF_ORIGIN_REJECTED` | 403 | Generic — a state-changing request authenticated by the session **cookie**, or any browser request to an endpoint that sets or clears session cookies (`/login`, `/refresh`, `/logout`, `/mfa/verify`, `/magic-link/verify`, `/webauthn/authentication/verify`, `/webauthn/mfa/verify`, and the confirmed `POST /oidc/end-session`), came from an `Origin` that is neither the issuer's nor in `cookies.trustedOrigins`; see [Middleware](middleware.md) |
+| `CSRF_ORIGIN_REJECTED` | 403 | Generic — a state-changing request authenticated by the session **cookie**, or any browser request to an endpoint that sets or clears session cookies (`/login`, `/session/refresh`, `/session/logout`, `/mfa/verify`, `/magic-link/verify`, `/webauthn/authentication/verify`, `/webauthn/mfa/verify`, and the confirmed `POST /session/end`), came from an `Origin` that is neither the issuer's nor in `cookies.trustedOrigins`; see [Middleware](middleware.md) |
 | `PAYLOAD_TOO_LARGE` | 413 | Generic — only produced by `idpErrorHandler()`, for an oversized body |
-| `COOKIE_CONFLICT` | 400 | Generic — a request carried a session cookie (or an SSO binding cookie) twice, as a cookie planted by a sibling subdomain would make it (possible in practice only with `cookies.domain`, where the names are `__Secure-` rather than `__Host-`). Sign in again; find and remove the planted cookie |
+| `COOKIE_CONFLICT` | 400 | Generic — a request carried the access-token cookie (or an SSO binding or verification-ticket cookie) twice, as a cookie planted by a sibling subdomain would make it; or two different refresh tokens that each come with a matching binding cookie (possible only with `cookies.domain`, where the binding is a domain cookie). A refresh cookie without a matching binding is not an error: it is ignored. Sign in again; find and remove the planted cookie |
 | `AUTH_REQUIRED` | 401 | AuthN — `authContextMiddleware`, no token presented and not `optional` |
 | `UNAUTHENTICATED` | 401 | AuthN — handler-level check when `req.auth` is missing; also a wrong or non-covering bootstrap secret at `POST /internal/service-keys` |
 | `FORBIDDEN` | 403 | AuthN — `requireServiceCallerMiddleware` (caller not allowed, or a shared-secret caller without `serviceMesh.allowLegacySecretCallers`), a service name outside `serviceMesh.allowedServiceNames`, or the shared `bootstrapSecret` registering a name that has its own `bootstrapSecrets` entry |
@@ -110,14 +110,14 @@ validation list.
 | `ACCOUNT_SUSPENDED` | 403 | Credentials — status `SUSPENDED`/`DISABLED` |
 | `PENDING_VERIFICATION` | 403 | Credentials — status `INVITED` (and `PENDING_VERIFICATION` where a flow reaches `assertUsableStatus`). Password login on a `PENDING_VERIFICATION` account answers `INVALID_CREDENTIALS` instead (0.4.0) |
 | `CANNOT_DELETE_USER` | 400 | Credentials |
-| `EMAIL_ALREADY_VERIFIED` | 400 | Credentials — **no longer thrown** (0.4.0): resend-verification answers `{ status: 'ok' }` for every address |
+| `EMAIL_ALREADY_VERIFIED` | 400 | Credentials — **no longer thrown** (0.4.0): resend-verification answers `{ status: 'ok', verificationTicket }` for every address |
 | `INVALID_OR_EXPIRED_TOKEN` | 400 | Credentials — opaque token/code (reset/verify/magic-link) not found or expired; also verify-email for an unknown or already-verified address |
-| `REGISTRATION_PASSWORD_REQUIRED` | 400 | Credentials — verify-email on an address registered more than once before verification, without the `password` of the code's registration (or with a wrong one); the code stays usable (for a code, the attempt counts toward `security.verificationCodeLockout`) |
-| `VERIFICATION_LOCKED` | 429 | Credentials — per-address lockout on the 6-digit verification **code** (`security.verificationCodeLockout`, default 5 wrong codes per hour, locked 15 min); answered the same for unknown, verified and pending addresses. The outstanding codes are cleared, but the emailed **link** (`token`) still works — it has no attempt budget |
+| `REGISTRATION_PASSWORD_REQUIRED` | 400 | Credentials — verify-email on an address registered more than once before verification, without a `password` (a wrong one answers 400 `INVALID_OR_EXPIRED_TOKEN`, like a wrong code); the code stays usable (for a code, the attempt counts toward `security.verificationCodeLockout`) |
+| `VERIFICATION_LOCKED` | 429 | Credentials — the 6-digit verification **code**'s attempt budget is spent (`security.verificationCodeLockout`, default 5 wrong codes per 24 h, then locked 24 h; never shorter than `ttls.emailVerification`): the budget of the verification ticket the attempt carried, or — without one — the per-address budget, answered the same for unknown, verified and pending addresses; or the address's year-long cap (`maxTotalFailedAttempts`, default 20 wrong codes from anyone), after which codes no longer work for that address. The message tells the user to use the link in the verification email: the **link** (`token`) has no attempt budget. Below the year-long cap the codes stay valid (a request with the registrant's ticket still has its own budget) |
 | `CURRENT_PASSWORD_INCORRECT` | 400 | Credentials |
 | `PASSWORD_CHANGE_LOCKED` | 429 | Credentials — `/password/change`: per-account limit on wrong current passwords (`security.passwordChangeLockout`, default 5 per hour, locked an hour); returned for the attempt that exhausts it and every attempt while locked |
 | `REFRESH_TOKEN_REQUIRED` | 400 | Session |
-| `INVALID_REFRESH_TOKEN` | 401 | Session — unknown, revoked or rotated token, an OAuth2 refresh token presented at `/refresh`, or a session family past `session.absoluteLifetimeSeconds` |
+| `INVALID_REFRESH_TOKEN` | 401 | Session — unknown, revoked or rotated token, an OAuth2 refresh token presented at `/session/refresh`, or a session family past `session.absoluteLifetimeSeconds` |
 | `REFRESH_TOKEN_NOT_FOUND` | 404 | Session |
 | `MFA_ALREADY_ENABLED` | 400 | MFA |
 | `MFA_NOT_ENABLED` | 400 | MFA |
@@ -176,12 +176,12 @@ Several handlers deliberately answer the same way for real and non-existent acco
 leaking which emails are registered — this is normal, not a bug, if you see a 200/201 (or a
 generic 400) where you expected a 404/409:
 
-- `registerHandler` — an already-registered email still gets `201 { status: 'ok' }` (this is also
+- `registerHandler` — an already-registered email still gets `201 { status: 'ok', verificationTicket }` — the same kind of ticket as for any address (this is also
   why `USER_ALREADY_EXISTS` is never thrown).
 - `verifyEmailHandler` — an unknown or already-verified address gets the same 400
   `INVALID_OR_EXPIRED_TOKEN` as a wrong code (so a second click on a used link is now a 400, not
   `ok`).
-- `resendVerificationEmailHandler` — always `{ status: 'ok' }`, sent before the address is looked up.
+- `resendVerificationEmailHandler` — always `{ status: 'ok', verificationTicket }`, sent before the address is looked up.
 - `forgotPasswordHandler` — always `{ status: 'ok' }`, sent before the address is looked up.
 - `requestMagicLinkHandler` — `{ status: 'ok' }` for an unknown email when
   `allowSignupViaMagicLink: false`, and for a deleted account.
