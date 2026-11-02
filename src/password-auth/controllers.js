@@ -13,7 +13,7 @@ import { ipKey, emailKey } from '../rate-limit/keys.js';
 import { withAttemptBudget } from '../security/attempt-budget.js';
 import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { effectiveStatus, isActiveAccount, isPasswordLocked } from '../utils/account-status.js';
-import { sessionCookieName, readSessionCookie, cookiesAreSecure } from '../utils/cookies.js';
+import { sessionCookieName, readSessionCookie, cookiesAreSecure, hostCookieName, readCookie } from '../utils/cookies.js';
 
 function cookieOptions(state) {
     const c = state.config.cookies || {};
@@ -154,6 +154,10 @@ export async function registerHandler(req, res, next) {
         // Hashed on every path, so timing doesn't leak whether the email was new.
         const passwordHash = await hashPassword(password, state.config.security.bcryptRounds);
         const existing = await state.storage.userRepository.findByEmail(email);
+        // Every answer carries a ticket (see storeVerificationTicket) — a real one only where a code is sent.
+        const ticket = generateOpaqueToken(32);
+        sendVerificationTicket(state, res, ticket);
+        const answer = () => res.status(201).json({ status: 'ok', verificationTicket: ticket });
 
         if (existing?.status === IDENTITY_STATUS.PENDING_VERIFICATION) {
             // A second registration for an address nobody has proven they own. Either order is an
@@ -168,15 +172,16 @@ export async function registerHandler(req, res, next) {
             // (verify-email, magic link, SSO, reset), an unconditional write would put this registrant's
             // password on a live account.
             const contested = await state.storage.userRepository.updateByIdIfStatus(existing.id, IDENTITY_STATUS.PENDING_VERIFICATION, { passwordHash, registrationContested: true });
-            if (!contested) return res.status(201).json({ status: 'ok' });
+            if (!contested) return answer();
             const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, existing.id, passwordHash);
+            await storeVerificationTicket(state, existing.id, ticket);
             auditLogDetached(state.logger, state.hooks, 'REGISTRATION_REPEATED', { userId: String(existing.id) });
             invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
-            return res.status(201).json({ status: 'ok' });
+            return answer();
         }
         if (existing) {
             // An active (or otherwise settled) account is never touched by a registration.
-            return res.status(201).json({ status: 'ok' });
+            return answer();
         }
 
         const user = await state.storage.userRepository.create({
@@ -189,11 +194,12 @@ export async function registerHandler(req, res, next) {
         });
 
         const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, user.id, passwordHash);
+        await storeVerificationTicket(state, user.id, ticket);
 
         auditLogDetached(state.logger, state.hooks, 'REGISTERED', { userId: String(user.id), email });
         invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
 
-        res.status(201).json({ status: 'ok' });
+        answer();
     } catch (err) {
         next(err);
     }
@@ -207,6 +213,45 @@ const REGISTRATION_PASSWORD_REQUIRED = () => new IdpError({
     message: 'This address was registered more than once before it was verified — enter the password you registered with, together with the code from that registration\'s email.',
 });
 const LEGACY_CODE = /^\d{6}$/;
+
+/**
+ * Verification tickets. The 6-digit code is guessable, so attempts at it are budgeted — and a budget
+ * anyone can spend is one a stranger can use up for the address's owner. So whoever registers (or asks
+ * for a resend) gets a ticket — a host-only cookie, also in the JSON body for clients without cookies —
+ * and code attempts that carry a ticket of THAT account spend the ticket's own budget. Attempts without
+ * one share a per-address budget, which a stranger can use up without affecting the browser that
+ * registered (and the emailed link always works). Every caller gets a ticket, a dummy when nothing was
+ * registered, so the answer says nothing about the address; at most MAX_VERIFICATION_TICKETS real ones
+ * are issued per account and code lifetime, which bounds the guesses anyone can collect.
+ */
+const MAX_VERIFICATION_TICKETS = 5;
+const ticketCookie = (state) => hostCookieName(cookiesAreSecure(state), 'verification_ticket');
+
+function sendVerificationTicket(state, res, ticket) {
+    res.cookie(ticketCookie(state), ticket, {
+        httpOnly: true, secure: cookiesAreSecure(state), sameSite: 'lax', path: '/', maxAge: state.config.ttls.emailVerification * 1000,
+    });
+}
+
+/** Stores `ticket` for the pending account `userId` — unless its quota of tickets is used up (it then stays a dummy). */
+async function storeVerificationTicket(state, userId, ticket) {
+    const ttl = state.config.ttls.emailVerification;
+    const quota = await state.attemptCounters.recordFailure(`verification-tickets:${userId}`, { max: MAX_VERIFICATION_TICKETS, windowSeconds: ttl, lockSeconds: ttl });
+    if (quota.count > MAX_VERIFICATION_TICKETS) return;
+    await state.storage.verificationTokenRepository.create('verification_ticket', {
+        user: userId,
+        tokenHash: hashOpaqueToken(state, ticket, HASH_PURPOSES.EMAIL_VERIFICATION_TICKET),
+        expiresAt: new Date(Date.now() + ttl * 1000),
+    });
+}
+
+/** The live verification ticket of `userId` the request carries (body `ticket`, else the cookie), or null. */
+async function presentedTicket(state, req, userId) {
+    const raw = typeof req.body?.ticket === 'string' ? req.body.ticket : readCookie(req, ticketCookie(state));
+    if (!raw || !userId) return null;
+    const tokens = state.storage.verificationTokenRepository;
+    return (await lookupByTokenHash(state, raw, HASH_PURPOSES.EMAIL_VERIFICATION_TICKET, (tokenHash) => tokens.findActive('verification_ticket', { tokenHash }, userId))).result;
+}
 
 /** The password a verification activates: the one bound to its code (rows from before 0.4.0: the account's). */
 const boundPasswordHash = (row, user) => row.passwordHash ?? user.passwordHash ?? null;
@@ -260,16 +305,19 @@ export async function verifyEmailHandler(req, res, next) {
             return consumed;
         };
 
-        // The 6-digit CODE is guessable, so attempts at it are budgeted — per ADDRESS, counted for unknown
-        // and verified addresses too, so a lock says nothing about whether a pending registration exists.
-        // A spent budget kills the outstanding codes but not the links: the 256-bit link can't be
-        // guessed, so the owner can still verify while someone else hammers the code.
-        const found = token ? await verify() : await withAttemptBudget(state, `email-verification:${emailKey(state, email)}`, state.config.security.verificationCodeLockout, {
+        // The 6-digit CODE is guessable, so attempts at it are budgeted: per verification ticket when
+        // the request carries one of this account's (see storeVerificationTicket), otherwise per ADDRESS
+        // — counted for unknown and verified addresses too, so a lock says nothing about whether a
+        // pending registration exists. A spent budget locks only its own attempts: the codes stay valid
+        // for the ticket holder, and the 256-bit link can't be guessed at all.
+        const pendingUser = user?.status === IDENTITY_STATUS.PENDING_VERIFICATION ? user : null;
+        const ticketRow = token ? null : await presentedTicket(state, req, pendingUser?.id);
+        const budgetKey = ticketRow ? `email-verification:ticket:${ticketRow.tokenHash}` : `email-verification:${emailKey(state, email)}`;
+        const found = token ? await verify() : await withAttemptBudget(state, budgetKey, state.config.security.verificationCodeLockout, {
             lockedError: VERIFICATION_LOCKED,
             onLocked: async () => {
-                if (user?.status !== IDENTITY_STATUS.PENDING_VERIFICATION) return;
-                await tokens.clearCodes('email_verification', user.id);
-                await auditLog(state.logger, state.hooks, 'EMAIL_VERIFICATION_LOCKED', { userId: String(user.id) });
+                if (!pendingUser) return;
+                await auditLog(state.logger, state.hooks, 'EMAIL_VERIFICATION_LOCKED', { userId: String(pendingUser.id), withTicket: Boolean(ticketRow) });
             },
         }, verify);
 
@@ -279,6 +327,8 @@ export async function verifyEmailHandler(req, res, next) {
         });
         if (!activated) throw INVALID_VERIFICATION(); // settled meanwhile by another path
         await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
+        await state.storage.verificationTokenRepository.deleteAllForUser('verification_ticket', user.id);
+        res.clearCookie(ticketCookie(state), { httpOnly: true, secure: cookiesAreSecure(state), sameSite: 'lax', path: '/' });
 
         await auditLog(state.logger, state.hooks, 'EMAIL_VERIFIED', { userId: String(user.id), email });
 
@@ -297,11 +347,15 @@ export async function resendVerificationEmailHandler(req, res, next) {
         await enforceRateLimit(state, `verification-email:${emailKey(state, email)}`, state.config.rateLimiting.verificationEmailByEmail, { failMode: 'closed' });
 
         // Same answer — and the same timing — for unknown, already-verified and pending addresses: the
-        // lookup and the writes run after the response (see runAfterResponse).
-        res.json({ status: 'ok' });
+        // lookup and the writes run after the response (see runAfterResponse). The ticket too: it only
+        // becomes a real one, afterwards, if a code is sent.
+        const ticket = generateOpaqueToken(32);
+        sendVerificationTicket(state, res, ticket);
+        res.json({ status: 'ok', verificationTicket: ticket });
         runAfterResponse(state, 'Resend of the verification email', async () => {
             const user = await state.storage.userRepository.findByEmail(email, { select: '+passwordHash' });
             if (!user || user.status !== IDENTITY_STATUS.PENDING_VERIFICATION) return;
+            await storeVerificationTicket(state, user.id, ticket);
 
             // Normally only the newest code works. While registrations compete for the address, each
             // one's code stays valid (the new one is bound to the most recent registration's password).

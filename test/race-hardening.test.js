@@ -87,7 +87,7 @@ test('a re-registration that read the account as pending cannot overwrite it onc
 
 // ── Verification-code budget ─────────────────────────────────────────────────
 
-test('wrong codes from a stranger kill the codes, not the owner\'s link; the lock looks the same for every address', async () => {
+test('wrong codes from a stranger lock code attempts without a ticket, not the owner\'s link; the lock looks the same for every address', async () => {
     await withTemporaryApp({ config: { security: { ...TEST_SECURITY, verificationCodeLockout: { maxFailedAttempts: 3, windowSeconds: 60, lockSeconds: 60 } } } }, async (temp) => {
         const p = (path, body) => post(path, body, {}, temp.baseUrl);
         const burn = async (email) => {

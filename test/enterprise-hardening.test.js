@@ -1,6 +1,7 @@
 import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTestApp, withTemporaryApp, uniqueEmail } from './helpers/build-test-app.js';
+import { buildTestApp, withTemporaryApp, uniqueEmail, waitForHookCall, TEST_SECURITY } from './helpers/build-test-app.js';
+import { hashOpaqueToken, HASH_PURPOSES } from '../src/signing/token.service.js';
 import { json } from './helpers/serve.js';
 import { configFromEnv, checkClockSkew } from '../src/index.js';
 import { createMongoStorage } from '../src/storage/mongo/index.js';
@@ -111,4 +112,69 @@ test('checkClockSkew() reports the current skew for health checks; clock setting
     await assert.rejects(buildTestApp({ config: { clock: { maxSkewSeconds: 0 } } }), /clock.maxSkewSeconds must be an integer >= 1/);
     await assert.rejects(buildTestApp({ config: { clock: { warnSkewSeconds: 40 } } }), /warnSkewSeconds must not exceed maxSkewSeconds/);
     assert.equal(configFromEnv({ IDP_CLOCK_MAX_SKEW_SECONDS: '10' }).clock.maxSkewSeconds, 10);
+});
+
+// ── verification tickets ─────────────────────────────────────────────────────
+
+const LOCKOUT = { verificationCodeLockout: { maxFailedAttempts: 3, windowSeconds: 3600, lockSeconds: 3600 } };
+const lastCode = (target, email) => target.hookCalls.onVerificationEmailRequested.filter((c) => c.email === email).at(-1);
+const ticketCookieOf = (res) => res.headers.getSetCookie().find((c) => c.startsWith('__Host-verification_ticket=')).split(';')[0];
+
+async function strangerLocks(target, email, code) {
+    const wrong = code === '123456' ? '654321' : '123456';
+    for (let i = 0; i < 3; i += 1) await post(target.baseUrl, '/register/verify-email', { email, code: wrong });
+    assert.equal((await post(target.baseUrl, '/register/verify-email', { email, code })).status, 429, 'the address budget is spent');
+}
+
+test('the registering browser verifies with its ticket cookie after a stranger used up the address budget', async () => {
+    await withTemporaryApp({ config: { security: { ...TEST_SECURITY, ...LOCKOUT } } }, async (temp) => {
+        const email = uniqueEmail('ticket');
+        const reg = await post(temp.baseUrl, '/register', { email, password });
+        const cookie = ticketCookieOf(reg);
+        assert.match(reg.headers.getSetCookie().find((c) => c.startsWith('__Host-verification_ticket=')), /HttpOnly/i);
+        const { verificationCode } = lastCode(temp, email);
+        await strangerLocks(temp, email, verificationCode);
+        const res = await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode }, { Cookie: cookie });
+        assert.equal(res.status, 200);
+        assert.ok(res.headers.getSetCookie().some((c) => c.startsWith('__Host-verification_ticket=;')), 'ticket cleared');
+        const user = await temp.state.storage.userRepository.findByEmail(email);
+        assert.equal(await temp.state.storage.verificationTokenRepository.findActive('verification_ticket', { tokenHash: hashOpaqueToken(temp.state, cookie.split('=')[1], HASH_PURPOSES.EMAIL_VERIFICATION_TICKET) }, user.id), null, 'tickets deleted');
+    });
+});
+
+test('a ticket has its own budget; a ticket of another account, or a dummy, buys nothing', async () => {
+    await withTemporaryApp({ config: { security: { ...TEST_SECURITY, ...LOCKOUT } } }, async (temp) => {
+        const victim = uniqueEmail('ticket-victim');
+        const { verificationTicket: victimTicket } = await (await post(temp.baseUrl, '/register', { email: victim, password })).json();
+        const { verificationCode } = lastCode(temp, victim);
+        const wrong = verificationCode === '123456' ? '654321' : '123456';
+
+        // A stranger's tickets: one from their own registration, one (a dummy) from re-registering an active address.
+        const { verificationTicket: ownTicket } = await (await post(temp.baseUrl, '/register', { email: uniqueEmail('ticket-attacker'), password })).json();
+        const active = await registered(temp);
+        const { verificationTicket: dummy } = await (await post(temp.baseUrl, '/register', { email: active, password })).json();
+        for (const ticket of [ownTicket, dummy, ownTicket]) await post(temp.baseUrl, '/register/verify-email', { email: victim, code: wrong, ticket });
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email: victim, code: verificationCode })).status, 429, 'those attempts spent the shared budget');
+
+        // The victim's ticket: three wrong guesses lock it too — its own budget is bounded.
+        for (let i = 0; i < 3; i += 1) await post(temp.baseUrl, '/register/verify-email', { email: victim, code: wrong, ticket: victimTicket });
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email: victim, code: verificationCode, ticket: victimTicket })).status, 429);
+        // ...and the link still works.
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email: victim, token: lastCode(temp, victim).verificationToken })).status, 200);
+    });
+});
+
+test('at most 5 real tickets per account and code lifetime — more requests get dummies', async () => {
+    await withTemporaryApp({ config: { security: { ...TEST_SECURITY, ...LOCKOUT } } }, async (temp) => {
+        const email = uniqueEmail('ticket-quota');
+        const tickets = [(await (await post(temp.baseUrl, '/register', { email, password })).json()).verificationTicket];
+        for (let i = 1; i <= 5; i += 1) {
+            tickets.push((await (await post(temp.baseUrl, '/register/resend-verification', { email })).json()).verificationTicket);
+            await waitForHookCall(temp, 'onVerificationEmailRequested', (c) => c.email === email, { count: i + 1 });
+        }
+        const { verificationCode } = lastCode(temp, email);
+        await strangerLocks(temp, email, verificationCode);
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, ticket: tickets[5] })).status, 429, 'the 6th ticket is a dummy');
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, ticket: tickets[4] })).status, 200, 'the 5th is real');
+    });
 });

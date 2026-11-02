@@ -69,7 +69,9 @@ test('registering with an already-registered email does not reveal that fact', a
     });
 
     assert.equal(first.status, second.status);
-    assert.deepEqual(await first.json(), await second.json());
+    // Each answer carries its own random verification ticket; apart from that they are identical.
+    const withoutTicket = ({ verificationTicket, ...rest }) => (assert.match(verificationTicket, /^[0-9a-f]{64}$/), rest);
+    assert.deepEqual(withoutTicket(await first.json()), withoutTicket(await second.json()));
 });
 
 test('login before verifying email is rejected — with the same answer as a wrong password', async () => {

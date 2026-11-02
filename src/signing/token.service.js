@@ -269,6 +269,7 @@ export const HASH_PURPOSES = Object.freeze({
     AUTHORIZATION_CODE: 'authorization-code',
     EMAIL_VERIFICATION_LINK: 'email-verification-link',
     EMAIL_VERIFICATION_CODE: 'email-verification-code',
+    EMAIL_VERIFICATION_TICKET: 'email-verification-ticket',
     PASSWORD_RESET: 'password-reset',
     MAGIC_LINK: 'magic-link',
     MFA_RECOVERY_CODE: 'mfa-recovery-code',

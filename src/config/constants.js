@@ -136,9 +136,14 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
 // up, every outstanding verification code for the account is deleted, so a
 // 6-digit code can be guessed at most `maxFailedAttempts` times before the
 // owner has to request a new one (which goes to their inbox, not the attacker's).
+/**
+ * Wrong 6-digit email-verification codes: `maxFailedAttempts` per verification ticket, and as many
+ * again for attempts without one (per address). Window and lock default to the code's lifetime, so
+ * a code gets a fixed number of guesses for as long as it lives.
+ */
 export const DEFAULT_VERIFICATION_CODE_LOCKOUT = Object.freeze({
     maxFailedAttempts: 5,
-    windowSeconds: 60 * 60,
+    windowSeconds: 24 * 60 * 60,
     lockSeconds: 15 * 60,
 });
 

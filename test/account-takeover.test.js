@@ -120,6 +120,13 @@ test('pre-registration: activating a pending account by magic link discards the 
     assert.equal(leftover.status, 400);
 });
 
+/** The answer to /register and /register/resend-verification: always a status and a (random) ticket, whatever the address. */
+function assertTicketAnswer(body) {
+    assert.deepEqual(Object.keys(body).sort(), ['status', 'verificationTicket']);
+    assert.equal(body.status, 'ok');
+    assert.match(body.verificationTicket, /^[0-9a-f]{64}$/);
+}
+
 test('re-registering an ACTIVE account changes nothing and gives the same answer', async () => {
     const email = uniqueEmail('active-rereg');
     await post('/register', { email, password: victimPassword });
@@ -128,7 +135,7 @@ test('re-registering an ACTIVE account changes nothing and gives the same answer
 
     const res = await post('/register', { email, password: attackerPassword });
     assert.equal(res.status, 201);
-    assert.deepEqual(await res.json(), { status: 'ok' });
+    assertTicketAnswer(await res.json());
     assert.equal(app.hookCalls.onVerificationEmailRequested.length, callsBefore, 'no email sent');
     assert.equal((await post('/login', { email, password: attackerPassword })).status, 401);
     assert.equal((await post('/login', { email, password: victimPassword })).status, 200);
@@ -178,7 +185,7 @@ test('verify-email answers the same for an unknown address, a verified one, and 
     // resend-verification likewise says nothing about an already-verified address.
     const resend = await post('/register/resend-verification', { email: verified });
     assert.equal(resend.status, 200);
-    assert.deepEqual(await resend.json(), { status: 'ok' });
+    assertTicketAnswer(await resend.json());
 });
 
 test('email-verification codes are stored hashed, not in plain text', async () => {
@@ -192,11 +199,11 @@ test('email-verification codes are stored hashed, not in plain text', async () =
     assert.match(rows[0].verificationCode, /^[0-9a-f]{64}$/);
 });
 
-test('verify-email brute force: the code dies after the attempt budget, even for the right code', async () => {
-    await withTemporaryApp({ config: { security: { ...TEST_SECURITY, verificationCodeLockout: { maxFailedAttempts: 3, windowSeconds: 60, lockSeconds: 1 } } } }, async (temp) => {
+test('verify-email brute force: without a ticket the address budget locks, even for the right code — the registrant ticket is unaffected', async () => {
+    await withTemporaryApp({ config: { security: { ...TEST_SECURITY, verificationCodeLockout: { maxFailedAttempts: 3, windowSeconds: 60, lockSeconds: 60 } } } }, async (temp) => {
         const p = (path, body) => fetch(`${temp.baseUrl}${path}`, json(body));
         const email = uniqueEmail('bruteforce');
-        await p('/register', { email, password: victimPassword });
+        const { verificationTicket } = await (await p('/register', { email, password: victimPassword })).json();
         const { verificationCode } = lastCodeFor(email, temp);
         const wrong = verificationCode === '123456' ? '654321' : '123456';
 
@@ -207,15 +214,10 @@ test('verify-email brute force: the code dies after the attempt budget, even for
         const locked = await p('/register/verify-email', { email, code: verificationCode });
         assert.equal(locked.status, 429, 'the right code is refused once the budget is spent');
         assert.equal((await locked.json()).error, 'VERIFICATION_LOCKED');
-        assert.ok(temp.hookCalls.onAuditLog.some((e) => e.action === 'EMAIL_VERIFICATION_LOCKED'));
+        assert.ok(temp.hookCalls.onAuditLog.some((e) => e.action === 'EMAIL_VERIFICATION_LOCKED' && e.withTicket === false));
 
-        // After the lock lifts, the old code is still dead — it was burnt. A new one (sent to the inbox) works.
-        await new Promise((r) => setTimeout(r, 1100));
-        assert.equal((await p('/register/verify-email', { email, code: verificationCode })).status, 400);
-        const sent = temp.hookCalls.onVerificationEmailRequested.filter((c) => c.email === email).length;
-        await p('/register/resend-verification', { email });
-        const fresh = (await waitForHookCall(temp, 'onVerificationEmailRequested', (c) => c.email === email, { count: sent + 1 })).verificationCode;
-        assert.equal((await p('/register/verify-email', { email, code: fresh })).status, 200);
+        // The browser that registered carries its ticket: its own budget, untouched by the stranger's guesses.
+        assert.equal((await p('/register/verify-email', { email, code: verificationCode, ticket: verificationTicket })).status, 200);
     });
 });
 
