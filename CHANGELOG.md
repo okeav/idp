@@ -72,6 +72,24 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   with `error=provider_error`). Google, Microsoft and GitHub exchanges use PKCE (S256); Apple's
   `id_token` must carry this login's `nonce` and the right `iss`/`aud`/`exp`. **Upgrade:** mount
   `cookie-parser` before the router (already needed for cookie sessions).
+- **Webhooks carried login credentials to every endpoint (High).** `onPasswordResetRequested`,
+  `onMagicLinkRequested` and `onVerificationEmailRequested` payloads — live reset tokens, magic-link
+  tokens, verification codes — were POSTed to every configured endpoint, so anyone with access to
+  any receiver (or its logs, or its retry queue) could take over any account. Those fields are now
+  stripped unless the endpoint sets `includeCredentials: true` (your mail sender). Endpoints can
+  filter by `events`, must be `https` (`http` only for localhost) with a secret of ≥ 16 characters
+  (checked at startup), and redirects are no longer followed. The delivery id is now inside the
+  signed body (`id`) as well as the `X-Idp-Delivery` header — de-duplicate on the body's. 
+  `verifyWebhookSignature` accepts an array of secrets and several `v1` signatures (rotation).
+  Webhooks are still sent when the in-process hook throws; at most `webhooks.maxInFlight` (100)
+  deliveries run at once (logged URLs omit credentials and query strings). **Upgrade:** set
+  `includeCredentials` on the endpoint that sends emails, if one does.
+- **Hook timing and stalls.** Every hook is awaited at most `hookTimeoutMs` (default 10 s), so a hung
+  consumer callback can't stall a login. On the endpoints that must not reveal whether an account
+  exists — register, resend verification, forgot password, magic-link request — the email hooks (and
+  their audit events) are started but not awaited: waiting for an email to be sent made those
+  responses measurably slower for real accounts. **Upgrade:** in serverless runtimes, make those
+  hooks hand off quickly (enqueue rather than send inline).
 - **Service impersonation through the shared bootstrap secret (High).** Every service presented the
   same `serviceMesh.bootstrapSecret`, and `POST /internal/service-keys` trusted the `name` in the
   body — any participating service (or anyone who read its environment) could register a key as

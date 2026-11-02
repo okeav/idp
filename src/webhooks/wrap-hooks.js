@@ -4,6 +4,17 @@
 const EXCLUDED_HOOKS = new Set(['resolveAuthContext']);
 
 /**
+ * Payload fields that are credentials: whoever holds one can reset a password, log in, or verify an
+ * address. They are stripped from webhook deliveries unless the endpoint sets `includeCredentials`
+ * (e.g. the endpoint that actually sends your emails).
+ */
+export const CREDENTIAL_FIELDS = Object.freeze({
+    onPasswordResetRequested: ['resetToken'],
+    onMagicLinkRequested: ['magicLinkToken'],
+    onVerificationEmailRequested: ['verificationToken', 'verificationCode'],
+});
+
+/**
  * Wraps every one-way notification hook so that, in addition to invoking the
  * consumer's in-process hook (unchanged), it also fires an outbound webhook
  * delivery via `dispatcher`. Purely additive — if no webhook endpoints are
@@ -14,6 +25,9 @@ const EXCLUDED_HOOKS = new Set(['resolveAuthContext']);
  * which is a more useful event name for a consumer filtering deliveries than
  * the literal string "onAuditLog", so that one case uses `payload.action` as
  * the dispatched event name instead of the hook name.
+ *
+ * The webhook is dispatched even when the in-process hook throws: one failing consumer
+ * callback must not silently drop the event for every webhook receiver.
  */
 export function wrapHooksWithWebhooks(hooks, dispatcher) {
     if (!dispatcher || dispatcher.isNoop) return hooks;
@@ -25,10 +39,12 @@ export function wrapHooksWithWebhooks(hooks, dispatcher) {
             continue;
         }
         wrapped[name] = async (payload) => {
-            const result = await fn(payload);
-            const event = name === 'onAuditLog' && payload?.action ? payload.action : name;
-            dispatcher.dispatch(event, payload);
-            return result;
+            try {
+                return await fn(payload);
+            } finally {
+                const event = name === 'onAuditLog' && payload?.action ? payload.action : name;
+                dispatcher.dispatch(event, payload, { credentialFields: CREDENTIAL_FIELDS[name] ?? [] });
+            }
         };
     }
     return wrapped;

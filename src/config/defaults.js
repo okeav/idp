@@ -79,6 +79,7 @@ export function withDefaults(config = {}) {
             serviceKeyRegistration: { ...DEFAULT_RATE_LIMITS.serviceKeyRegistrationPerIp, ...config.rateLimiting?.serviceKeyRegistration },
         },
         hooks: config.hooks || {},
+        hookTimeoutMs: config.hookTimeoutMs ?? 10_000,
         webhooks: { ...DEFAULT_WEBHOOK_CONFIG, ...config.webhooks },
         // No defaults applied — `storage.factory`, when present, is used
         // as-is in place of the built-in Mongo adapter (see config/init.js).

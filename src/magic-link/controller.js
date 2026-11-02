@@ -2,7 +2,7 @@ import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { IDENTITY_STATUS } from '../config/constants.js';
 import { hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
-import { auditLog, safeInvokeHook } from '../hooks/index.js';
+import { auditLog, auditLogDetached, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus, mfaChallengeResponse } from '../password-auth/controllers.js';
 
@@ -45,8 +45,8 @@ export async function requestMagicLinkHandler(req, res, next) {
             expiresAt: new Date(Date.now() + state.config.ttls.magicLink * 1000),
         });
 
-        await auditLog(state.logger, state.hooks, 'MAGIC_LINK_REQUESTED', { userId: String(user.id), email, isNewUser });
-        await safeInvokeHook(state.logger, state.hooks, 'onMagicLinkRequested', {
+        auditLogDetached(state.logger, state.hooks, 'MAGIC_LINK_REQUESTED', { userId: String(user.id), email, isNewUser });
+        invokeHookDetached(state.logger, state.hooks, 'onMagicLinkRequested', {
             email, magicLinkToken: token, firstName: user.profile?.firstName, lastName: user.profile?.lastName, isNewUser,
         });
 

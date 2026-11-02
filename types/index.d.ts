@@ -244,12 +244,16 @@ export interface IdpConfig {
      * underlying auth operation.
      */
     webhooks?: {
-        endpoints?: Array<{ url: string; secret: string }>;
+        endpoints?: WebhookEndpoint[];
         maxAttempts?: number;
         retryBaseDelayMs?: number;
         timeoutMs?: number;
+        /** Deliveries (with retries) in flight at once; beyond this, events are dropped with a warning. Default 100. */
+        maxInFlight?: number;
     };
     hooks?: AuthHooks;
+    /** How long a hook is awaited before the request carries on without it (it keeps running). Default 10000. */
+    hookTimeoutMs?: number;
     logger?: Logger;
 }
 
@@ -586,18 +590,30 @@ export function createRedisRateLimiter(opts: { redis?: unknown; host?: string; p
 
 // ── Outbound webhooks ────────────────────────────────────────────────────
 
+/**
+ * `url` must be https (http only for localhost); `secret` at least 16 characters. `events` limits which
+ * events the endpoint receives. Credential fields (reset/magic-link tokens, verification codes) are
+ * stripped unless `includeCredentials` — set it only on the endpoint that sends those emails.
+ */
+export interface WebhookEndpoint {
+    url: string;
+    secret: string;
+    events?: string[];
+    includeCredentials?: boolean;
+}
 export class WebhookDispatcher {
-    constructor(opts: { endpoints?: Array<{ url: string; secret: string }>; maxAttempts?: number; retryBaseDelayMs?: number; timeoutMs?: number }, logger?: Logger);
+    constructor(opts: { endpoints?: WebhookEndpoint[]; maxAttempts?: number; retryBaseDelayMs?: number; timeoutMs?: number; maxInFlight?: number }, logger?: Logger);
     readonly isNoop: boolean;
     /** Fire-and-forget — never returns a promise callers need (or are expected) to await. */
-    dispatch(event: string, payload: unknown): void;
+    dispatch(event: string, payload: unknown, opts?: { credentialFields?: string[] }): void;
 }
 /**
  * For consumers receiving webhook deliveries from this package. Verifies the
  * `X-Idp-Signature` header (`t=<unix seconds>,v1=<hex hmac>`) against the
  * exact raw (unparsed) request body.
  */
-export function verifyWebhookSignature(secret: string, rawBody: string, signatureHeader: string | undefined, opts?: { toleranceSeconds?: number }): boolean;
+/** Pass several secrets during rotation; after verifying, de-duplicate on the body's `id`. */
+export function verifyWebhookSignature(secret: string | string[], rawBody: string, signatureHeader: string | undefined, opts?: { toleranceSeconds?: number }): boolean;
 
 // ── Schemas ──────────────────────────────────────────────────────────────
 

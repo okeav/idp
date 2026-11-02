@@ -1,7 +1,7 @@
 import { withDefaults } from './defaults.js';
 import { setState } from './state.js';
 import { createConsoleLogger } from './console-logger.js';
-import { mergeHooks } from '../hooks/index.js';
+import { mergeHooks, setHookTimeout } from '../hooks/index.js';
 import { createCacheAdapter } from '../cache/index.js';
 import { createRateLimiter } from '../rate-limit/index.js';
 import { WebhookDispatcher } from '../webhooks/dispatcher.js';
@@ -39,6 +39,8 @@ export async function initIdentityProvider(config) {
     assertLockoutConfig('mfa.lockout', resolved.mfa.lockout);
     assertLockoutConfig('security.verificationCodeLockout', resolved.security.verificationCodeLockout);
     assertSsoConfig(resolved);
+    if (!Number.isInteger(resolved.hookTimeoutMs) || resolved.hookTimeoutMs < 1) throw new Error(`config.hookTimeoutMs must be a positive integer (got ${resolved.hookTimeoutMs})`);
+    setHookTimeout(resolved.hookTimeoutMs);
     if (!['all', 'public'].includes(resolved.oauth2.requirePkce)) {
         throw new Error("config.oauth2.requirePkce must be 'all' or 'public'");
     }

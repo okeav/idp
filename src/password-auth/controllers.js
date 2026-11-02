@@ -7,7 +7,7 @@ import { issueAccessToken, issueMfaChallengeToken, hashOpaqueToken, generateOpaq
 import { hashPassword, verifyPassword, compareDummyPassword } from '../utils/password.js';
 import { buildDeviceFingerprint, notifyNewDevice } from '../utils/device-fingerprint.js';
 import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked } from '../utils/session-family.js';
-import { auditLog, safeInvokeHook } from '../hooks/index.js';
+import { auditLog, auditLogDetached, safeInvokeHook, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { withAttemptBudget } from '../security/attempt-budget.js';
 
@@ -130,8 +130,8 @@ export async function registerHandler(req, res, next) {
             });
             await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', existing.id);
             const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, existing.id);
-            await auditLog(state.logger, state.hooks, 'REGISTRATION_RESTARTED', { userId: String(existing.id) });
-            await safeInvokeHook(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
+            auditLogDetached(state.logger, state.hooks, 'REGISTRATION_RESTARTED', { userId: String(existing.id) });
+            invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
             return res.status(201).json({ status: 'ok' });
         }
         if (existing) {
@@ -149,8 +149,8 @@ export async function registerHandler(req, res, next) {
 
         const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, user.id);
 
-        await auditLog(state.logger, state.hooks, 'REGISTERED', { userId: String(user.id), email });
-        await safeInvokeHook(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
+        auditLogDetached(state.logger, state.hooks, 'REGISTERED', { userId: String(user.id), email });
+        invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
 
         res.status(201).json({ status: 'ok' });
     } catch (err) {
@@ -231,8 +231,8 @@ export async function resendVerificationEmailHandler(req, res, next) {
         await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
         const { token, verificationCode } = await createEmailVerificationToken(state, user.id);
 
-        await auditLog(state.logger, state.hooks, 'VERIFICATION_TOKEN_REGENERATED', { userId: String(user.id) });
-        await safeInvokeHook(state.logger, state.hooks, 'onVerificationEmailRequested', {
+        auditLogDetached(state.logger, state.hooks, 'VERIFICATION_TOKEN_REGENERATED', { userId: String(user.id) });
+        invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', {
             email, firstName: user.profile?.firstName, lastName: user.profile?.lastName, verificationToken: token, verificationCode,
         });
 
@@ -476,7 +476,7 @@ export async function forgotPasswordHandler(req, res, next) {
             expiresAt: new Date(Date.now() + state.config.ttls.passwordReset * 1000),
         });
 
-        await safeInvokeHook(state.logger, state.hooks, 'onPasswordResetRequested', {
+        invokeHookDetached(state.logger, state.hooks, 'onPasswordResetRequested', {
             email, resetToken, firstName: user.profile?.firstName, lastName: user.profile?.lastName,
         });
 

@@ -160,4 +160,6 @@ export const DEFAULT_WEBHOOK_CONFIG = Object.freeze({
     maxAttempts: 5,
     retryBaseDelayMs: 500,
     timeoutMs: 5000,
+    // Deliveries (with their retries) running at once; beyond this, events are dropped with a warning.
+    maxInFlight: 100,
 });
