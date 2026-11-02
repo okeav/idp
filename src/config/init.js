@@ -110,9 +110,6 @@ export async function initIdentityProvider(config) {
     if (missingAtomic.length > 0) {
         logger.warn({}, `@okeav/idp-core: storage adapter's userRepository has no ${missingAtomic.join('/')}() — TOTP replay and recovery-code reuse are checked with a non-atomic read-then-write, which concurrent requests can race. Upgrade the adapter.`);
     }
-    if (resolved.session.verifyOnEachRequest && typeof storage.sessionRepository?.findByJti !== 'function') {
-        logger.warn({}, '@okeav/idp-core: session.verifyOnEachRequest is on but the storage adapter\'s sessionRepository has no findByJti() — falling back to the per-process revocation cache, so logout-all/password reset will NOT revoke access tokens before they expire. Upgrade the adapter.');
-    }
 
     const state = { config: resolved, logger, hooks, cache, rateLimiter, webhookDispatcher, signingKeys, storage, hashEmail, normalizeEmail, mfaCipher, attemptCounters };
     setState(state);
@@ -247,6 +244,9 @@ function assertCookieConfig(cookies = {}) {
     }
     if (cookies.refreshTokenInBody !== undefined && ![true, false, 'auto'].includes(cookies.refreshTokenInBody)) {
         throw new Error(`config.cookies.refreshTokenInBody must be true, false or 'auto' (got ${JSON.stringify(cookies.refreshTokenInBody)})`);
+    }
+    if (cookies.sessionPath !== undefined && (typeof cookies.sessionPath !== 'string' || !/^\/[\x21-\x3a\x3c-\x7e]*$/.test(cookies.sessionPath))) {
+        throw new Error('config.cookies.sessionPath must be an absolute path (e.g. /auth/session) — the path the session routes are served under');
     }
     if (cookies.sameSite === 'none' && cookies.secure === false) throw new Error("config.cookies.sameSite 'none' requires secure cookies (browsers drop SameSite=None without Secure)");
     if (cookies.trustedOrigins !== undefined && (!Array.isArray(cookies.trustedOrigins) || cookies.trustedOrigins.some((o) => typeof o !== 'string' || o !== safeOrigin(o)))) {

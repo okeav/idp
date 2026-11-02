@@ -10,7 +10,7 @@ import { mongoIdPlugin } from '../plugins/mongo-id.plugin.js';
 export function defineVerificationTokenModel(connection) {
     const schema = new mongoose.Schema(
         {
-            kind: { type: String, enum: ['password_reset', 'email_verification', 'magic_link', 'verification_ticket'], required: true, index: true },
+            kind: { type: String, enum: ['password_reset', 'email_verification', 'magic_link'], required: true, index: true },
             user: { type: mongoose.Schema.Types.ObjectId, ref: 'IdpIdentityUser', required: true, index: true },
             tokenHash: { type: String, required: true },
             verificationCode: { type: String }, // email_verification only — short numeric code as an alternative to the link token

@@ -115,6 +115,11 @@ export interface IdpConfig {
          * httpOnly cookie only. `true`: always (a browser app that keeps the token itself). `false`: never.
          */
         refreshTokenInBody?: boolean | 'auto';
+        /**
+         * The path the refresh-token cookie is scoped to. Default: `<router mount path>/session`, taken from
+         * the request. Set it (e.g. `/auth/session`) to pin it when the mount path can vary in spelling.
+         */
+        sessionPath?: string;
     };
     registration?: {
         /** Persist the user-supplied `metadata` from POST /register. Default false — it is attacker-controlled. */
@@ -244,6 +249,27 @@ export interface IdpConfig {
          * `'public'` — public clients only (always required for them).
          */
         requirePkce?: 'all' | 'public';
+    };
+    oidc?: {
+        /**
+         * The IdP page that asks "sign out?" for RP-initiated logout. When set, `GET /session/end` without
+         * a matching `id_token_hint` redirects there with its query parameters; the page POSTs them back to
+         * `/session/end`. https (http only for localhost), on the issuer's origin or a `cookies.trustedOrigins`
+         * origin (checked at startup). Unset: that GET answers `{ action: 'logout_confirmation_required' }`.
+         */
+        endSessionConfirmationUrl?: string;
+    };
+    /**
+     * Bounds on this server's clock vs the database's (token, code and lockout lifetimes use the local
+     * clock). Measured at startup — which fails past `maxSkewSeconds` — and every `checkIntervalSeconds`.
+     */
+    clock?: {
+        /** Default 30. */
+        maxSkewSeconds?: number;
+        /** Default 2: a warning is logged past it. */
+        warnSkewSeconds?: number;
+        /** Default 600 (minimum 10). */
+        checkIntervalSeconds?: number;
     };
     /** Required (startup fails otherwise) as soon as any `oauthProviders` entry has a `clientId`. */
     sso?: {
@@ -482,6 +508,8 @@ export function verifyAccessToken(token: string, opts?: VerifyAccessTokenOptions
 export function issueIdToken(user: IdentityUser, audience: string, nonce?: string, opts?: { scopes?: string[]; authTime?: number; ttlSeconds?: number }): Promise<IssuedToken>;
 export function issueOAuth2AccessToken(subject: { id: string }, client: { clientId: string; accessTokenTTL?: number }, scopes: string[], opts?: { sessionless?: boolean }): Promise<IssuedToken>;
 export function issueMfaChallengeToken(subjectId: string): Promise<string>;
+/** For health checks: this server's clock minus the database's (`level`: 'unknown' when the storage adapter can't tell the time). */
+export function checkClockSkew(): Promise<{ skewMs: number | null; ok: boolean; level: 'ok' | 'warn' | 'error' | 'unknown' }>;
 /** Checks signature, expiry, `type`, `iss` (the issuer) and `aud` (`<issuer>#mfa-challenge`). */
 export function verifyMfaChallengeToken(token: string): { sub: string; type: 'mfa_challenge'; iss: string; aud: string; jti: string; iat: number; exp: number };
 export function verifyIssuedToken(token: string, opts?: { issuer?: string }): Record<string, unknown> | null;

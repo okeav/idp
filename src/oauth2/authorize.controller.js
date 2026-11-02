@@ -99,9 +99,9 @@ function resolvePrompt(q) {
 /** Why the request needs a (new) login, or null: not signed in, or the login is older than prompt/max_age allow. */
 function loginRequiredReason(req, prompt, challengeRedeemed) {
     if (!req.auth?.userId) return 'unauthenticated';
-    // A login made for this very request (see login-challenge.js) satisfies prompt=login and max_age.
-    if (challengeRedeemed) return null;
-    if (prompt.login) return 'prompt_login';
+    // A login made for this very request (see login-challenge.js) satisfies prompt=login (and max_age=0);
+    // a positive max_age still holds it to its age, so the ID token's auth_time passes the client's check.
+    if (prompt.login && !challengeRedeemed) return 'prompt_login';
     const authTime = req.auth.tokenMeta?.authTime;
     const age = Number.isInteger(authTime) ? Math.floor(Date.now() / 1000) - authTime : Infinity;
     if (prompt.maxAge !== undefined && !(age <= prompt.maxAge)) return 'max_age';

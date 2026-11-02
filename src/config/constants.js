@@ -138,13 +138,14 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
 // owner has to request a new one (which goes to their inbox, not the attacker's).
 /**
  * Wrong 6-digit email-verification codes: `maxFailedAttempts` per verification ticket, and as many
- * again for attempts without one (per address). Window and lock default to the code's lifetime, so
- * a code gets a fixed number of guesses for as long as it lives.
+ * again for attempts without one (per address). Window and lock are never shorter than the code's
+ * lifetime (ttls.emailVerification — enforced where they are used), so a code gets a fixed number of
+ * guesses for as long as it lives.
  */
 export const DEFAULT_VERIFICATION_CODE_LOCKOUT = Object.freeze({
     maxFailedAttempts: 5,
     windowSeconds: 24 * 60 * 60,
-    lockSeconds: 15 * 60,
+    lockSeconds: 24 * 60 * 60,
 });
 
 // Per-ACCOUNT limit on wrong current passwords at /password/change. That endpoint is reached with a

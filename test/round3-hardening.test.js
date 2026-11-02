@@ -45,7 +45,8 @@ async function client(extra = {}) {
 test('a duplicate session cookie spelled with a space before "=" is still a duplicate', async () => {
     const victim = await user();
     const attacker = await user();
-    const res = await fetch(`${app.baseUrl}/session/refresh`, { method: 'POST', headers: { Cookie: `__Secure-refresh_token =${attacker.refreshToken}; __Secure-refresh_token=${victim.refreshToken}` } });
+    // The access-token cookie (refresh cookies are chosen by their binding instead — see readRefreshCookie).
+    const res = await fetch(`${app.baseUrl}/me`, { headers: { Cookie: `__Host-access_token =${attacker.accessToken}; __Host-access_token=${victim.accessToken}` } });
     assert.equal(res.status, 400);
     assert.equal((await res.json()).error, 'COOKIE_CONFLICT');
 });

@@ -3,7 +3,7 @@ import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { IDENTITY_STATUS, COOKIE_NAMES, CACHE_KEY_PREFIXES, SESSION_KINDS } from '../config/constants.js';
 import { sessionKindOf } from '../utils/session-kind.js';
-import { issueAccessToken, issueMfaChallengeToken, hashOpaqueToken, generateOpaqueToken, lookupByTokenHash, HASH_PURPOSES } from '../signing/token.service.js';
+import { issueAccessToken, issueMfaChallengeToken, hashOpaqueToken, generateOpaqueToken, lookupByTokenHash, opaqueTokenHashes, HASH_PURPOSES } from '../signing/token.service.js';
 import { hashPassword, verifyPassword, compareDummyPassword } from '../utils/password.js';
 import { buildDeviceFingerprint, notifyNewDevice } from '../utils/device-fingerprint.js';
 import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked, assertFamilyNotRevoked, peekRefreshRow, currentSessionEpoch, resolveRefreshTokenHash } from '../utils/session-family.js';
@@ -120,8 +120,10 @@ function clearSessionCookies(req, res, state) {
     const opts = { httpOnly, secure, sameSite, path, ...(domain ? { domain } : {}) };
     const names = refreshCookieNames(state);
     res.clearCookie(sessionCookieName(state, COOKIE_NAMES.ACCESS_TOKEN), opts);
-    res.clearCookie(names.token, { ...opts, path: sessionCookiePath(req) });
+    res.clearCookie(names.token, { ...opts, path: sessionCookiePath(state, req) });
     res.clearCookie(names.binding, opts);
+    // The refresh cookie of earlier 0.4.0 builds (Path=/) — so a browser doesn't keep sending a live token everywhere.
+    res.clearCookie(sessionCookieName(state, COOKIE_NAMES.REFRESH_TOKEN), opts);
 }
 
 /**
@@ -144,7 +146,7 @@ function setSessionCookies(req, res, state, { accessToken, refreshTokenValue, re
     const opts = cookieOptions(state);
     const names = refreshCookieNames(state);
     res.cookie(sessionCookieName(state, COOKIE_NAMES.ACCESS_TOKEN), accessToken.token, { ...opts, expires: accessToken.expiresAt });
-    res.cookie(names.token, refreshTokenValue, { ...opts, path: sessionCookiePath(req), expires: refreshExpiresAt });
+    res.cookie(names.token, refreshTokenValue, { ...opts, path: sessionCookiePath(state, req), expires: refreshExpiresAt });
     res.cookie(names.binding, refreshCookieBinding(state, refreshTokenValue), { ...opts, expires: refreshExpiresAt });
 }
 
@@ -161,9 +163,8 @@ export async function registerHandler(req, res, next) {
         // Hashed on every path, so timing doesn't leak whether the email was new.
         const passwordHash = await hashPassword(password, state.config.security.bcryptRounds);
         const existing = await state.storage.userRepository.findByEmail(email);
-        // Every answer carries a ticket (see storeVerificationTicket) — a real one only where a code is sent.
-        const ticket = generateOpaqueToken(32);
-        sendVerificationTicket(state, res, ticket);
+        // Every answer carries a ticket for the address (see issueVerificationTicket).
+        const ticket = await issueVerificationTicket(state, req, res, email);
         const answer = () => res.status(201).json({ status: 'ok', verificationTicket: ticket });
 
         if (existing?.status === IDENTITY_STATUS.PENDING_VERIFICATION) {
@@ -181,7 +182,6 @@ export async function registerHandler(req, res, next) {
             const contested = await state.storage.userRepository.updateByIdIfStatus(existing.id, IDENTITY_STATUS.PENDING_VERIFICATION, { passwordHash, registrationContested: true });
             if (!contested) return answer();
             const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, existing.id, passwordHash);
-            await storeVerificationTicket(state, existing.id, ticket);
             auditLogDetached(state.logger, state.hooks, 'REGISTRATION_REPEATED', { userId: String(existing.id) });
             invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
             return answer();
@@ -201,7 +201,6 @@ export async function registerHandler(req, res, next) {
         });
 
         const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, user.id, passwordHash);
-        await storeVerificationTicket(state, user.id, ticket);
 
         auditLogDetached(state.logger, state.hooks, 'REGISTERED', { userId: String(user.id), email });
         invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
@@ -225,39 +224,53 @@ const LEGACY_CODE = /^\d{6}$/;
  * Verification tickets. The 6-digit code is guessable, so attempts at it are budgeted — and a budget
  * anyone can spend is one a stranger can use up for the address's owner. So whoever registers (or asks
  * for a resend) gets a ticket — a host-only cookie, also in the JSON body for clients without cookies —
- * and code attempts that carry a ticket of THAT account spend the ticket's own budget. Attempts without
- * one share a per-address budget, which a stranger can use up without affecting the browser that
- * registered (and the emailed link always works). Every caller gets a ticket, a dummy when nothing was
- * registered, so the answer says nothing about the address; at most MAX_VERIFICATION_TICKETS real ones
- * are issued per account and code lifetime, which bounds the guesses anyone can collect.
+ * and code attempts carrying a ticket issued for that ADDRESS spend the ticket's own budget. Attempts
+ * without one share a per-address budget, which a stranger can use up without affecting the browser
+ * that registered (and the emailed link always works).
+ *
+ * Tickets are per address, not per account, and are stored for every caller whether or not the address
+ * has an account: what a ticket can do never depends on the account, so it can't tell anyone whether
+ * there is one. At most MAX_VERIFICATION_TICKETS are stored per address and code lifetime (later ones
+ * are handed out but not stored); a caller that already holds a live ticket for the address keeps it.
+ * Every budget lasts the code's lifetime, so the guesses at a code are bounded:
+ * maxFailedAttempts × (1 + MAX_VERIFICATION_TICKETS).
  */
 const MAX_VERIFICATION_TICKETS = 5;
 const ticketCookie = (state) => hostCookieName(cookiesAreSecure(state), 'verification_ticket');
+const ticketKey = (state, email, hash) => `verification-ticket:${emailKey(state, email)}:${hash}`;
 
-function sendVerificationTicket(state, res, ticket) {
+/** The code budgets' limits: never shorter than the code's lifetime, whatever is configured. */
+function codeBudgetLimits(state) {
+    const ttl = state.config.ttls.emailVerification;
+    const { maxFailedAttempts, windowSeconds, lockSeconds } = state.config.security.verificationCodeLockout;
+    return { maxFailedAttempts, windowSeconds: Math.max(windowSeconds, ttl), lockSeconds: Math.max(lockSeconds, ttl) };
+}
+
+/** The live ticket for `email` the request carries (`raw` from the body if given, else the cookie): `{ raw, hash }` or null. */
+async function presentedTicket(state, email, raw) {
+    if (typeof raw !== 'string' || !raw) return null;
+    for (const hash of opaqueTokenHashes(state, raw, HASH_PURPOSES.EMAIL_VERIFICATION_TICKET)) {
+        const entry = await state.attemptCounters.get(ticketKey(state, email, hash));
+        if (entry && new Date(entry.windowExpiresAt) > new Date()) return { raw, hash };
+    }
+    return null;
+}
+
+/** Sets (and returns) the caller's ticket for `email` — the live one it holds, or a new one. Same work for every address. */
+async function issueVerificationTicket(state, req, res, email) {
+    let ticket = (await presentedTicket(state, email, readCookie(req, ticketCookie(state))))?.raw;
+    if (!ticket) {
+        ticket = generateOpaqueToken(32);
+        const ttl = state.config.ttls.emailVerification;
+        const quota = await state.attemptCounters.recordFailure(`verification-tickets:${emailKey(state, email)}`, { max: MAX_VERIFICATION_TICKETS, windowSeconds: ttl, lockSeconds: ttl });
+        if (quota.count <= MAX_VERIFICATION_TICKETS) {
+            await state.attemptCounters.recordFailure(ticketKey(state, email, hashOpaqueToken(state, ticket, HASH_PURPOSES.EMAIL_VERIFICATION_TICKET)), { max: 1, windowSeconds: ttl, lockSeconds: ttl });
+        }
+    }
     res.cookie(ticketCookie(state), ticket, {
         httpOnly: true, secure: cookiesAreSecure(state), sameSite: 'lax', path: '/', maxAge: state.config.ttls.emailVerification * 1000,
     });
-}
-
-/** Stores `ticket` for the pending account `userId` — unless its quota of tickets is used up (it then stays a dummy). */
-async function storeVerificationTicket(state, userId, ticket) {
-    const ttl = state.config.ttls.emailVerification;
-    const quota = await state.attemptCounters.recordFailure(`verification-tickets:${userId}`, { max: MAX_VERIFICATION_TICKETS, windowSeconds: ttl, lockSeconds: ttl });
-    if (quota.count > MAX_VERIFICATION_TICKETS) return;
-    await state.storage.verificationTokenRepository.create('verification_ticket', {
-        user: userId,
-        tokenHash: hashOpaqueToken(state, ticket, HASH_PURPOSES.EMAIL_VERIFICATION_TICKET),
-        expiresAt: new Date(Date.now() + ttl * 1000),
-    });
-}
-
-/** The live verification ticket of `userId` the request carries (body `ticket`, else the cookie), or null. */
-async function presentedTicket(state, req, userId) {
-    const raw = typeof req.body?.ticket === 'string' ? req.body.ticket : readCookie(req, ticketCookie(state));
-    if (!raw || !userId) return null;
-    const tokens = state.storage.verificationTokenRepository;
-    return (await lookupByTokenHash(state, raw, HASH_PURPOSES.EMAIL_VERIFICATION_TICKET, (tokenHash) => tokens.findActive('verification_ticket', { tokenHash }, userId))).result;
+    return ticket;
 }
 
 /** The password a verification activates: the one bound to its code (rows from before 0.4.0: the account's). */
@@ -312,19 +325,19 @@ export async function verifyEmailHandler(req, res, next) {
             return consumed;
         };
 
-        // The 6-digit CODE is guessable, so attempts at it are budgeted: per verification ticket when
-        // the request carries one of this account's (see storeVerificationTicket), otherwise per ADDRESS
-        // — counted for unknown and verified addresses too, so a lock says nothing about whether a
-        // pending registration exists. A spent budget locks only its own attempts: the codes stay valid
-        // for the ticket holder, and the 256-bit link can't be guessed at all.
+        // The 6-digit CODE is guessable, so attempts at it are budgeted: per verification ticket when the
+        // request carries a live one for this address (see issueVerificationTicket), otherwise per ADDRESS
+        // — the same for unknown, verified and pending addresses, so nothing here says which it is. A
+        // spent budget locks only its own attempts: the codes stay valid for the ticket holder, and the
+        // 256-bit link can't be guessed at all.
         const pendingUser = user?.status === IDENTITY_STATUS.PENDING_VERIFICATION ? user : null;
-        const ticketRow = token ? null : await presentedTicket(state, req, pendingUser?.id);
-        const budgetKey = ticketRow ? `email-verification:ticket:${ticketRow.tokenHash}` : `email-verification:${emailKey(state, email)}`;
-        const found = token ? await verify() : await withAttemptBudget(state, budgetKey, state.config.security.verificationCodeLockout, {
+        const ticket = token ? null : await presentedTicket(state, email, typeof req.body.ticket === 'string' ? req.body.ticket : readCookie(req, ticketCookie(state)));
+        const budgetKey = ticket ? `email-verification:ticket:${ticket.hash}` : `email-verification:${emailKey(state, email)}`;
+        const found = token ? await verify() : await withAttemptBudget(state, budgetKey, codeBudgetLimits(state), {
             lockedError: VERIFICATION_LOCKED,
             onLocked: async () => {
                 if (!pendingUser) return;
-                await auditLog(state.logger, state.hooks, 'EMAIL_VERIFICATION_LOCKED', { userId: String(pendingUser.id), withTicket: Boolean(ticketRow) });
+                await auditLog(state.logger, state.hooks, 'EMAIL_VERIFICATION_LOCKED', { userId: String(pendingUser.id), withTicket: Boolean(ticket) });
             },
         }, verify);
 
@@ -334,7 +347,7 @@ export async function verifyEmailHandler(req, res, next) {
         });
         if (!activated) throw INVALID_VERIFICATION(); // settled meanwhile by another path
         await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
-        await state.storage.verificationTokenRepository.deleteAllForUser('verification_ticket', user.id);
+        if (ticket) await state.attemptCounters.reset(ticketKey(state, email, ticket.hash));
         res.clearCookie(ticketCookie(state), { httpOnly: true, secure: cookiesAreSecure(state), sameSite: 'lax', path: '/' });
 
         await auditLog(state.logger, state.hooks, 'EMAIL_VERIFIED', { userId: String(user.id), email });
@@ -356,13 +369,11 @@ export async function resendVerificationEmailHandler(req, res, next) {
         // Same answer — and the same timing — for unknown, already-verified and pending addresses: the
         // lookup and the writes run after the response (see runAfterResponse). The ticket too: it only
         // becomes a real one, afterwards, if a code is sent.
-        const ticket = generateOpaqueToken(32);
-        sendVerificationTicket(state, res, ticket);
+        const ticket = await issueVerificationTicket(state, req, res, email);
         res.json({ status: 'ok', verificationTicket: ticket });
         runAfterResponse(state, 'Resend of the verification email', async () => {
             const user = await state.storage.userRepository.findByEmail(email, { select: '+passwordHash' });
             if (!user || user.status !== IDENTITY_STATUS.PENDING_VERIFICATION) return;
-            await storeVerificationTicket(state, user.id, ticket);
 
             // Normally only the newest code works. While registrations compete for the address, each
             // one's code stays valid (the new one is bound to the most recent registration's password).
@@ -630,7 +641,12 @@ export async function logoutHandler(req, res, next) {
         // form posting any token would otherwise sign the victim out (logout CSRF).
         assertTrustedOrigin(state, req);
         const refreshTokenValue = req.body?.refreshToken || readRefreshCookie(state, req);
-        if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required to log out' });
+        if (!refreshTokenValue) {
+            // Nothing usable to revoke (no cookie, or only one planted without its binding): the browser's
+            // cookies are cleared all the same.
+            clearSessionCookies(req, res, state);
+            throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required to log out' });
+        }
 
         const tokenHash = await resolveRefreshTokenHash(state, refreshTokenValue);
         const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash, { onlyIfActive: false });

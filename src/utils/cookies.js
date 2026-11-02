@@ -76,22 +76,56 @@ export function refreshCookieNames(state) {
     return { token: '__Secure-refresh_token', binding: state.config.cookies?.domain ? '__Secure-refresh_binding' : '__Host-refresh_binding' };
 }
 
-/** The path the refresh cookie is scoped to: the session endpoints under wherever the router is mounted. */
-export const sessionCookiePath = (req) => `${req.baseUrl ?? ''}/session`;
+/**
+ * The path the refresh cookie is scoped to: `cookies.sessionPath` when configured, otherwise the session
+ * endpoints under wherever the router is mounted (as the request spelled it).
+ */
+export const sessionCookiePath = (state, req) => state.config.cookies?.sessionPath ?? `${req.baseUrl ?? ''}/session`;
 
 export const refreshCookieBinding = (state, token) => hashOpaqueToken(state, token, HASH_PURPOSES.REFRESH_COOKIE_BINDING);
 
+/** Every value of cookie `name` in the raw Cookie header, decoded the way the cookie parser decodes them. */
+function allCookieValues(req, name) {
+    const raw = req.headers?.cookie;
+    if (typeof raw !== 'string') return [];
+    const values = [];
+    for (const part of raw.split(';')) {
+        const eq = part.indexOf('=');
+        if (eq === -1 || part.slice(0, eq).trim() !== name) continue;
+        let value = part.slice(eq + 1).trim();
+        if (value.length > 1 && value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
+        try {
+            value = decodeURIComponent(value);
+        } catch {
+            // left as sent, like the parser does
+        }
+        values.push(value);
+    }
+    return values;
+}
+
+const bytesEqual = (a, b) => {
+    const x = Buffer.from(a);
+    const y = Buffer.from(b);
+    return x.length === y.length && crypto.timingSafeEqual(x, y);
+};
+
 /**
- * The refresh token from its cookie — undefined when there is none; COOKIE_CONFLICT when it comes
- * twice, or without its matching binding cookie (planted).
+ * The refresh token from its cookie: the one value whose keyed hash its binding cookie holds. Values
+ * without a matching binding (planted — the binding is host-only) are ignored, so a planted cookie
+ * can neither be used nor block the real one. undefined when none matches; COOKIE_CONFLICT only when
+ * two different tokens each come with a matching binding — possible only with `cookies.domain`, where
+ * the binding is a domain cookie too.
  */
 export function readRefreshCookie(state, req) {
     const names = refreshCookieNames(state);
-    const token = readCookie(req, names.token);
-    if (token === undefined) return undefined;
-    const binding = readCookie(req, names.binding);
-    const expected = typeof binding === 'string' ? opaqueTokenHashes(state, token, HASH_PURPOSES.REFRESH_COOKIE_BINDING) : [];
-    const matches = expected.some((h) => h.length === binding.length && crypto.timingSafeEqual(Buffer.from(h), Buffer.from(binding)));
-    if (!matches) throw COOKIE_CONFLICT();
-    return token;
+    const tokens = [...new Set(allCookieValues(req, names.token))];
+    const bindings = allCookieValues(req, names.binding);
+    if (tokens.length === 0 || bindings.length === 0) return undefined;
+    const bound = tokens.filter((token) => {
+        const expected = opaqueTokenHashes(state, token, HASH_PURPOSES.REFRESH_COOKIE_BINDING);
+        return bindings.some((binding) => expected.some((h) => bytesEqual(h, binding)));
+    });
+    if (bound.length > 1) throw COOKIE_CONFLICT();
+    return bound[0];
 }

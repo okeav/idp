@@ -14,7 +14,9 @@
  * for adapter-agnostic teardown — `connection` (as returned by the Mongo
  * adapter) is adapter-specific and optional; a Postgres/DynamoDB/etc.
  * adapter has no equivalent raw handle to expose there, `close()` is the
- * one teardown method every adapter must provide.
+ * one teardown method every adapter must provide. Optionally it also has `databaseTime(): Promise<{ time: Date }>`
+ * — the database server's clock, which every app server's clock is checked against (security/clock-skew.js);
+ * without it the skew isn't checked (a startup warning says so).
  *
  * @typedef {Object} UserRepository
  * @property {(data: object) => Promise<object>} create
@@ -47,9 +49,9 @@
  * @property {(jti: string) => Promise<{id, user, expiresAt: Date, revokedAt: Date|null, revokeReason?: string, familyId?: string, createdAt?: Date}|null>} findByJti - the
  *   session whose `jti` matches an access token's `jti`. Called once per authenticated request when
  *   `config.session.verifyOnEachRequest` is on (the default), so it must be an indexed lookup. Also used
- *   to bind authorization codes to their session and to exempt the enrolling session at MFA enrolment —
- *   implement it (an adapter without it degrades to the per-process revocation cache, with a warning,
- *   and loses both of those guarantees).
+ *   to bind authorization codes to their session, to exempt the enrolling session at MFA enrolment, to
+ *   redeem login challenges (prompt=login / max_age) and to find the browser's session at end-session.
+ *   Required (and must return `familyId`).
  * @property {(hash: string, opts?: {onlyIfActive?: boolean, reason?: string}) => Promise<object|null>} revokeByRefreshTokenHash -
  *   ATOMIC consume; resolves the row as it was BEFORE revocation. Must persist `reason` as `revokeReason`
  *   ('rotated' on refresh) — that is how a replayed rotated token is recognised.
@@ -163,11 +165,11 @@
  */
 export const REQUIRED_STORAGE_METHODS = Object.freeze({
     userRepository: ['create', 'findById', 'findByEmail', 'findByExternalProvider', 'updateById', 'updateByIdIfStatus', 'bumpSessionEpoch', 'linkExternalProvider', 'countAll', 'findMany'],
-    sessionRepository: ['createSession', 'createSessionForLogin', 'findByRefreshTokenHash', 'revokeByRefreshTokenHash', 'rotatedWithin', 'raiseFamilyEpoch', 'isFamilyLive', 'isFamilyRevoked', 'revokeById', 'revokeAllForUser', 'listActiveForUser', 'existsForDevice'],
+    sessionRepository: ['createSession', 'createSessionForLogin', 'findByRefreshTokenHash', 'revokeByRefreshTokenHash', 'findByJti', 'rotatedWithin', 'raiseFamilyEpoch', 'isFamilyLive', 'isFamilyRevoked', 'revokeById', 'revokeAllForUser', 'listActiveForUser', 'existsForDevice'],
     authorizationCodeRepository: ['create', 'consumeByCodeHash'],
     consentRepository: ['upsert', 'find', 'listForUser', 'revoke'],
     oauthClientRepository: ['create', 'findByClientId', 'findBySlug', 'updateByClientId', 'listMany', 'countAll'],
-    verificationTokenRepository: ['create', 'consumeByHash', 'consumeByCode', 'findActive', 'clearCodes', 'replaceForUser', 'deleteAllForUser'],
+    verificationTokenRepository: ['create', 'consumeByHash', 'consumeByCode', 'findActive', 'replaceForUser', 'deleteAllForUser'],
     serviceKeyRepository: ['upsertByKid', 'listPublishable', 'setStatusByKid'],
     credentialRepository: ['create', 'findByCredentialId', 'findByUserId', 'updateCounter', 'deleteByCredentialId'],
 });

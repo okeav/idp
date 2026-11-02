@@ -75,7 +75,8 @@ test('with cookies.domain: __Secure- names, and a request carrying a session coo
         const attacker = await login(temp);
         const tossed = await fetch(`${temp.baseUrl}/session/refresh`, {
             method: 'POST',
-            headers: { Cookie: `__Secure-refresh_token=${attacker.refreshToken}; __Secure-refresh_token=${u.refreshToken}` },
+            // Domain mode: the binding is a domain cookie too, so a sibling can plant a whole (attacker's) pair.
+            headers: { Cookie: `__Secure-refresh_token=${attacker.refreshToken}; __Secure-refresh_token=${u.refreshToken}; __Secure-refresh_binding=${attacker.cookies['__Secure-refresh_binding']}; __Secure-refresh_binding=${u.cookies['__Secure-refresh_binding']}` },
         });
         assert.equal(tossed.status, 400);
         assert.equal((await tossed.json()).error, 'COOKIE_CONFLICT');

@@ -9,6 +9,9 @@ import { readRefreshCookie } from '../utils/cookies.js';
 import { sessionKindOf } from '../utils/session-kind.js';
 import { familyOf, peekRefreshRow, resolveRefreshTokenHash, revokeFamily } from '../utils/session-family.js';
 
+/** What a GET needing confirmation forwards to oidc.endSessionConfirmationUrl. */
+const CONFIRMATION_PARAMS = ['client_id', 'state', 'ui_locales', 'logout_hint'];
+
 /**
  * The browser's own first-party session row: the one behind its access token (`req.auth`) — or, once
  * that short-lived cookie has expired, the one behind its refresh cookie. Null when there is none.
@@ -39,7 +42,7 @@ async function ownSessionRow(state, req) {
  *   whoever holds one must not be able to sign its user out of the relying party.
  * It never signs the user out of every device: an ID token is handed to every relying party, so
  * possessing one — or tricking a browser into this URL — must not be a kill switch for all of the
- * user's sessions. "Log out everywhere" remains `POST /logout/all`.
+ * user's sessions. "Log out everywhere" remains `POST /session/logout/all`.
  *
  * `id_token_hint` must be an ID token this IdP issued (an access or MFA-challenge token is refused);
  * an expired one is accepted, as the spec recommends. `post_logout_redirect_uri` must be registered
@@ -89,8 +92,12 @@ export async function endSessionHandler(req, res, next) {
             res.set('Cache-Control', 'no-store');
             const page = state.config.oidc?.endSessionConfirmationUrl;
             if (page) {
+                // Only the RP-initiated-logout parameters the page needs to POST back, never overriding
+                // ones the configured URL already has.
                 const url = new URL(page);
-                for (const [k, v] of Object.entries(q)) if (typeof v === 'string') url.searchParams.set(k, v);
+                for (const k of CONFIRMATION_PARAMS) {
+                    if (typeof q[k] === 'string' && !url.searchParams.has(k)) url.searchParams.set(k, q[k]);
+                }
                 return res.redirect(url.toString());
             }
             return res.status(200).json({ action: 'logout_confirmation_required' });
