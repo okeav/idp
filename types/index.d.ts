@@ -98,12 +98,10 @@ export interface IdpConfig {
     };
     session?: {
         /**
-         * Default false: `POST /refresh` carries forward the access token's
-         * `claims` verbatim from the session that was created at login,
-         * without calling `hooks.resolveAuthContext` again. Set true to
-         * re-invoke `resolveAuthContext` on every refresh instead, so a
-         * capability/role change takes effect on the next access-token
-         * rotation rather than only at the next full login.
+         * Default true (since 0.4.0): `POST /refresh` re-invokes `hooks.resolveAuthContext`, so a
+         * role/capability change (a demotion, a suspension in your app) takes effect at the next
+         * access-token rotation. Set false to carry the login-time `claims` forward verbatim — they
+         * then stay frozen for the whole session family (up to `absoluteLifetimeSeconds`).
          */
         reresolveClaimsOnRefresh?: boolean;
         /**
@@ -241,6 +239,8 @@ export interface IdpConfig {
         mfaChallenge?: RateLimitRule;
         refreshToken?: RateLimitRule;
         magicLink?: RateLimitRule;
+        /** Magic-link requests per address. Default 3/hour. */
+        magicLinkByEmail?: RateLimitRule;
         /** POST /register and /register/resend-verification, per IP. Default 10/hour. */
         register?: RateLimitRule;
         /** POST /register/verify-email, per IP. Default 20/15min. */
@@ -384,6 +384,7 @@ declare module 'express-serve-static-core' {
             /** `authTime`: when the user last actually logged in (seconds), carried across refreshes; null if unknown. */
             tokenMeta: { issuedAt: number; expiresAt: number; jti: string; authTime: number | null };
         };
+        /** `scopes` are whatever the calling service put in its own token — not granted by anyone; never authorize on them alone. */
         serviceCaller?: { name: string; scopes?: string[]; region?: string; source: 'token' | 'legacy-secret' };
         validatedQuery?: Record<string, unknown>;
     }
@@ -421,6 +422,11 @@ export const ERROR_CODES: Record<string, string>;
  * token's `jti` yourself.
  */
 export function issueAccessToken(input: { sub: string; email?: string; claims?: Record<string, unknown> }, opts?: { ttlSeconds?: number; audience?: string; sessionless?: boolean; authTime?: number }): Promise<IssuedToken>;
+/**
+ * Verifies signature, issuer, expiry, type and audience/kind — NOT revocation. A resource server that
+ * must refuse revoked sessions (logout-all, password reset) should use `authContextMiddleware`, which
+ * also checks the session store (`session.verifyOnEachRequest`).
+ */
 export function verifyAccessToken(token: string, opts?: VerifyAccessTokenOptions): Promise<AccessTokenClaims>;
 /** `opts.scopes` decide which user claims are released (default: openid email profile); `opts.authTime` (seconds) becomes `auth_time`. */
 export function issueIdToken(user: IdentityUser, audience: string, nonce?: string, opts?: { scopes?: string[]; authTime?: number; ttlSeconds?: number }): Promise<IssuedToken>;

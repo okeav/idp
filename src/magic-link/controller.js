@@ -4,7 +4,7 @@ import { IDENTITY_STATUS } from '../config/constants.js';
 import { hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
 import { auditLog, auditLogDetached, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
-import { ipKey } from '../rate-limit/keys.js';
+import { ipKey, emailKey } from '../rate-limit/keys.js';
 import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus, mfaChallengeResponse, refreshTokenInBody } from '../password-auth/controllers.js';
 
 /**
@@ -25,6 +25,8 @@ export async function requestMagicLinkHandler(req, res, next) {
         const { email } = req.body;
 
         await enforceRateLimit(state, `magic-link:ip:${ipKey(req.ip)}`, state.config.rateLimiting.magicLink, { failMode: 'closed' });
+        // Per address too: per-IP alone lets a distributed sender flood one inbox.
+        await enforceRateLimit(state, `magic-link:email:${emailKey(state, email)}`, state.config.rateLimiting.magicLinkByEmail, { failMode: 'closed' });
 
         let user = await state.storage.userRepository.findByEmail(email);
         let isNewUser = false;
@@ -39,6 +41,8 @@ export async function requestMagicLinkHandler(req, res, next) {
             return res.json({ status: 'ok' }); // don't resurrect a deleted account via magic link
         }
 
+        // Only the newest link works: requesting another invalidates the earlier ones.
+        await state.storage.verificationTokenRepository.deleteAllForUser('magic_link', user.id);
         const token = generateOpaqueToken(32);
         await state.storage.verificationTokenRepository.create('magic_link', {
             user: user.id,

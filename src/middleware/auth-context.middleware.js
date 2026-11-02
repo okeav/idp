@@ -46,7 +46,8 @@ export function authContextMiddleware(opts = {}) {
     return async function (req, _res, next) {
         try {
             const state = getState();
-            const cookieToken = req.cookies?.[COOKIE_NAMES.ACCESS_TOKEN];
+            const rawCookie = req.cookies?.[COOKIE_NAMES.ACCESS_TOKEN];
+            const cookieToken = typeof rawCookie === 'string' ? rawCookie : undefined;
             const bearerToken = parseBearer(req.headers.authorization);
             const token = cookieToken || bearerToken;
 

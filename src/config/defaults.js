@@ -18,7 +18,7 @@ export function withDefaults(config = {}) {
         // logout-all / password reset takes effect on every instance at once.
         // recentAuthMaxAgeSeconds: how recent a login must be for requireRecentAuth (passkey / MFA
         // enrolment, account and passkey deletion).
-        session: { reresolveClaimsOnRefresh: false, verifyOnEachRequest: true, recentAuthMaxAgeSeconds: 15 * 60,
+        session: { reresolveClaimsOnRefresh: true, verifyOnEachRequest: true, recentAuthMaxAgeSeconds: 15 * 60,
             // A refresh-token family (one login) ends after this however actively it's refreshed.
             absoluteLifetimeSeconds: 90 * 24 * 60 * 60,
             // A rotated refresh token presented again within this window (two tabs refreshing at
@@ -70,6 +70,7 @@ export function withDefaults(config = {}) {
             mfaChallenge: { ...DEFAULT_RATE_LIMITS.mfaChallengePerIp, ...config.rateLimiting?.mfaChallenge },
             refreshToken: { ...DEFAULT_RATE_LIMITS.refreshTokenPerIp, ...config.rateLimiting?.refreshToken },
             magicLink: { ...DEFAULT_RATE_LIMITS.magicLinkPerIp, ...config.rateLimiting?.magicLink },
+            magicLinkByEmail: { ...DEFAULT_RATE_LIMITS.magicLinkPerEmail, ...config.rateLimiting?.magicLinkByEmail },
             register: { ...DEFAULT_RATE_LIMITS.registerPerIp, ...config.rateLimiting?.register },
             emailVerification: { ...DEFAULT_RATE_LIMITS.emailVerificationPerIp, ...config.rateLimiting?.emailVerification },
             verificationEmailByEmail: { ...DEFAULT_RATE_LIMITS.verificationEmailPerEmail, ...config.rateLimiting?.verificationEmailByEmail },

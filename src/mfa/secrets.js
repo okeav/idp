@@ -53,7 +53,15 @@ export function assertMfaSecretConfig(mfaConfig, cipher, logger) {
 
 /** Encrypts a TOTP secret for storage. Plain text only when the app explicitly opted into `allowPlaintext` and has no key. */
 export async function sealMfaSecret(state, plaintext, userId) {
-    if (state.mfaCipher) return state.mfaCipher.encrypt(plaintext, { context: String(userId) });
+    if (state.mfaCipher) {
+        const sealed = await state.mfaCipher.encrypt(plaintext, { context: String(userId) });
+        // Stored verbatim — and a bare base32 string is how a legacy plain-text secret is recognised, so a
+        // custom cipher that returned one would have its output read back as the secret itself.
+        if (typeof sealed !== 'string' || sealed.length === 0 || /^[A-Z2-7]+=*$/i.test(sealed)) {
+            throw new IdpError({ code: 'MFA_SECRET_UNREADABLE', httpStatus: 500, message: 'config.mfa.secretCipher.encrypt() must return a non-empty string that is not bare base32 (prefix it, e.g. "kms:")' });
+        }
+        return sealed;
+    }
     if (state.config.mfa.allowPlaintext) return plaintext;
     throw new IdpError({ code: 'MFA_ENCRYPTION_NOT_CONFIGURED', httpStatus: 500, message: 'MFA secret encryption is not configured' });
 }

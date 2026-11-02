@@ -99,6 +99,12 @@ function normalizeKey(entry) {
     const raw = typeof entry === 'string' ? entry : entry?.key;
     if (typeof raw !== 'string' || raw.length === 0) throw new Error('MFA encryption key must be a base64-encoded string');
     const key = Buffer.from(raw, 'base64');
+    // Buffer.from ignores anything it can't decode, so trailing garbage (or a typo) would silently
+    // yield a different key. The input must be exactly the base64 (or base64url) of the 32 bytes.
+    const canonical = (s) => s.trim().replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+    if (canonical(key.toString('base64')) !== canonical(raw)) {
+        throw new Error('MFA encryption key is not valid base64 — generate one with `openssl rand -base64 32`');
+    }
     if (key.length !== 32) {
         throw new Error(`MFA encryption key must decode to exactly 32 bytes (got ${key.length}) — generate one with \`openssl rand -base64 32\``);
     }

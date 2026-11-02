@@ -72,6 +72,23 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   with `error=provider_error`). Google, Microsoft and GitHub exchanges use PKCE (S256); Apple's
   `id_token` must carry this login's `nonce` and the right `iss`/`aud`/`exp`. **Upgrade:** mount
   `cookie-parser` before the router (already needed for cookie sessions).
+- **Claims were frozen at login.** `/refresh` copied the login-time `claims` forward, so a demotion
+  in your app took effect only at the user's next full login — which a refreshing session never
+  needs. `session.reresolveClaimsOnRefresh` now defaults to **true** (`resolveAuthContext` runs on
+  every refresh). **Upgrade:** set it false to keep the old behaviour; make sure your hook is fast.
+- **Enabling MFA now signs out the account's other sessions** (keeping the one that enrolled):
+  any of them could be the reason the user is securing the account. `SessionRepository.revokeAllForUser`
+  takes `{ exceptJti }`.
+- **Magic links.** Requests are limited per address as well as per IP
+  (`rateLimiting.magicLinkByEmail`), and requesting a link invalidates the earlier ones.
+- **`openid` was granted to every client** whatever its `allowedScopes`; it now must be listed like
+  any other scope (the default `allowedScopes` include it).
+- **Smaller fixes.** MFA encryption keys must be exactly the base64 of 32 bytes (trailing garbage
+  used to be ignored silently); a custom `mfa.secretCipher` whose output looks like a bare base32
+  string (and so would be read back as a plain-text secret) is refused; a malformed session id at
+  `DELETE /me/sessions/:id` is a 404 and a JSON-typed (`j:`) cookie is ignored (both were 500s);
+  `.gitignore` covers `.env.*`. `verifyAccessToken` is documented as not checking revocation (use
+  `authContextMiddleware` for that), and service-token `scopes` as caller-asserted.
 - **Cookie-authenticated requests had no CSRF defence beyond SameSite (Medium).** `SameSite=Lax`
   stops cross-*site* requests, but not ones from a sibling subdomain, and none at all under
   `cookies.sameSite: 'none'`. A state-changing request whose credential is a cookie (the session

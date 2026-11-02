@@ -361,7 +361,8 @@ export async function refreshTokenHandler(req, res, next) {
         const state = getState();
         await enforceRateLimit(state, `refresh:ip:${ipKey(req.ip)}`, state.config.rateLimiting.refreshToken);
 
-        const cookieValue = req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN];
+        const rawCookie = req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN];
+        const cookieValue = typeof rawCookie === 'string' ? rawCookie : undefined;
         const refreshTokenValue = cookieValue || req.body?.refreshToken;
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required' });
         if (refreshTokenValue === cookieValue) assertTrustedOrigin(state, req);
@@ -437,7 +438,8 @@ export async function refreshTokenHandler(req, res, next) {
 export async function logoutHandler(req, res, next) {
     try {
         const state = getState();
-        const refreshTokenValue = req.body?.refreshToken || req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN];
+        const rawCookie = req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN];
+        const refreshTokenValue = req.body?.refreshToken || (typeof rawCookie === 'string' ? rawCookie : undefined);
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required to log out' });
         if (!req.body?.refreshToken) assertTrustedOrigin(state, req);
 

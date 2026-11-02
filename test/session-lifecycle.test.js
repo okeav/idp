@@ -93,9 +93,9 @@ test('logout/all revokes every session for the user', async () => {
     }
 });
 
-test('by default, /refresh carries forward the login-time claims verbatim — a resolveAuthContext change mid-session has no effect yet', async () => {
+test('with reresolveClaimsOnRefresh:false, /refresh carries forward the login-time claims verbatim — a resolveAuthContext change mid-session has no effect yet', async () => {
     let role = 'member';
-    await withTemporaryApp({ hooks: { resolveAuthContext: async () => ({ claims: { role } }) } }, async (tempApp) => {
+    await withTemporaryApp({ config: { session: { reresolveClaimsOnRefresh: false } }, hooks: { resolveAuthContext: async () => ({ claims: { role } }) } }, async (tempApp) => {
         const email = uniqueEmail('no-rederive');
         const { refreshToken, accessToken: firstAccess } = await registerVerifyLoginOn(tempApp, email, 'Str0ng!Passw0rd');
         assert.equal((await verifyAccessToken(firstAccess)).claims.role, 'member');

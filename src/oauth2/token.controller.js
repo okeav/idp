@@ -161,7 +161,7 @@ async function handleRefreshTokenGrant(req, res) {
     // originally-granted scopes to whatever the client is still allowed, don't recompute from scratch.
     const grantedScopes = existing.claims?.scopes || [];
     const allowedScopes = new Set(client.allowedScopes || []);
-    const scopes = grantedScopes.filter((s) => s === 'openid' || allowedScopes.has(s));
+    const scopes = grantedScopes.filter((s) => allowedScopes.has(s));
     const { familyId, familyCreatedAt } = familyOf(existing);
     if (familyEndsAt(state, familyCreatedAt) <= new Date()) throw INVALID_GRANT('Refresh token has reached its maximum lifetime');
 

@@ -115,6 +115,7 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
     mfaChallengePerIp: { max: 5, windowSeconds: 15 * 60 },
     refreshTokenPerIp: { max: 30, windowSeconds: 60 },
     magicLinkPerIp: { max: 3, windowSeconds: 60 * 60 },
+    magicLinkPerEmail: { max: 3, windowSeconds: 60 * 60 },
     registerPerIp: { max: 10, windowSeconds: 60 * 60 },
     emailVerificationPerIp: { max: 20, windowSeconds: 15 * 60 },
     // Every request that makes this IdP send a verification email to an address

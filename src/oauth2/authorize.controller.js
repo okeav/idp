@@ -13,7 +13,7 @@ function validateRedirectUri(client, redirectUri) {
 
 function validateScopes(client, requestedScopes) {
     const allowed = new Set(client.allowedScopes || []);
-    const invalid = requestedScopes.filter((s) => !allowed.has(s) && s !== 'openid');
+    const invalid = requestedScopes.filter((s) => !allowed.has(s));
     if (invalid.length > 0) {
         throw new IdpError({ code: 'INVALID_REQUEST', httpStatus: 400, message: `Requested scopes not allowed: ${invalid.join(', ')}` });
     }

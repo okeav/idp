@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { withId, withIds } from '../normalize.js';
 
 /** @implements {import('../../interfaces.js').SessionRepository} */
@@ -46,12 +47,14 @@ export class MongoSessionRepository {
     }
 
     async revokeById(id, userId) {
+        if (!mongoose.isValidObjectId(id)) return null;
         return this.model.findOneAndUpdate({ _id: id, user: userId, revokedAt: null }, { revokedAt: new Date() }, { returnDocument: 'after' });
     }
 
-    async revokeAllForUser(userId, { exceptTokenHash } = {}) {
+    async revokeAllForUser(userId, { exceptTokenHash, exceptJti } = {}) {
         const filter = { user: userId, revokedAt: null };
         if (exceptTokenHash) filter.tokenHash = { $ne: exceptTokenHash };
+        if (exceptJti) filter.jti = { $ne: exceptJti };
         const result = await this.model.updateMany(filter, { revokedAt: new Date() });
         return { revokedCount: result.modifiedCount ?? 0 };
     }

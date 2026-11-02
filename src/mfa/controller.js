@@ -166,7 +166,10 @@ export async function confirmMfaHandler(req, res, next) {
             mfaRecoveryCodes: stored,
         });
 
-        await auditLog(state.logger, state.hooks, 'MFA_ENABLED', { userId: req.auth.userId });
+        // Any other session may predate the account being secured (or be an attacker's): end them, keep this one.
+        // (Not revokeAllUserSessions — its watermark would also end this session at its next refresh.)
+        const { revokedCount } = await state.storage.sessionRepository.revokeAllForUser(userId, { exceptJti: req.auth.tokenMeta?.jti });
+        await auditLog(state.logger, state.hooks, 'MFA_ENABLED', { userId: req.auth.userId, revokedOtherSessions: revokedCount });
         res.set('Cache-Control', 'no-store');
         res.json({ mfaEnabled: true, recoveryCodes: rawCodes }); // shown once — caller must save these
     } catch (err) {
