@@ -89,6 +89,8 @@
  * @typedef {Object} ServiceKeyRepository
  * @property {(input: {kid, name, publicKey, region}) => Promise<object>} upsertByKid
  * @property {() => Promise<object[]>} listPublishable
+ * @property {(kid: string) => Promise<object|null>} [findPublishableByKid] - indexed single-key read (verification)
+ * @property {(kid: string, status: string) => Promise<object|null>} setStatusByKid - ROTATING / RETIRED / REVOKED
  *
  * @typedef {Object} CredentialRepository
  * WebAuthn/passkey credentials — one document per registered authenticator.

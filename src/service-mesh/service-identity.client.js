@@ -7,6 +7,13 @@ const TOKEN_TTL_SECONDS = 60;
 
 let _identity = { serviceName: null, region: 'global', kid: null, privateKeyPem: null, publicKeyPem: null };
 let _remoteLookup = null;
+// One cached lookup per IdP URL: verifyServiceTokenRemote({ idpBaseUrl }) used to build a new one —
+// and so fetch the JWKS — on every call.
+const _lookupsByUrl = new Map();
+function lookupFor(idpBaseUrl) {
+    if (!_lookupsByUrl.has(idpBaseUrl)) _lookupsByUrl.set(idpBaseUrl, remoteJwksKeyLookup(idpBaseUrl));
+    return _lookupsByUrl.get(idpBaseUrl);
+}
 
 /**
  * Registers this process's own S2S keypair with an IDP instance (this one,
@@ -27,7 +34,7 @@ export async function initServiceIdentity(opts = {}) {
     const kid = deriveKid(serviceName, publicKeyPem);
 
     _identity = { serviceName, region, kid, privateKeyPem, publicKeyPem };
-    _remoteLookup = remoteJwksKeyLookup(idpBaseUrl);
+    _remoteLookup = lookupFor(idpBaseUrl);
 
     const registerUrl = `${idpBaseUrl.replace(/\/$/, '')}/internal/service-keys`;
     const res = await fetch(registerUrl, {
@@ -73,7 +80,7 @@ export function mintServiceToken(targetService, { scopes = [] } = {}) {
  * `serviceContextMiddleware` instead, which looks keys up in-process.
  */
 export async function verifyServiceTokenRemote(token, { expectedAud, expectedIss, idpBaseUrl } = {}) {
-    const lookup = idpBaseUrl ? remoteJwksKeyLookup(idpBaseUrl) : _remoteLookup;
+    const lookup = idpBaseUrl ? lookupFor(idpBaseUrl) : _remoteLookup;
     if (!lookup) throw new Error('verifyServiceTokenRemote: pass idpBaseUrl, or call initServiceIdentity() first');
     return verifyServiceTokenWith(token, { expectedAud, expectedIss }, lookup);
 }

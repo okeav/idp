@@ -2,6 +2,7 @@ import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { verifyServiceTokenWith } from '../service-mesh/verify-service-token.js';
 import { localKeyLookup } from '../service-mesh/local-key-lookup.js';
+import { safeEqualSecret } from '../utils/safe-equal.js';
 
 function parseBearer(header) {
     if (!header || typeof header !== 'string') return null;
@@ -15,19 +16,25 @@ function parseBearer(header) {
  * `req.serviceCaller = { name, scopes, region, source }`.
  *
  * Mode is `config.serviceMesh.tokenMode` ('token' | 'secret' | 'both',
- * default 'both'). 'secret' is a legacy shared-secret fallback for staged
- * rollouts — the caller's claimed name (`x-service-name` header) can't be
- * cryptographically verified under it.
+ * default 'token'). 'secret' and 'both' are a legacy shared-secret fallback for
+ * staged rollouts — the caller's claimed name (`x-service-name` header) is NOT
+ * verified under it, so `requireServiceCallerMiddleware` refuses such callers
+ * unless `serviceMesh.allowLegacySecretCallers` is true.
  *
  * @param {{ ownServiceName: string }} opts - this service's own name (the token `aud` it expects)
  */
 export function serviceContextMiddleware(opts = {}) {
     return async function (req, _res, next) {
         const state = getState();
-        const mode = state.config.serviceMesh?.tokenMode || 'both';
+        const mode = state.config.serviceMesh?.tokenMode || 'token';
         const ownName = opts.ownServiceName || state.config.serviceMesh?.ownServiceName;
 
         try {
+            // Without its own name this service can't check a token's audience. That is a configuration
+            // error — never a reason to fall back to the shared secret.
+            if (!ownName && mode !== 'secret') {
+                return next(new IdpError({ code: 'SERVICE_NOT_CONFIGURED', httpStatus: 500, message: 'serviceContextMiddleware: ownServiceName (or config.serviceMesh.ownServiceName) is required' }));
+            }
             const bearer = parseBearer(req.headers.authorization);
             const presentedSecret = req.headers['x-internal-service-secret'];
 
@@ -48,7 +55,7 @@ export function serviceContextMiddleware(opts = {}) {
                 if (!expected) {
                     return next(new IdpError({ code: 'SERVICE_NOT_CONFIGURED', httpStatus: 500, message: 'No serviceMesh.sharedSecret configured and no valid S2S token presented' }));
                 }
-                if (!presentedSecret || presentedSecret !== expected) {
+                if (!safeEqualSecret(presentedSecret, expected)) {
                     return next(new IdpError({ code: 'SERVICE_AUTH_FAILED', httpStatus: 401, message: 'Service authentication failed' }));
                 }
                 req.serviceCaller = { name: req.headers['x-service-name'] || 'unknown', source: 'legacy-secret' };

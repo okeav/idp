@@ -192,10 +192,18 @@ export interface IdpConfig {
         providerTimeoutMs?: number;
     };
     serviceMesh?: {
+        /** One registration credential per service (preferred): `{ billing: '<secret>', ... }`. Proves which service registers, and lets it rotate its key. */
+        bootstrapSecrets?: Record<string, string>;
+        /** Legacy shared registration secret: can register a NEW name only, never replace an existing service's key. */
         bootstrapSecret?: string;
+        /** Names allowed to register at all. */
+        allowedServiceNames?: string[];
+        /** Default 'token'. 'secret'/'both' accept the shared secret with an unverified x-service-name. */
         tokenMode?: 'token' | 'secret' | 'both';
         ownServiceName?: string;
         sharedSecret?: string;
+        /** Let requireServiceCallerMiddleware accept shared-secret callers (their name is unverified). Default false. */
+        allowLegacySecretCallers?: boolean;
     };
     rateLimiting?: {
         /** Set false to disable entirely — e.g. you already rate-limit at a gateway/CDN layer. Default true. */
@@ -224,6 +232,8 @@ export interface IdpConfig {
         oauth2Token?: RateLimitRule;
         /** GET /sso/:provider, per IP. Default 30/5min. */
         ssoInitiate?: RateLimitRule;
+        /** POST /internal/service-keys (bootstrap-secret guesses), per IP. Default 20/15min. */
+        serviceKeyRegistration?: RateLimitRule;
     };
     /**
      * Outbound webhook delivery — additive to `hooks` (in-process callbacks),
@@ -397,6 +407,8 @@ export const openidConfigurationHandler: RequestHandler;
 
 export const registerServiceKeyHandler: RequestHandler;
 export const getServicesJwksHandler: RequestHandler;
+/** Revokes a service key (no longer published or accepted). Resolves whether a key was found. */
+export function revokeServiceKey(kid: string): Promise<boolean>;
 export const s2sBootstrapMiddleware: RequestHandler;
 export function initServiceIdentity(opts: { serviceName: string; privateKeyPem: string; region?: string; idpBaseUrl: string; bootstrapSecret: string }): Promise<{ kid: string }>;
 export function mintServiceToken(targetService: string, opts?: { scopes?: string[] }): string;

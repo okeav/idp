@@ -69,7 +69,7 @@ export function configFromEnv(env = process.env) {
         },
         serviceMesh: {
             bootstrapSecret: env.IDP_S2S_BOOTSTRAP_SECRET,
-            tokenMode: env.IDP_S2S_TOKEN_MODE || 'both',
+            tokenMode: env.IDP_S2S_TOKEN_MODE || 'token',
         },
         rateLimiting: {
             enabled: bool(env.IDP_RATE_LIMIT_ENABLED, true),

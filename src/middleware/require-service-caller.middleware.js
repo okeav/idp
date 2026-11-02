@@ -20,7 +20,12 @@ export function requireServiceCallerMiddleware(...allowedCallers) {
             return next(new IdpError({ code: 'FORBIDDEN', httpStatus: 403, message: `Service '${caller.name}' is not allowed to call this endpoint` }));
         }
         if (caller.source === 'legacy-secret') {
-            getState().logger?.warn?.({ caller: caller.name, path: req.originalUrl }, 'Caller identity verified via shared secret, not cryptographically — rely on serviceMesh.tokenMode=token for production');
+            // The name came from an unverified header: anyone with the shared secret can claim any name.
+            const state = getState();
+            if (state.config.serviceMesh?.allowLegacySecretCallers !== true) {
+                return next(new IdpError({ code: 'FORBIDDEN', httpStatus: 403, message: 'This endpoint requires a signed service token (shared-secret callers are not identifiable)' }));
+            }
+            state.logger?.warn?.({ caller: caller.name, path: req.originalUrl }, 'Caller identity taken from a header under the shared secret (allowLegacySecretCallers) — not verified');
         }
         next();
     };

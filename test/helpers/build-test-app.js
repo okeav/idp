@@ -36,7 +36,9 @@ function generateTestSigningKey() {
  * emails, audit events, etc.) without needing a real mailer.
  */
 export async function buildTestApp(overrides = {}) {
-    const replSet = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
+    // Test files run in parallel, each starting its own mongod (some start several) — the default
+    // 10 s launch timeout is too tight on a loaded machine.
+    const replSet = await MongoMemoryReplSet.create({ replSet: { count: 1 }, instanceOpts: [{ launchTimeout: 60_000 }] });
     const { privateKey, publicKey } = generateTestSigningKey();
 
     const hookCalls = { onAuditLog: [], onVerificationEmailRequested: [], onPasswordResetRequested: [], onPasswordChanged: [], onSuspiciousActivityDetected: [], onNewDeviceLogin: [], onMagicLinkRequested: [] };

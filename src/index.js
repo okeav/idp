@@ -43,7 +43,7 @@ export { jwksHandler, authPublicKeyHandler } from './signing/jwks.controller.js'
 export { openidConfigurationHandler } from './oidc/discovery.controller.js';
 
 // ── Service mesh — S2S JWKS trust (kept in scope as a differentiator) ──
-export { registerServiceKeyHandler, getServicesJwksHandler } from './service-mesh/service-key.controller.js';
+export { registerServiceKeyHandler, getServicesJwksHandler, revokeServiceKey } from './service-mesh/service-key.controller.js';
 export { s2sBootstrapMiddleware } from './service-mesh/s2s-bootstrap.middleware.js';
 export {
     initServiceIdentity,

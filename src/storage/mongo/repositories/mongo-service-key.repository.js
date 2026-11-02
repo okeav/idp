@@ -19,6 +19,17 @@ export class MongoServiceKeyRepository {
         );
     }
 
+    /** One publishable key by kid — an indexed read, so verifying a token doesn't scan the collection. */
+    async findPublishableByKid(kid) {
+        const doc = await this.model.findOne({ kid, status: { $in: PUBLISHABLE_STATUSES } }).lean();
+        return doc ? withIds([doc])[0] : null;
+    }
+
+    /** Sets a key's status (ROTATING / RETIRED / REVOKED). Returns the updated key, or null. */
+    async setStatusByKid(kid, status) {
+        return this.model.findOneAndUpdate({ kid }, { $set: { status } }, { returnDocument: 'after' });
+    }
+
     async listPublishable() {
         return withIds(await this.model.find({ status: { $in: PUBLISHABLE_STATUSES } }).lean());
     }

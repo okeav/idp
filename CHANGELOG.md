@@ -72,6 +72,29 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   with `error=provider_error`). Google, Microsoft and GitHub exchanges use PKCE (S256); Apple's
   `id_token` must carry this login's `nonce` and the right `iss`/`aud`/`exp`. **Upgrade:** mount
   `cookie-parser` before the router (already needed for cookie sessions).
+- **Service impersonation through the shared bootstrap secret (High).** Every service presented the
+  same `serviceMesh.bootstrapSecret`, and `POST /internal/service-keys` trusted the `name` in the
+  body — any participating service (or anyone who read its environment) could register a key as
+  `billing` and mint tokens that pass as billing. New `serviceMesh.bootstrapSecrets: { name: secret }`
+  gives each service its own credential, covering only its own name (and letting it rotate: previous
+  keys go ROTATING, then RETIRED). The shared secret still works but can only register a name with no
+  key yet — replacing another service's key answers 409 `SERVICE_NAME_TAKEN`.
+  `serviceMesh.allowedServiceNames` restricts names; new `revokeServiceKey(kid)`. Keys must be RSA
+  public keys of ≥ 2048 bits (a private key PEM used to be accepted and *served*); names must match
+  `^[a-z0-9][a-z0-9-]{0,62}$`. Secrets are compared in constant time and registration is rate
+  limited (`rateLimiting.serviceKeyRegistration`). **Upgrade:** prefer `bootstrapSecrets`.
+- **`tokenMode: 'both'` let a shared-secret caller claim any name (Medium).** The default is now
+  `'token'` (also in `configFromEnv`). `requireServiceCallerMiddleware` refuses shared-secret callers
+  (their `x-service-name` is unverified) unless `serviceMesh.allowLegacySecretCallers: true`. A
+  missing `ownServiceName` used to make every token check fail and silently fall back to the secret;
+  it is now a 500 `SERVICE_NOT_CONFIGURED`.
+- **Service tokens could live forever.** Tokens without `exp`, with a lifetime over 5 minutes, or
+  with `iat` in the future are refused.
+- **Remote key lookups could be forced on every request.** Each unknown `kid` refetched the IdP's
+  services JWKS — no credentials needed. Forced refreshes now happen at most every 30 s, fetches time
+  out, a failed refresh keeps the last good keys (with a 30 s backoff), and `verifyServiceTokenRemote`
+  caches its lookup per IdP URL (it fetched on every call). The in-process lookup reads one key by
+  index instead of scanning all of them.
 - **SSO redirect allowlist was opt-in (open redirect).** With any provider configured,
   `initIdentityProvider()` now requires `sso.allowedRedirectOrigins` (exact origins) and an absolute
   `sso.baseCallbackUrl`; only `https` (or `http://localhost`) targets on the list are accepted.

@@ -57,7 +57,7 @@ export function withDefaults(config = {}) {
         sso: config.sso || {},
         // requirePkce: 'all' (default) or 'public' — see oauth2/authorize.controller.js.
         oauth2: { requirePkce: 'all', ...config.oauth2 },
-        serviceMesh: { tokenMode: 'both', ...config.serviceMesh },
+        serviceMesh: { tokenMode: 'token', ...config.serviceMesh },
         rateLimiting: {
             enabled: true,
             adapter: 'memory',
@@ -76,6 +76,7 @@ export function withDefaults(config = {}) {
             webauthnAuthentication: { ...DEFAULT_RATE_LIMITS.webauthnAuthenticationPerIp, ...config.rateLimiting?.webauthnAuthentication },
             oauth2Token: { ...DEFAULT_RATE_LIMITS.oauth2TokenPerIp, ...config.rateLimiting?.oauth2Token },
             ssoInitiate: { ...DEFAULT_RATE_LIMITS.ssoInitiatePerIp, ...config.rateLimiting?.ssoInitiate },
+            serviceKeyRegistration: { ...DEFAULT_RATE_LIMITS.serviceKeyRegistrationPerIp, ...config.rateLimiting?.serviceKeyRegistration },
         },
         hooks: config.hooks || {},
         webhooks: { ...DEFAULT_WEBHOOK_CONFIG, ...config.webhooks },

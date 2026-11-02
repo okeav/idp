@@ -127,6 +127,8 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
     oauth2TokenPerIp: { max: 120, windowSeconds: 60 },
     // GET /sso/:provider — each call parks a state entry in the cache for ssoState seconds.
     ssoInitiatePerIp: { max: 30, windowSeconds: 5 * 60 },
+    // POST /internal/service-keys — guesses at the bootstrap secret.
+    serviceKeyRegistrationPerIp: { max: 20, windowSeconds: 15 * 60 },
 });
 
 // Per-ACCOUNT limit on wrong email-verification codes/tokens. When it is used
