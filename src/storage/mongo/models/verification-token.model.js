@@ -24,6 +24,9 @@ export function defineVerificationTokenModel(connection) {
     schema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
     schema.index({ kind: 1, tokenHash: 1, user: 1 });
     schema.index({ kind: 1, user: 1 });
+    // One live reset / magic link per user (see replaceForUser). Email verification may have several
+    // (one per competing registration).
+    schema.index({ kind: 1, user: 1 }, { unique: true, partialFilterExpression: { kind: { $in: ['password_reset', 'magic_link'] } }, name: 'one_link_per_user' });
 
     schema.plugin(mongoIdPlugin);
 

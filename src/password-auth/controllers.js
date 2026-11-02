@@ -146,7 +146,11 @@ export async function registerHandler(req, res, next) {
             // and from now on verifying needs that password too (`registrationContested`): the inbox
             // owner activates THEIR registration, and a code from anyone else's is useless to them.
             // (The account's profile stays as the first registration set it.)
-            await state.storage.userRepository.updateById(existing.id, { passwordHash, registrationContested: true });
+            // Conditional on the account STILL being pending: if its owner activated it since it was read
+            // (verify-email, magic link, SSO, reset), an unconditional write would put this registrant's
+            // password on a live account.
+            const contested = await state.storage.userRepository.updateByIdIfStatus(existing.id, IDENTITY_STATUS.PENDING_VERIFICATION, { passwordHash, registrationContested: true });
+            if (!contested) return res.status(201).json({ status: 'ok' });
             const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, existing.id, passwordHash);
             auditLogDetached(state.logger, state.hooks, 'REGISTRATION_REPEATED', { userId: String(existing.id) });
             invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
@@ -215,42 +219,47 @@ export async function verifyEmailHandler(req, res, next) {
         // One answer for an unknown address, an already-verified one, and a wrong code — none of
         // them may reveal whether an account exists.
         const user = await state.storage.userRepository.findByEmail(email, { select: '+passwordHash' });
-        if (!user || user.status !== IDENTITY_STATUS.PENDING_VERIFICATION) throw INVALID_VERIFICATION();
-
         const tokens = state.storage.verificationTokenRepository;
-        const found = await withAttemptBudget(state, `email-verification:${user.id}`, state.config.security.verificationCodeLockout, {
-            lockedError: VERIFICATION_LOCKED,
-            onLocked: async () => {
-                // Budget spent: burn every outstanding code, so guessing has to start over against a
-                // fresh code that only the inbox owner receives.
-                await tokens.deleteAllForUser('email_verification', user.id);
-                await auditLog(state.logger, state.hooks, 'EMAIL_VERIFICATION_LOCKED', { userId: String(user.id) });
-            },
-        }, async () => {
+
+        const verify = async () => {
+            if (!user || user.status !== IDENTITY_STATUS.PENDING_VERIFICATION) throw INVALID_VERIFICATION();
+            // Read, check, THEN consume — a refused attempt never takes the code out of circulation.
             const row = token
-                ? await tokens.consumeByHash('email_verification', hashOpaqueToken(state, token), user.id)
-                : (await tokens.consumeByCode('email_verification', hashOpaqueToken(state, code), user.id))
+                ? await tokens.findActive('email_verification', { tokenHash: hashOpaqueToken(state, token) }, user.id)
+                : (await tokens.findActive('email_verification', { verificationCode: hashOpaqueToken(state, code) }, user.id))
                     // Codes issued before 0.4.0 were stored in plain text (they expire within a day). Only
                     // a real 6-digit code is tried that way — never a value read from the database, which
                     // is now the code's HMAC and would otherwise be accepted as-is.
-                    ?? (LEGACY_CODE.test(code) ? await tokens.consumeByCode('email_verification', code, user.id) : null);
+                    ?? (LEGACY_CODE.test(code) ? await tokens.findActive('email_verification', { verificationCode: code }, user.id) : null);
             if (!row) throw INVALID_VERIFICATION();
             if (user.registrationContested && !(await verifyPassword(password ?? '', boundPasswordHash(row, user)))) {
-                // Put the code back — a right code with a missing or wrong password stays usable (this
-                // attempt still counts against the budget).
-                await tokens.create('email_verification', {
-                    user: row.user, tokenHash: row.tokenHash, verificationCode: row.verificationCode,
-                    passwordHash: row.passwordHash ?? null, expiresAt: row.expiresAt,
-                });
                 throw REGISTRATION_PASSWORD_REQUIRED();
             }
-            return row;
-        });
+            const consumed = token
+                ? await tokens.consumeByHash('email_verification', row.tokenHash, user.id)
+                : await tokens.consumeByCode('email_verification', row.verificationCode, user.id);
+            if (!consumed) throw INVALID_VERIFICATION(); // a concurrent request used it first
+            return consumed;
+        };
 
-        await state.storage.userRepository.updateById(user.id, {
+        // The 6-digit CODE is guessable, so attempts at it are budgeted — per ADDRESS, counted for unknown
+        // and verified addresses too, so a lock says nothing about whether a pending registration exists.
+        // A spent budget kills the outstanding codes but not the links: the 256-bit link can't be
+        // guessed, so the owner can still verify while someone else hammers the code.
+        const found = token ? await verify() : await withAttemptBudget(state, `email-verification:${emailKey(state, email)}`, state.config.security.verificationCodeLockout, {
+            lockedError: VERIFICATION_LOCKED,
+            onLocked: async () => {
+                if (user?.status !== IDENTITY_STATUS.PENDING_VERIFICATION) return;
+                await tokens.clearCodes('email_verification', user.id);
+                await auditLog(state.logger, state.hooks, 'EMAIL_VERIFICATION_LOCKED', { userId: String(user.id) });
+            },
+        }, verify);
+
+        const activated = await state.storage.userRepository.updateByIdIfStatus(user.id, IDENTITY_STATUS.PENDING_VERIFICATION, {
             status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null,
             passwordHash: boundPasswordHash(found, user), registrationContested: false,
         });
+        if (!activated) throw INVALID_VERIFICATION(); // settled meanwhile by another path
         await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
 
         await auditLog(state.logger, state.hooks, 'EMAIL_VERIFIED', { userId: String(user.id), email });
@@ -553,11 +562,10 @@ export async function forgotPasswordHandler(req, res, next) {
             const user = await state.storage.userRepository.findByEmail(email);
             if (!user || user.status === IDENTITY_STATUS.DELETED) return;
 
-            // Only the newest link works: requesting another invalidates the earlier ones.
-            await state.storage.verificationTokenRepository.deleteAllForUser('password_reset', user.id);
+            // Only the newest link works: requesting another replaces the earlier one (atomically, so
+            // concurrent requests can't leave several live links).
             const resetToken = generateOpaqueToken(32);
-            await state.storage.verificationTokenRepository.create('password_reset', {
-                user: user.id,
+            await state.storage.verificationTokenRepository.replaceForUser('password_reset', user.id, {
                 tokenHash: hashOpaqueToken(state, resetToken),
                 expiresAt: new Date(Date.now() + state.config.ttls.passwordReset * 1000),
             });
@@ -585,10 +593,22 @@ export async function resetPasswordHandler(req, res, next) {
         const passwordHash = await hashPassword(newPassword, state.config.security.bcryptRounds);
         // Proving the inbox and setting a new password also lifts a lockout (the lock exists to stop
         // password guessing — the guessed password is gone).
-        // (Not an administrative lock — a LOCKED status without a lockUntil; see account-status.js.)
-        const legacyLock = user.status === IDENTITY_STATUS.LOCKED && user.lockUntil ? { status: IDENTITY_STATUS.ACTIVE } : {};
-        const unlock = { failedLoginAttempts: 0, lockUntil: null, ...legacyLock };
-        await state.storage.userRepository.updateById(record.user, { passwordHash, passwordChangedAt: new Date(), ...unlock });
+        const changes = { passwordHash, passwordChangedAt: new Date(), failedLoginAttempts: 0, lockUntil: null };
+        // On a never-verified account the reset is ALSO the verification — it proved the inbox, like a
+        // magic link. Left pending, the account's outstanding verification code (bound to whichever
+        // password registered it — possibly an attacker's pre-registration) would later activate THAT
+        // password over the one just set.
+        const activated = user.status === IDENTITY_STATUS.PENDING_VERIFICATION
+            && await state.storage.userRepository.updateByIdIfStatus(record.user, IDENTITY_STATUS.PENDING_VERIFICATION, {
+                ...changes, status: IDENTITY_STATUS.ACTIVE, registrationContested: false,
+            });
+        if (activated) {
+            await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', record.user);
+        } else {
+            // (Not an administrative lock — a LOCKED status without a lockUntil; see account-status.js.)
+            const legacyLock = user.status === IDENTITY_STATUS.LOCKED && user.lockUntil ? { status: IDENTITY_STATUS.ACTIVE } : {};
+            await state.storage.userRepository.updateById(record.user, { ...changes, ...legacyLock });
+        }
         await revokeAllUserSessions(state, record.user);
         // Any other outstanding reset links die with this one.
         await state.storage.verificationTokenRepository.deleteAllForUser('password_reset', record.user);

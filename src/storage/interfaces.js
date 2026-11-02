@@ -22,6 +22,8 @@
  * @property {(email: string, opts?: {select?: string}) => Promise<object|null>} findByEmail
  * @property {(provider: string, providerId: string) => Promise<object|null>} findByExternalProvider
  * @property {(id: string, patch: object, opts?: object) => Promise<object|null>} updateById
+ * @property {(id: string, status: string, patch: object) => Promise<object|null>} updateByIdIfStatus - ATOMIC: apply
+ *   `patch` only while the user's status is still `status`; null if it changed (registration/activation races)
  * @property {(id: string) => Promise<object|null>} incrementFailedLoginAttempts - atomic $inc, returns the post-increment document
  * @property {(id: string, step: number) => Promise<boolean>} [claimTotpStep] - ATOMIC: set `mfaLastTotpStep = step`
  *   only if it is unset or lower; resolve whether this call set it. Keeps a TOTP code from being accepted twice.
@@ -83,6 +85,12 @@
  * @property {(kind: 'password_reset'|'email_verification'|'magic_link', input: object) => Promise<void>} create
  * @property {(kind: string, hash: string, userId?: string) => Promise<object|null>} consumeByHash
  * @property {(kind: string, code: string, userId: string) => Promise<object|null>} consumeByCode
+ * @property {(kind: string, by: {tokenHash?: string, verificationCode?: string}, userId: string) => Promise<object|null>} findActive -
+ *   a live (unused, unexpired) token WITHOUT consuming it
+ * @property {(kind: string, userId: string) => Promise<void>} clearCodes - null the `verificationCode` of every row
+ *   (kills guessable codes, keeps unguessable links)
+ * @property {(kind: string, userId: string, input: object) => Promise<void>} replaceForUser - ATOMIC: the one live
+ *   token of `kind` for the user (password_reset, magic_link), even under concurrent requests
  * @property {(kind: string, userId: string) => Promise<void>} deleteAllForUser
  * @property {() => Promise<{deletedCount: number}>} [pruneExpired]
  *

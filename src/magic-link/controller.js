@@ -42,11 +42,9 @@ export async function requestMagicLinkHandler(req, res, next) {
             return res.json({ status: 'ok' }); // don't resurrect a deleted account via magic link
         }
 
-        // Only the newest link works: requesting another invalidates the earlier ones.
-        await state.storage.verificationTokenRepository.deleteAllForUser('magic_link', user.id);
+        // Only the newest link works: requesting another replaces the earlier one (atomically).
         const token = generateOpaqueToken(32);
-        await state.storage.verificationTokenRepository.create('magic_link', {
-            user: user.id,
+        await state.storage.verificationTokenRepository.replaceForUser('magic_link', user.id, {
             tokenHash: hashOpaqueToken(state, token),
             expiresAt: new Date(Date.now() + state.config.ttls.magicLink * 1000),
         });
@@ -87,11 +85,20 @@ export async function verifyMagicLinkHandler(req, res, next) {
             // still-unverified account, which anyone could have registered with. Activating it with that
             // password intact hands the account to whoever pre-registered the victim's email; it is
             // discarded instead (the owner can set one through password reset).
-            user = await state.storage.userRepository.updateById(user.id, {
+            // Conditional on still being pending: if the account was activated meanwhile (with whatever
+            // password its owner verified), it must not be wiped — it is then just a sign-in.
+            const activated = await state.storage.userRepository.updateByIdIfStatus(user.id, IDENTITY_STATUS.PENDING_VERIFICATION, {
                 status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null,
                 passwordHash: null, registrationContested: false, mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [],
             });
-            await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
+            if (activated) {
+                user = activated;
+                await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
+            } else {
+                user = await state.storage.userRepository.findById(record.user);
+                if (!user) throw new IdpError({ code: 'USER_NOT_FOUND', httpStatus: 404, message: 'User not found' });
+                assertUsableStatus(user);
+            }
         } else {
             assertUsableStatus(user);
         }

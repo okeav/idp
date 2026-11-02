@@ -111,11 +111,13 @@ export async function ssoCallbackHandler(req, res, next) {
                 // The provider just proved ownership of an address someone registered here but never
                 // verified. Whatever password that registration set is not the owner's (it may be an
                 // attacker's pre-registration), so it is discarded as the owner claims the account.
-                await users.updateById(existing.id, {
+                // Conditional on still being pending (an activation since the read must not be wiped);
+                // either way the address is now owned by the provider-verified user and is linked below.
+                const claimed = await users.updateByIdIfStatus(existing.id, IDENTITY_STATUS.PENDING_VERIFICATION, {
                     status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null,
                     passwordHash: null, registrationContested: false, mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [],
                 });
-                await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', existing.id);
+                if (claimed) await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', existing.id);
                 await users.linkExternalProvider(existing.id, link);
                 user = await users.findById(existing.id);
                 isNewLink = true;

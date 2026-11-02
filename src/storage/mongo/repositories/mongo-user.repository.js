@@ -41,6 +41,15 @@ export class MongoUserRepository {
         return this.model.findByIdAndUpdate(id, { $set: patch }, { returnDocument: 'after', ...opts });
     }
 
+    /**
+     * Applies `patch` only if the user's status is still `status` — one atomic conditional update.
+     * Returns the updated user, or null when the status had changed (e.g. a pending registration that
+     * was activated meanwhile must not be written by a registration that read it as pending).
+     */
+    async updateByIdIfStatus(id, status, patch) {
+        return this.model.findOneAndUpdate({ _id: id, status }, { $set: patch }, { returnDocument: 'after' });
+    }
+
     async incrementFailedLoginAttempts(id) {
         return this.model.findByIdAndUpdate(id, { $inc: { failedLoginAttempts: 1 } }, { returnDocument: 'after' });
     }
