@@ -10,6 +10,7 @@ import { issueSession, setSessionCookies, resolveClaims } from '../password-auth
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { sealMfaSecret, openMfaSecret } from './secrets.js';
 import { guardMfaAttempt } from './attempt-guard.js';
+import { claimTotpStep, consumeRecoveryCode, claimMfaChallenge } from './factor-store.js';
 
 // otplib v13's functional API takes `strategy` (default 'totp', so this is
 // actually redundant but kept for clarity) and `epochTolerance` — a seconds-
@@ -21,17 +22,32 @@ const TOTP_OPTIONS = { strategy: 'totp', epochTolerance: 30 };
 // otplib v13 throws (TokenLengthError) on anything that isn't exactly 6
 // digits — including every recovery code (XXXXXX-XXXXXX). Such a code just
 // isn't a valid TOTP; it must fall through to the recovery-code check, not 500.
-async function totpMatches(code, secret) {
-    if (!secret || !/^\d{6}$/.test(code)) return false;
-    const { valid } = await verifyTotp({ token: code, secret, ...TOTP_OPTIONS });
-    return valid;
+/** The matched TOTP time step, or null when the code doesn't verify. */
+async function totpStep(code, secret) {
+    if (!secret || !/^\d{6}$/.test(code)) return null;
+    const result = await verifyTotp({ token: code, secret, ...TOTP_OPTIONS });
+    return result.valid ? result.timeStep : null;
+}
+
+/**
+ * True when `code` verifies against `secret` AND its time step hasn't been accepted for this account
+ * before. Without the second check a code seen once (shoulder-surfed, logged, replayed from a
+ * captured request) works again for the rest of its ±30s window.
+ */
+async function totpAccepted(state, userId, code, secret) {
+    const step = await totpStep(code, secret);
+    return step !== null && claimTotpStep(state, userId, step);
 }
 
 const isWrongCode = (err) => err?.code === 'INVALID_MFA_CODE';
+// For the re-authenticating MFA routes (disable, regenerate codes) a wrong password is a guess too.
+const isWrongCodeOrPassword = (err) => isWrongCode(err) || err?.code === 'CURRENT_PASSWORD_INCORRECT';
 
 function invalidCode(message = 'Invalid TOTP code') {
     return new IdpError({ code: 'INVALID_MFA_CODE', httpStatus: 400, message });
 }
+
+const INVALID_CHALLENGE = () => new IdpError({ code: 'INVALID_MFA_CHALLENGE_TOKEN', httpStatus: 401, message: 'Invalid or expired MFA challenge token' });
 
 function assertMfaFeatureEnabled(state) {
     if (state.config.mfa.enabled === false) {
@@ -42,6 +58,47 @@ function assertMfaFeatureEnabled(state) {
 function generateRecoveryCode() {
     const part = () => crypto.randomBytes(3).toString('hex').toUpperCase();
     return `${part()}-${part()}`;
+}
+
+/** Recovery codes are shown as `XXXXXX-XXXXXX` (uppercase hex); accept them however the user types the case/whitespace. */
+const normalizeRecoveryCode = (code) => String(code).trim().toUpperCase();
+
+function newRecoveryCodes(state) {
+    const rawCodes = Array.from({ length: state.config.mfa.recoveryCodeCount }, generateRecoveryCode);
+    return { rawCodes, stored: rawCodes.map((c) => ({ codeHash: hashOpaqueToken(state, c), usedAt: null })) };
+}
+
+/** Re-authentication for the routes that weaken or re-issue the second factor: the password (when the account has one). */
+async function assertPassword(user, password) {
+    if (!user.passwordHash) return; // passwordless account (SSO / magic link): the TOTP code is the re-authentication
+    if (!(await verifyPassword(password ?? '', user.passwordHash))) {
+        throw new IdpError({ code: 'CURRENT_PASSWORD_INCORRECT', httpStatus: 400, message: 'Incorrect password' });
+    }
+}
+
+/**
+ * Verifies an MFA challenge token for completing a login, and that it's still current: a challenge
+ * issued before the account's last password change is void (it was earned with the old password).
+ * Shared with WebAuthn-as-MFA.
+ */
+export function verifyChallengeToken(state, mfaChallengeToken) {
+    try {
+        const claims = verifyMfaChallengeTokenJwt(state, mfaChallengeToken);
+        if (!claims.jti) throw INVALID_CHALLENGE();
+        return claims;
+    } catch {
+        throw INVALID_CHALLENGE();
+    }
+}
+
+export function assertChallengeCurrent(user, challengeClaims) {
+    const changedAt = user.passwordChangedAt ? Math.floor(new Date(user.passwordChangedAt).getTime() / 1000) : null;
+    if (changedAt !== null && challengeClaims.iat < changedAt) throw INVALID_CHALLENGE();
+}
+
+/** Spends the challenge token (one token, one login) — after the factor checked out. */
+export async function spendChallenge(state, challengeClaims) {
+    if (!(await claimMfaChallenge(state, challengeClaims))) throw INVALID_CHALLENGE();
 }
 
 export async function getMfaStatusHandler(req, res, next) {
@@ -74,6 +131,7 @@ export async function setupMfaHandler(req, res, next) {
         await state.storage.userRepository.updateById(req.auth.userId, { mfaTempSecret: await sealMfaSecret(state, secret, req.auth.userId) });
         await auditLog(state.logger, state.hooks, 'MFA_SETUP_INITIATED', { userId: req.auth.userId });
 
+        res.set('Cache-Control', 'no-store');
         res.json({ secret, otpauthUrl });
     } catch (err) {
         next(err);
@@ -93,22 +151,22 @@ export async function confirmMfaHandler(req, res, next) {
 
         const { secret } = await openMfaSecret(state, user.mfaTempSecret, userId);
         await guardMfaAttempt(state, userId, { method: 'totp-enrolment', isFailure: isWrongCode }, async () => {
-            if (!(await totpMatches(code, secret))) throw invalidCode();
+            // Claims the step too, so the code that confirmed enrolment can't then complete a login.
+            if (!(await totpAccepted(state, userId, code, secret))) throw invalidCode();
         });
 
-        const rawCodes = Array.from({ length: state.config.mfa.recoveryCodeCount }, generateRecoveryCode);
-        const codeHashes = rawCodes.map((c) => hashOpaqueToken(state, c));
-
+        const { rawCodes, stored } = newRecoveryCodes(state);
         await state.storage.userRepository.updateById(userId, {
             mfaEnabled: true,
             // Re-sealed rather than copied: a temp secret written before
             // encryption existed is plain text, and the permanent one never should be.
             mfaSecret: await sealMfaSecret(state, secret, userId),
             mfaTempSecret: null,
-            mfaRecoveryCodes: codeHashes.map((codeHash) => ({ codeHash, usedAt: null })),
+            mfaRecoveryCodes: stored,
         });
 
         await auditLog(state.logger, state.hooks, 'MFA_ENABLED', { userId: req.auth.userId });
+        res.set('Cache-Control', 'no-store');
         res.json({ mfaEnabled: true, recoveryCodes: rawCodes }); // shown once — caller must save these
     } catch (err) {
         next(err);
@@ -124,17 +182,15 @@ export async function disableMfaHandler(req, res, next) {
         if (!user) throw new IdpError({ code: 'USER_NOT_FOUND', httpStatus: 404, message: 'User not found' });
         if (!user.mfaEnabled) throw new IdpError({ code: 'MFA_NOT_ENABLED', httpStatus: 400, message: 'MFA is not enabled on this account' });
 
-        // The lock is checked before the password too (inside the guard), so
-        // a locked account can't be used as a password oracle either.
-        await guardMfaAttempt(state, userId, { method: 'totp-disable', isFailure: isWrongCode }, async () => {
-            if (!(await verifyPassword(password, user.passwordHash))) {
-                throw new IdpError({ code: 'CURRENT_PASSWORD_INCORRECT', httpStatus: 400, message: 'Incorrect password' });
-            }
+        // Counted before the password is checked too, so this route is no
+        // password oracle, locked or not.
+        await guardMfaAttempt(state, userId, { method: 'totp-disable', isFailure: isWrongCodeOrPassword }, async () => {
+            await assertPassword(user, password);
             const opened = await openMfaSecret(state, user.mfaSecret, userId);
-            if (!(await totpMatches(code, opened?.secret))) throw invalidCode();
+            if (!(await totpAccepted(state, userId, code, opened?.secret))) throw invalidCode();
         });
 
-        await state.storage.userRepository.updateById(userId, { mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [] });
+        await state.storage.userRepository.updateById(userId, { mfaEnabled: false, mfaSecret: null, mfaTempSecret: null, mfaRecoveryCodes: [], mfaLastTotpStep: null });
         await auditLog(state.logger, state.hooks, 'MFA_DISABLED', { userId: req.auth.userId });
         res.json({ mfaEnabled: false });
     } catch (err) {
@@ -142,29 +198,34 @@ export async function disableMfaHandler(req, res, next) {
     }
 }
 
+/** Re-issues the recovery codes. Requires a current TOTP code as well as the password: whoever holds only a session (or only the password) must not mint themselves a fresh set of second factors. */
 export async function regenerateRecoveryCodesHandler(req, res, next) {
     try {
         const state = getState();
-        const { password } = req.body;
-        const user = await state.storage.userRepository.findById(req.auth.userId, { select: '+passwordHash mfaEnabled' });
+        const { password, code } = req.body;
+        const userId = req.auth.userId;
+        const user = await state.storage.userRepository.findById(userId, { select: '+passwordHash +mfaSecret mfaEnabled' });
         if (!user) throw new IdpError({ code: 'USER_NOT_FOUND', httpStatus: 404, message: 'User not found' });
         if (!user.mfaEnabled) throw new IdpError({ code: 'MFA_NOT_ENABLED', httpStatus: 400, message: 'MFA is not enabled on this account' });
-        if (!(await verifyPassword(password, user.passwordHash))) {
-            throw new IdpError({ code: 'CURRENT_PASSWORD_INCORRECT', httpStatus: 400, message: 'Incorrect password' });
-        }
 
-        const rawCodes = Array.from({ length: state.config.mfa.recoveryCodeCount }, generateRecoveryCode);
-        const codeHashes = rawCodes.map((c) => hashOpaqueToken(state, c));
-        await state.storage.userRepository.updateById(req.auth.userId, { mfaRecoveryCodes: codeHashes.map((codeHash) => ({ codeHash, usedAt: null })) });
+        await guardMfaAttempt(state, userId, { method: 'recovery-codes', isFailure: isWrongCodeOrPassword }, async () => {
+            await assertPassword(user, password);
+            const opened = await openMfaSecret(state, user.mfaSecret, userId);
+            if (!(await totpAccepted(state, userId, code, opened?.secret))) throw invalidCode();
+        });
 
-        await auditLog(state.logger, state.hooks, 'MFA_RECOVERY_CODES_REGENERATED', { userId: req.auth.userId });
+        const { rawCodes, stored } = newRecoveryCodes(state);
+        await state.storage.userRepository.updateById(userId, { mfaRecoveryCodes: stored });
+
+        await auditLog(state.logger, state.hooks, 'MFA_RECOVERY_CODES_REGENERATED', { userId });
+        res.set('Cache-Control', 'no-store');
         res.json({ recoveryCodes: rawCodes });
     } catch (err) {
         next(err);
     }
 }
 
-/** Completes login after `loginHandler` returned `{ mfaRequired: true }`. Accepts a TOTP code or an unused recovery code. */
+/** Completes login after a first factor returned `{ mfaRequired: true }`. Accepts a TOTP code or an unused recovery code. */
 export async function verifyMfaChallengeHandler(req, res, next) {
     try {
         const state = getState();
@@ -172,47 +233,37 @@ export async function verifyMfaChallengeHandler(req, res, next) {
 
         await enforceRateLimit(state, `mfa-challenge:ip:${req.ip}`, state.config.rateLimiting.mfaChallenge, { failMode: 'closed' });
 
-        let claimsFromChallenge;
-        try {
-            claimsFromChallenge = verifyMfaChallengeTokenJwt(state, mfaChallengeToken);
-        } catch {
-            throw new IdpError({ code: 'INVALID_MFA_CHALLENGE_TOKEN', httpStatus: 401, message: 'Invalid or expired MFA challenge token' });
-        }
-
-        const userId = claimsFromChallenge.sub;
+        const challenge = verifyChallengeToken(state, mfaChallengeToken);
+        const userId = challenge.sub;
         const user = await state.storage.userRepository.findById(userId, { select: '+mfaSecret +mfaRecoveryCodes' });
         if (!user || user.status !== IDENTITY_STATUS.ACTIVE) throw new IdpError({ code: 'USER_NOT_ACTIVE', httpStatus: 403, message: 'User account is not active' });
-        if (!user.mfaEnabled) throw new IdpError({ code: 'INVALID_MFA_CHALLENGE_TOKEN', httpStatus: 401, message: 'Invalid or expired MFA challenge token' });
+        if (!user.mfaEnabled) throw INVALID_CHALLENGE();
+        assertChallengeCurrent(user, challenge);
 
         // TOTP and recovery codes share one per-account counter: a guess is a
-        // guess whichever kind of code it's aimed at.
-        const { opened, usedRecoveryCodeIdx } = await guardMfaAttempt(state, userId, { method: 'totp', isFailure: isWrongCode }, async () => {
+        // guess whichever kind of code it's aimed at. Each is spent atomically
+        // inside the guard, so neither can be used twice — not even by two
+        // requests racing with the same code.
+        const { opened, method } = await guardMfaAttempt(state, userId, { method: 'totp', isFailure: isWrongCode }, async () => {
             const opened = await openMfaSecret(state, user.mfaSecret, userId);
-            if (await totpMatches(code, opened?.secret)) return { opened, usedRecoveryCodeIdx: -1 };
+            if (await totpAccepted(state, userId, code, opened?.secret)) return { opened, method: 'totp' };
 
-            const codeHashBuf = Buffer.from(hashOpaqueToken(state, code), 'hex');
-            const idx = (user.mfaRecoveryCodes || []).findIndex((rc) => {
-                if (rc.usedAt) return false;
-                const stored = Buffer.from(rc.codeHash || '', 'hex');
-                return stored.length === codeHashBuf.length && crypto.timingSafeEqual(stored, codeHashBuf);
-            });
-            if (idx >= 0) return { opened, usedRecoveryCodeIdx: idx };
+            const codeHash = hashOpaqueToken(state, normalizeRecoveryCode(code));
+            if (await consumeRecoveryCode(state, user, codeHash)) return { opened, method: 'recovery-code' };
 
-            await state.storage.userRepository.incrementFailedLoginAttempts(userId);
             throw invalidCode('Invalid MFA code');
         });
 
-        const patch = {};
-        if (usedRecoveryCodeIdx >= 0) patch[`mfaRecoveryCodes.${usedRecoveryCodeIdx}.usedAt`] = new Date();
+        await spendChallenge(state, challenge);
+
         // Lazy migration: a plain-text secret (or one under a retired key) is
         // re-sealed under the current key on the first successful verify.
-        if (opened?.needsUpgrade) patch.mfaSecret = await sealMfaSecret(state, opened.secret, userId);
-        if (Object.keys(patch).length > 0) await state.storage.userRepository.updateById(userId, patch);
+        if (opened?.needsUpgrade) await state.storage.userRepository.updateById(userId, { mfaSecret: await sealMfaSecret(state, opened.secret, userId) });
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'mfa' });
         const session = await issueSession(state, { user, claims, req });
 
-        await auditLog(state.logger, state.hooks, 'MFA_VERIFIED', { userId });
+        await auditLog(state.logger, state.hooks, 'MFA_VERIFIED', { userId, method });
 
         setSessionCookies(res, state, session);
         res.json({

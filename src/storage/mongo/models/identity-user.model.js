@@ -23,6 +23,8 @@ export function defineIdentityUserModel(connection, { hashEmail }) {
             mfaEnabled: { type: Boolean, default: false },
             mfaSecret: { type: String, select: false },
             mfaTempSecret: { type: String, select: false },
+            // The last TOTP time step accepted for this account — a code is never accepted twice.
+            mfaLastTotpStep: { type: Number, default: null, select: false },
             mfaRecoveryCodes: {
                 type: [{ codeHash: { type: String, required: true }, usedAt: { type: Date, default: null } }],
                 select: false,

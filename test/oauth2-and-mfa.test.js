@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generate as generateTotp } from 'otplib';
-import { buildTestApp, uniqueEmail } from './helpers/build-test-app.js';
+import { buildTestApp, uniqueEmail, freshTotp } from './helpers/build-test-app.js';
 import { verifyAccessToken } from '../src/index.js';
 
 let app;
@@ -273,7 +273,7 @@ test('MFA: setup -> confirm -> login requires challenge -> verify -> full sessio
     assert.ok(loginBody.mfaChallengeToken);
     assert.equal(loginBody.accessToken, undefined, 'no session should be issued before the MFA challenge is met');
 
-    const verifyCode = await generateTotp({ secret });
+    const verifyCode = await freshTotp(app.state, (await app.state.storage.userRepository.findByEmail(email)).id, secret);
     const verifyRes = await fetch(`${app.baseUrl}/mfa/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

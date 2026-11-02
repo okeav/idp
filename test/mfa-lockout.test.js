@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generate as generateTotp, verify as verifyTotp } from 'otplib';
-import { buildTestApp, uniqueEmail } from './helpers/build-test-app.js';
+import { buildTestApp, uniqueEmail, freshTotp } from './helpers/build-test-app.js';
 import { createVirtualAuthenticator } from './helpers/virtual-authenticator.js';
 import { serve, json } from './helpers/serve.js';
 import { MemoryAttemptCounterRepository } from '../src/mfa/memory-attempt-counter.js';
@@ -170,19 +170,19 @@ test('WebAuthn-as-MFA failures count toward the same per-account limit, and a va
 });
 
 test('a successful verify resets the counter', async () => {
-    const { email, secret } = await userWithMfa('lock-reset');
+    const { email, userId, secret } = await userWithMfa('lock-reset');
     for (let round = 0; round < 2; round += 1) {
         const token = await challenge(email);
         for (let i = 0; i < 4; i += 1) {
             assert.equal((await post('/mfa/verify', { mfaChallengeToken: token, code: await wrongCode(secret) })).status, 400, `round ${round}, attempt ${i}`);
         }
-        const ok = await post('/mfa/verify', { mfaChallengeToken: token, code: await generateTotp({ secret }) });
+        const ok = await post('/mfa/verify', { mfaChallengeToken: token, code: await freshTotp(app.state, userId, secret) });
         assert.equal(ok.status, 200, `round ${round}: 4 failures + success must never lock, since success resets`);
     }
 });
 
 test('the lock lifts after lockSeconds, and the count starts over after windowSeconds', async () => {
-    const { email, secret } = await userWithMfa('lock-window');
+    const { email, userId, secret } = await userWithMfa('lock-window');
     const lockout = app.state.config.mfa.lockout;
     const saved = { ...lockout };
     Object.assign(lockout, { windowSeconds: 1, lockSeconds: 1 });
@@ -193,7 +193,7 @@ test('the lock lifts after lockSeconds, and the count starts over after windowSe
         assert.equal((await post('/mfa/verify', { mfaChallengeToken: token, code: await generateTotp({ secret }) })).status, 429);
 
         await new Promise((r) => setTimeout(r, 1200));
-        const after = await post('/mfa/verify', { mfaChallengeToken: await challenge(email), code: await generateTotp({ secret }) });
+        const after = await post('/mfa/verify', { mfaChallengeToken: await challenge(email), code: await freshTotp(app.state, userId, secret) });
         assert.equal(after.status, 200, 'unlocked once lockSeconds has passed');
 
         // Failures spread wider than the window never accumulate to a lock.

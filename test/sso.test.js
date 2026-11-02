@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generate as generateTotp } from 'otplib';
-import { buildTestApp, withTemporaryApp, uniqueEmail } from './helpers/build-test-app.js';
+import { buildTestApp, withTemporaryApp, uniqueEmail, freshTotp } from './helpers/build-test-app.js';
 import { json } from './helpers/serve.js';
 import { buildSsoProviders, normalizeUserInfo } from '../src/sso/providers.js';
 
@@ -169,7 +169,7 @@ test('a suspended account gets no new login method attached', async () => {
 
 test('SSO stops at the MFA challenge for an account with MFA (no cookies, token in the fragment)', async () => {
     const email = uniqueEmail('sso-mfa');
-    await registerVerified(email);
+    const mfaUser = await registerVerified(email);
     const login = await (await post('/login', { email, password })).json();
     const auth = { Authorization: `Bearer ${login.accessToken}` };
     const { secret } = await (await fetch(`${app.baseUrl}/me/mfa/setup`, { method: 'POST', headers: auth })).json();
@@ -183,7 +183,7 @@ test('SSO stops at the MFA challenge for an account with MFA (no cookies, token 
     const mfaChallengeToken = r.fragment.get('mfa_challenge_token');
     assert.ok(mfaChallengeToken);
 
-    const verify = await post('/mfa/verify', { mfaChallengeToken, code: await generateTotp({ secret }) });
+    const verify = await post('/mfa/verify', { mfaChallengeToken, code: await freshTotp(app.state, mfaUser.id, secret) });
     assert.equal(verify.status, 200);
     assert.ok((await verify.json()).accessToken);
 });

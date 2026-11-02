@@ -7,9 +7,9 @@ import { storeChallenge, consumeChallenge } from './challenge-store.js';
 import { auditLog } from '../hooks/index.js';
 import { verifyStoredCredentialAssertion } from './shared.js';
 import { issueSession, setSessionCookies, resolveClaims } from '../password-auth/controllers.js';
-import { verifyMfaChallengeToken as verifyMfaChallengeTokenJwt } from '../signing/token.service.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { guardMfaAttempt } from '../mfa/attempt-guard.js';
+import { verifyChallengeToken, assertChallengeCurrent, spendChallenge } from '../mfa/controller.js';
 
 // A failed assertion is a failed second-factor attempt, counted against the
 // same per-account limit as a wrong TOTP/recovery code. An expired or missing
@@ -28,14 +28,6 @@ const isAssertionFailure = (err) => ASSERTION_FAILURE_CODES.has(err?.code);
  * belongs to THAT user, not just that it's some valid registered passkey.
  */
 
-function assertMfaChallenge(state, mfaChallengeToken) {
-    try {
-        return verifyMfaChallengeTokenJwt(state, mfaChallengeToken);
-    } catch {
-        throw new IdpError({ code: 'INVALID_MFA_CHALLENGE_TOKEN', httpStatus: 401, message: 'Invalid or expired MFA challenge token' });
-    }
-}
-
 /** POST /webauthn/mfa/options */
 export async function generateMfaWebauthnChallengeOptionsHandler(req, res, next) {
     try {
@@ -43,7 +35,7 @@ export async function generateMfaWebauthnChallengeOptionsHandler(req, res, next)
         const { rpID } = getWebauthnConfig(state);
         const { mfaChallengeToken } = req.body;
 
-        const { sub: userId } = assertMfaChallenge(state, mfaChallengeToken);
+        const { sub: userId } = verifyChallengeToken(state, mfaChallengeToken);
 
         const credentials = await state.storage.credentialRepository.findByUserId(userId);
         if (credentials.length === 0) {
@@ -75,7 +67,13 @@ export async function verifyMfaWebauthnChallengeHandler(req, res, next) {
 
         await enforceRateLimit(state, `mfa-challenge:ip:${req.ip}`, state.config.rateLimiting.mfaChallenge, { failMode: 'closed' });
 
-        const { sub: userId } = assertMfaChallenge(state, mfaChallengeToken);
+        const challenge = verifyChallengeToken(state, mfaChallengeToken);
+        const userId = challenge.sub;
+        const user = await state.storage.userRepository.findById(userId);
+        if (!user || user.status !== IDENTITY_STATUS.ACTIVE) {
+            throw new IdpError({ code: 'USER_NOT_ACTIVE', httpStatus: 403, message: 'User account is not active' });
+        }
+        assertChallengeCurrent(user, challenge);
 
         await guardMfaAttempt(state, userId, { method: 'webauthn', isFailure: isAssertionFailure }, async () => {
             const expectedChallenge = await consumeChallenge(state, `mfa-webauthn:${userId}`);
@@ -95,10 +93,7 @@ export async function verifyMfaWebauthnChallengeHandler(req, res, next) {
             }
         });
 
-        const user = await state.storage.userRepository.findById(userId);
-        if (!user || user.status !== IDENTITY_STATUS.ACTIVE) {
-            throw new IdpError({ code: 'USER_NOT_ACTIVE', httpStatus: 403, message: 'User account is not active' });
-        }
+        await spendChallenge(state, challenge);
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'webauthn-mfa' });
         const session = await issueSession(state, { user, claims, req });

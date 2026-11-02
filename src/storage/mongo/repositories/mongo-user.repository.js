@@ -45,6 +45,28 @@ export class MongoUserRepository {
         return this.model.findByIdAndUpdate(id, { $inc: { failedLoginAttempts: 1 } }, { returnDocument: 'after' });
     }
 
+    /**
+     * Records `step` as the user's last accepted TOTP time step — only if it is newer than the one
+     * recorded. One atomic conditional update, so of two concurrent requests carrying the same code
+     * exactly one succeeds. Returns whether this call claimed the step.
+     */
+    async claimTotpStep(id, step) {
+        const result = await this.model.updateOne(
+            { _id: id, $or: [{ mfaLastTotpStep: null }, { mfaLastTotpStep: { $lt: step } }] },
+            { $set: { mfaLastTotpStep: step } },
+        );
+        return result.modifiedCount === 1;
+    }
+
+    /** Marks one unused recovery code (by hash) used — atomically, so a code can be spent once. Returns whether it was. */
+    async consumeRecoveryCode(id, codeHash) {
+        const result = await this.model.updateOne(
+            { _id: id, mfaRecoveryCodes: { $elemMatch: { codeHash, usedAt: null } } },
+            { $set: { 'mfaRecoveryCodes.$.usedAt': new Date() } },
+        );
+        return result.modifiedCount === 1;
+    }
+
     async linkExternalProvider(id, link) {
         return this.model.findByIdAndUpdate(id, { $push: { externalProviders: link } }, { returnDocument: 'after' });
     }

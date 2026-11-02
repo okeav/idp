@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { generate as generateTotp, generateSecret } from 'otplib';
-import { buildTestApp, uniqueEmail, TEST_MFA_KEY } from './helpers/build-test-app.js';
+import { buildTestApp, uniqueEmail, TEST_MFA_KEY, freshTotp } from './helpers/build-test-app.js';
 import { json } from './helpers/serve.js';
 import { initIdentityProvider, migrateMfaSecrets, AesGcmSecretCipher } from '../src/index.js';
 import { getState, setState } from '../src/config/state.js';
@@ -39,7 +39,8 @@ async function enrol(accessToken) {
 async function mfaLogin(email, password, secret) {
     const { mfaChallengeToken } = await (await fetch(`${app.baseUrl}/login`, json({ email, password }))).json();
     assert.ok(mfaChallengeToken);
-    return fetch(`${app.baseUrl}/mfa/verify`, json({ mfaChallengeToken, code: await generateTotp({ secret }) }));
+    const { sub } = JSON.parse(Buffer.from(mfaChallengeToken.split('.')[1], 'base64url').toString());
+    return fetch(`${app.baseUrl}/mfa/verify`, json({ mfaChallengeToken, code: await freshTotp(app.state, sub, secret) }));
 }
 
 const readSecrets = (userId) => app.state.storage.userRepository.findById(userId, { select: '+mfaSecret +mfaTempSecret' });

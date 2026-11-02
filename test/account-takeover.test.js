@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generate as generateTotp } from 'otplib';
-import { buildTestApp, withTemporaryApp, uniqueEmail, TEST_SECURITY } from './helpers/build-test-app.js';
+import { buildTestApp, withTemporaryApp, uniqueEmail, TEST_SECURITY, freshTotp } from './helpers/build-test-app.js';
 import { json } from './helpers/serve.js';
 
 // Account-takeover paths found in the 0.3.0 audit:
@@ -111,7 +111,7 @@ test('magic-link login stops at the MFA challenge when the account has MFA', asy
     assert.equal(body.accessToken, undefined, 'no session before the second factor');
     assert.equal(body.refreshToken, undefined);
 
-    const verify = await post('/mfa/verify', { mfaChallengeToken: body.mfaChallengeToken, code: await generateTotp({ secret }) });
+    const verify = await post('/mfa/verify', { mfaChallengeToken: body.mfaChallengeToken, code: await freshTotp(app.state, first.body.userId, secret) });
     assert.equal(verify.status, 200);
     assert.ok((await verify.json()).accessToken);
 });
@@ -157,7 +157,10 @@ test('verify-email brute force: the code dies after the attempt budget, even for
         const { verificationCode } = lastCodeFor(email, temp);
         const wrong = verificationCode === '123456' ? '654321' : '123456';
 
-        for (let i = 0; i < 3; i += 1) assert.equal((await p('/register/verify-email', { email, code: wrong })).status, 400);
+        for (let i = 0; i < 2; i += 1) assert.equal((await p('/register/verify-email', { email, code: wrong })).status, 400);
+        const exhausting = await p('/register/verify-email', { email, code: wrong });
+        assert.equal(exhausting.status, 429, 'the wrong attempt that uses up the budget already answers locked');
+        assert.equal((await exhausting.json()).error, 'VERIFICATION_LOCKED');
         const locked = await p('/register/verify-email', { email, code: verificationCode });
         assert.equal(locked.status, 429, 'the right code is refused once the budget is spent');
         assert.equal((await locked.json()).error, 'VERIFICATION_LOCKED');
@@ -181,8 +184,12 @@ test('verify-email brute force: a concurrent burst gets no more guesses than the
         // 40 simultaneous wrong guesses: with check-then-count, all 40 would be checked.
         const guesses = Array.from({ length: 40 }, (_, i) => String((Number(verificationCode) + 1 + i) % 1000000).padStart(6, '0'));
         const statuses = await Promise.all(guesses.map(async (code) => (await fetch(`${temp.baseUrl}/register/verify-email`, json({ email, code }))).status));
-        assert.equal(statuses.filter((s) => s === 400).length, 5, `exactly the budget is checked (got ${statuses.join(',')})`);
-        assert.equal(statuses.filter((s) => s === 429).length, 35);
+        // Exactly 5 guesses are checked: 4 answer "wrong", the 5th uses up the budget (locked, one
+        // audit event); the other 35 are refused before their code is looked at.
+        assert.equal(statuses.filter((s) => s === 400).length, 4, `exactly the budget is checked (got ${statuses.join(',')})`);
+        assert.equal(statuses.filter((s) => s === 429).length, 36);
+        const user = await temp.state.storage.userRepository.findByEmail(email);
+        assert.equal(temp.hookCalls.onAuditLog.filter((e) => e.action === 'EMAIL_VERIFICATION_LOCKED' && e.userId === String(user.id)).length, 1);
         assert.equal((await fetch(`${temp.baseUrl}/register/verify-email`, json({ email, code: verificationCode }))).status, 429);
     });
 });

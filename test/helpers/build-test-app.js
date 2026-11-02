@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import express from 'express';
 import cookieParserLib from 'cookie-parser';
 import { MongoMemoryReplSet } from 'mongodb-memory-server';
+import { generate as generateTotp } from 'otplib';
 import { initIdentityProvider } from '../../src/index.js';
 import { buildRouter } from '../../src/routes/build-router.js';
 import { getState, setState } from '../../src/config/state.js';
@@ -165,6 +166,17 @@ export const TEST_SECURITY = Object.freeze({
     tokenHashSecret: 'test-token-hash-secret-do-not-use-in-prod',
     bcryptRounds: 4, // fast for tests
 });
+
+/**
+ * A TOTP code the IdP will accept for this account even if the current code was already used: each
+ * code is accepted once (a replay is refused), so a test that completes several MFA steps within one
+ * 30s window stands in for "wait for the authenticator's next code" by forgetting the last used step.
+ * Tests ABOUT replay must not use this — see mfa-hardening.test.js.
+ */
+export async function freshTotp(state, userId, secret) {
+    await state.storage.userRepository.updateById(userId, { mfaLastTotpStep: null });
+    return generateTotp({ secret });
+}
 
 export function uniqueEmail(prefix = 'test') {
     return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;

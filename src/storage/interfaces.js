@@ -23,6 +23,11 @@
  * @property {(provider: string, providerId: string) => Promise<object|null>} findByExternalProvider
  * @property {(id: string, patch: object, opts?: object) => Promise<object|null>} updateById
  * @property {(id: string) => Promise<object|null>} incrementFailedLoginAttempts - atomic $inc, returns the post-increment document
+ * @property {(id: string, step: number) => Promise<boolean>} [claimTotpStep] - ATOMIC: set `mfaLastTotpStep = step`
+ *   only if it is unset or lower; resolve whether this call set it. Keeps a TOTP code from being accepted twice.
+ *   Optional for now (a non-atomic fallback is used, with a startup warning).
+ * @property {(id: string, codeHash: string) => Promise<boolean>} [consumeRecoveryCode] - ATOMIC: set `usedAt` on the
+ *   one unused recovery code with this hash; resolve whether one was. Optional for now, as above.
  * @property {(id: string, link: {provider, providerId, email, connectedAt}) => Promise<object>} linkExternalProvider
  * @property {(id: string) => Promise<void>} deleteById
  * @property {() => Promise<number>} countAll

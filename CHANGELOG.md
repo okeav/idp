@@ -78,6 +78,33 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   `EMAIL_ALREADY_VERIFIED`. Both now answer the same for every address (verify: 400
   `INVALID_OR_EXPIRED_TOKEN`; resend: `{ status: 'ok' }`). **Upgrade:** a second click on an
   already-used verification link now gets 400 instead of `ok`.
+- **The per-account MFA lockout could be raced (High).** 0.3.0 checked the lock, then the code, and
+  only then counted a failure, so a burst of concurrent requests had every guess checked (1,000
+  parallel guesses against a limit of 5 were all evaluated). Attempts are now counted *before* the
+  code is checked: the counter's atomic increment is the gate, so a burst gets exactly
+  `mfa.lockout.maxFailedAttempts` guesses. A success still resets the count. As before, the wrong
+  guess that exhausts the budget answers 429 `MFA_LOCKED`, and so does every attempt while locked.
+  (An attempt that fails for another reason, e.g. an expired WebAuthn challenge, now also counts.)
+- **TOTP codes and MFA challenge tokens could be replayed (Medium).** A code was accepted any number
+  of times within its ±30 s window (including the code that confirmed enrolment), and a challenge
+  token could complete any number of logins for its 5 minutes. Each account now records the last
+  accepted TOTP time step (atomically) and refuses that step or an earlier one; a challenge token
+  completes one login only, and one issued before the account's last password change is void.
+  **Upgrade:** a user can't log in twice with the same code — they wait for the next one.
+- **A recovery code could be spent twice by concurrent requests**, and the write marked a code *by
+  index*, so a concurrent regeneration could mark the wrong code. Recovery codes are now spent with
+  one atomic conditional update. They are also accepted regardless of case and surrounding spaces.
+- **`POST /me/mfa/recovery-codes` needed only the password** — anyone with a session and the
+  password could mint fresh second factors. It now also requires a current TOTP `code`.
+  **Upgrade:** send `{ password, code }`.
+- **Passwordless accounts could not disable MFA or regenerate recovery codes** (both demanded a
+  password the account doesn't have). `password` is now required only when the account has one.
+- Wrong MFA codes no longer also count toward the *password* lockout (`failedLoginAttempts`); the
+  MFA lockout has its own counter.
+- Storage interface: `UserRepository.claimTotpStep(id, step)` and
+  `UserRepository.consumeRecoveryCode(id, codeHash)` (both atomic, both optional for now — without
+  them a non-atomic fallback is used and a startup warning is logged). The built-in Mongo adapter
+  implements both; users get an `mfaLastTotpStep` field.
 - **Password login on a passwordless account returned 500** (bcrypt threw on the missing hash),
   revealing which accounts are SSO/magic-link only. `verifyPassword` now returns false (after the
   same dummy work) for an account without a password.

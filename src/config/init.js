@@ -64,6 +64,10 @@ export async function initIdentityProvider(config) {
         attemptCounters = new MemoryAttemptCounterRepository();
         logger.warn({}, '@okeav/idp-core: storage adapter has no attemptCounterRepository — the per-account MFA lockout is counted in-process only (not shared across instances). Upgrade the adapter.');
     }
+    const missingAtomic = ['claimTotpStep', 'consumeRecoveryCode'].filter((m) => typeof storage.userRepository?.[m] !== 'function');
+    if (missingAtomic.length > 0) {
+        logger.warn({}, `@okeav/idp-core: storage adapter's userRepository has no ${missingAtomic.join('/')}() — TOTP replay and recovery-code reuse are checked with a non-atomic read-then-write, which concurrent requests can race. Upgrade the adapter.`);
+    }
     if (resolved.session.verifyOnEachRequest && typeof storage.sessionRepository?.findByJti !== 'function') {
         logger.warn({}, '@okeav/idp-core: session.verifyOnEachRequest is on but the storage adapter\'s sessionRepository has no findByJti() — falling back to the per-process revocation cache, so logout-all/password reset will NOT revoke access tokens before they expire. Upgrade the adapter.');
     }
