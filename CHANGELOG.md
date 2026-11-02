@@ -127,6 +127,30 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   (RFC 9207). `GET /oauth2/consent` validates its query (`?client_id[$ne]=` reached the database
   on Express 4), and hides clients that aren't active.
 - **Logout didn't clear cookies when `cookies.domain` was set** (they were cleared host-only).
+- **Stolen refresh tokens went undetected (Medium).** Replaying an already-rotated refresh token was
+  simply refused, so whoever rotated first (the thief) kept the chain. Refresh tokens now belong to a
+  *family* (one login, or one authorization code); a rotated token presented again revokes the whole
+  family — on `/refresh` and the OAuth2 grant alike — and emits `REFRESH_TOKEN_REUSE_DETECTED`.
+  Within `session.refreshReuseGraceSeconds` (default 10 s; two tabs refreshing at once) a replay is
+  only refused. Redeeming an authorization code twice now revokes everything the first redemption
+  issued (`OAUTH2_CODE_REUSE_DETECTED`).
+- **Sessions never ended while in use.** Each refresh slid the expiry another 30 days. A family now
+  ends `session.absoluteLifetimeSeconds` (default 90 days) after its login, and no refresh token
+  outlives that.
+- **A refresh racing "log out everywhere" could survive it.** Logout-all, password reset/change and
+  account deletion now record `sessionsRevokedAt` on the user before revoking, and a refresh
+  re-checks it after writing its successor.
+- **The `onNewDeviceLogin` alert never fired:** the check ran after the login's own session row was
+  written, so the device was always "known". It now runs before.
+- **A locked account told right passwords from wrong ones** (423 vs 401), turning the lockout into
+  an oracle. While locked, every password gets the same 401 `INVALID_CREDENTIALS`; a password reset
+  lifts the lock.
+- **Password reset hygiene.** A new reset request invalidates earlier links, a completed reset
+  invalidates every outstanding one, deleted accounts are not sent links, and requests are limited
+  per address as well as per IP (`rateLimiting.passwordResetByEmail`).
+- Storage interface (optional for now, with graceful degradation): `SessionRepository.revokeFamily`,
+  `revokeForClient`, `AuthorizationCodeRepository.findUsedByCodeHash`; `revokeByRefreshTokenHash`
+  takes `{ reason }`. Session rows gain `kind`, `authTime`, `familyId`, `familyCreatedAt`.
 - **The per-account MFA lockout could be raced (High).** 0.3.0 checked the lock, then the code, and
   only then counted a failure, so a burst of concurrent requests had every guess checked (1,000
   parallel guesses against a limit of 5 were all evaluated). Attempts are now counted *before* the

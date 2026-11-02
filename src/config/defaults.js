@@ -18,7 +18,13 @@ export function withDefaults(config = {}) {
         // logout-all / password reset takes effect on every instance at once.
         // recentAuthMaxAgeSeconds: how recent a login must be for requireRecentAuth (passkey / MFA
         // enrolment, account and passkey deletion).
-        session: { reresolveClaimsOnRefresh: false, verifyOnEachRequest: true, recentAuthMaxAgeSeconds: 15 * 60, ...config.session },
+        session: { reresolveClaimsOnRefresh: false, verifyOnEachRequest: true, recentAuthMaxAgeSeconds: 15 * 60,
+            // A refresh-token family (one login) ends after this however actively it's refreshed.
+            absoluteLifetimeSeconds: 90 * 24 * 60 * 60,
+            // A rotated refresh token presented again within this window (two tabs refreshing at
+            // once) is just refused; after it, it revokes the whole family as a stolen-token signal.
+            refreshReuseGraceSeconds: 10,
+            ...config.session },
         ttls: { ...DEFAULT_TTL_SECONDS, ...config.ttls },
         security: {
             maxFailedLoginAttempts: 5,
@@ -60,6 +66,7 @@ export function withDefaults(config = {}) {
             login: { ...DEFAULT_RATE_LIMITS.loginPerIp, ...config.rateLimiting?.login },
             loginByEmail: { ...DEFAULT_RATE_LIMITS.loginPerEmail, ...config.rateLimiting?.loginByEmail },
             passwordReset: { ...DEFAULT_RATE_LIMITS.passwordResetPerIp, ...config.rateLimiting?.passwordReset },
+            passwordResetByEmail: { ...DEFAULT_RATE_LIMITS.passwordResetPerEmail, ...config.rateLimiting?.passwordResetByEmail },
             mfaChallenge: { ...DEFAULT_RATE_LIMITS.mfaChallengePerIp, ...config.rateLimiting?.mfaChallenge },
             refreshToken: { ...DEFAULT_RATE_LIMITS.refreshTokenPerIp, ...config.rateLimiting?.refreshToken },
             magicLink: { ...DEFAULT_RATE_LIMITS.magicLinkPerIp, ...config.rateLimiting?.magicLink },

@@ -111,6 +111,7 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
     loginPerIp: { max: 10, windowSeconds: 15 * 60 },
     loginPerEmail: { max: 5, windowSeconds: 15 * 60 },
     passwordResetPerIp: { max: 3, windowSeconds: 60 * 60 },
+    passwordResetPerEmail: { max: 3, windowSeconds: 60 * 60 },
     mfaChallengePerIp: { max: 5, windowSeconds: 15 * 60 },
     refreshTokenPerIp: { max: 30, windowSeconds: 60 },
     magicLinkPerIp: { max: 3, windowSeconds: 60 * 60 },

@@ -104,6 +104,10 @@ export interface IdpConfig {
         verifyOnEachRequest?: boolean;
         /** How recent (seconds) a login must be for `requireRecentAuth` — passkey/MFA enrolment, passkey and account deletion. Default 900. */
         recentAuthMaxAgeSeconds?: number;
+        /** A login's refresh-token family ends after this however actively it is refreshed. Default 90 days. */
+        absoluteLifetimeSeconds?: number;
+        /** A rotated refresh token replayed within this many seconds is only refused; later, it revokes its whole family. Default 10. */
+        refreshReuseGraceSeconds?: number;
     };
     ttls?: Partial<{
         accessToken: number; idToken: number; refreshToken: number; internalToken: number;
@@ -198,6 +202,8 @@ export interface IdpConfig {
         login?: RateLimitRule;
         loginByEmail?: RateLimitRule;
         passwordReset?: RateLimitRule;
+        /** Password-reset requests per address. Default 3/hour. */
+        passwordResetByEmail?: RateLimitRule;
         mfaChallenge?: RateLimitRule;
         refreshToken?: RateLimitRule;
         magicLink?: RateLimitRule;

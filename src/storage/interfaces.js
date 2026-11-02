@@ -40,7 +40,15 @@
  *   session whose `jti` matches an access token's `jti`. Called once per authenticated request when
  *   `config.session.verifyOnEachRequest` is on (the default), so it must be an indexed lookup. Optional
  *   for now: an adapter without it falls back to the per-process revocation cache, with a startup warning.
- * @property {(hash: string, opts?: {onlyIfActive?: boolean}) => Promise<object|null>} revokeByRefreshTokenHash
+ * @property {(hash: string, opts?: {onlyIfActive?: boolean, reason?: string}) => Promise<object|null>} revokeByRefreshTokenHash -
+ *   ATOMIC consume; resolves the row as it was BEFORE revocation. Must persist `reason` as `revokeReason`
+ *   ('rotated' on refresh) — that is how a replayed rotated token is recognised.
+ * @property {(familyId: string, opts?: {reason?: string}) => Promise<{revokedCount: number, jtis: string[]}>} [revokeFamily] -
+ *   revokes every live row with this `familyId` (refresh-token reuse / authorization-code reuse). Optional for now:
+ *   without it, reuse is only refused, not punished.
+ * @property {(clientId: string, opts?: {userId?: string}) => Promise<{revokedCount: number, jtis: string[]}>} [revokeForClient] -
+ *   revokes a client's live OAuth2 rows (one user's, or all). Used by consent revocation, client deactivation, end-session.
+ *   Session rows also carry `kind`, `authTime`, `familyId`, `familyCreatedAt` — persist them as given.
  * @property {(id: string, userId: string) => Promise<object|null>} revokeById
  * @property {(userId: string, opts?: {exceptTokenHash?: string}) => Promise<{revokedCount: number}>} revokeAllForUser
  * @property {(userId: string) => Promise<object[]>} listActiveForUser
@@ -53,6 +61,8 @@
  * @typedef {Object} AuthorizationCodeRepository
  * @property {(input: object) => Promise<void>} create
  * @property {(hash: string) => Promise<object|null>} consumeByCodeHash
+ * @property {(hash: string) => Promise<object|null>} [findUsedByCodeHash] - an already-redeemed code (for reuse
+ *   detection: its first redemption's tokens are revoked). Codes also carry `nonce` and `authTime`.
  * @property {() => Promise<{deletedCount: number}>} [pruneExpired]
  *
  * @typedef {Object} ConsentRepository

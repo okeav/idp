@@ -29,11 +29,20 @@ export class MongoSessionRepository {
     }
 
     /** Atomic find+revoke — only one concurrent caller can successfully consume a given refresh token. */
-    async revokeByRefreshTokenHash(hash, { onlyIfActive = true } = {}) {
+    async revokeByRefreshTokenHash(hash, { onlyIfActive = true, reason = 'revoked' } = {}) {
         const filter = onlyIfActive
             ? { tokenHash: hash, revokedAt: null, expiresAt: { $gt: new Date() } }
             : { tokenHash: hash, revokedAt: null };
-        return this.model.findOneAndUpdate(filter, { revokedAt: new Date() }, { returnDocument: 'before' });
+        return this.model.findOneAndUpdate(filter, { revokedAt: new Date(), revokeReason: reason }, { returnDocument: 'before' });
+    }
+
+    /** Revokes every live row of a refresh-token family. Returns the revoked jtis. */
+    async revokeFamily(familyId, { reason = 'family_revoked' } = {}) {
+        if (!familyId) return { revokedCount: 0, jtis: [] };
+        const filter = { familyId, revokedAt: null };
+        const jtis = (await this.model.find(filter).select('jti').lean()).map((d) => d.jti).filter(Boolean);
+        const result = await this.model.updateMany(filter, { revokedAt: new Date(), revokeReason: reason });
+        return { revokedCount: result.modifiedCount ?? 0, jtis };
     }
 
     async revokeById(id, userId) {

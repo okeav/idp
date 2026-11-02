@@ -5,14 +5,11 @@ import { IDENTITY_STATUS, COOKIE_NAMES, CACHE_KEY_PREFIXES, SESSION_KINDS } from
 import { sessionKindOf } from '../utils/session-kind.js';
 import { issueAccessToken, issueMfaChallengeToken, hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
 import { hashPassword, verifyPassword, compareDummyPassword } from '../utils/password.js';
-import { buildDeviceFingerprint, detectAndNotifyNewDevice } from '../utils/device-fingerprint.js';
+import { buildDeviceFingerprint, notifyNewDevice } from '../utils/device-fingerprint.js';
+import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked } from '../utils/session-family.js';
 import { auditLog, safeInvokeHook } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { withAttemptBudget } from '../security/attempt-budget.js';
-
-function refreshTokenExpiresAt(state) {
-    return new Date(Date.now() + state.config.ttls.refreshToken * 1000);
-}
 
 function cookieOptions(state) {
     const c = state.config.cookies || {};
@@ -40,10 +37,14 @@ async function issueSession(state, { user, claims, req }) {
 
     // Every caller of issueSession has just authenticated the user (password+MFA, magic link, SSO, passkey).
     const authTime = Math.floor(Date.now() / 1000);
+    const familyCreatedAt = new Date(authTime * 1000);
     const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims }, { authTime });
     const refreshTokenValue = generateOpaqueToken();
     const refreshTokenHash = hashOpaqueToken(state, refreshTokenValue);
-    const expiresAt = refreshTokenExpiresAt(state);
+    const expiresAt = cappedExpiry(state, familyCreatedAt, state.config.ttls.refreshToken);
+
+    // Decided BEFORE this login's own session row exists — afterwards the device is always "known".
+    const isNewDevice = await isNewDeviceForUser(state, { user, deviceInfo, deviceFingerprint, wasFirstLogin });
 
     await state.storage.sessionRepository.createSessionForLogin({
         accessTokenAudit: { user: user.id, tokenHash: hashOpaqueToken(state, accessToken.token), expiresAt: accessToken.expiresAt, kid: accessToken.kid, jti: accessToken.jti, ipAddress: req.ip, deviceInfo },
@@ -61,18 +62,32 @@ async function issueSession(state, { user, claims, req }) {
             deviceInfo,
             deviceFingerprint,
             kind: SESSION_KINDS.FIRST_PARTY,
-            authTime: new Date(authTime * 1000),
+            authTime: familyCreatedAt,
+            familyId: newFamilyId(),
+            familyCreatedAt,
             claims,
         },
         userId: user.id,
         lastLoginAt: new Date(),
     });
 
-    detectAndNotifyNewDevice({ sessionRepository: state.storage.sessionRepository, hooks: state.hooks, logger: state.logger, req, user, wasFirstLogin }).catch((err) => {
-        state.logger?.warn?.({ err }, 'New-device detection failed (non-fatal)');
-    });
+    if (isNewDevice) {
+        notifyNewDevice({ hooks: state.hooks, logger: state.logger, req, user }).catch((err) => {
+            state.logger?.warn?.({ err }, 'New-device notification failed (non-fatal)');
+        });
+    }
 
     return { accessToken, refreshTokenValue, refreshExpiresAt: expiresAt };
+}
+
+async function isNewDeviceForUser(state, { user, deviceInfo, deviceFingerprint, wasFirstLogin }) {
+    if (wasFirstLogin || !deviceInfo) return false;
+    try {
+        return !(await state.storage.sessionRepository.existsForDevice(user.id, deviceFingerprint, deviceInfo));
+    } catch (err) {
+        state.logger?.warn?.({ err }, 'New-device detection failed (non-fatal)');
+        return false;
+    }
 }
 
 /** Clears both session cookies with the attributes they were set with — a clear without the same `domain`/`path` leaves a domain cookie in place. */
@@ -248,6 +263,14 @@ export async function loginHandler(req, res, next) {
 
         const passwordValid = user ? await verifyPassword(password, user.passwordHash) : (await compareDummyPassword(password), false);
 
+        // While an account is locked, the right password and a wrong one get the same answer — otherwise
+        // the lock becomes a password oracle: guessing continues, and the one guess answered "locked"
+        // instead of "invalid" is the password, ready for when the lock lifts. (The lock itself was
+        // announced through onSuspiciousActivityDetected; a password reset lifts it.)
+        if (user?.status === IDENTITY_STATUS.LOCKED) {
+            throw new IdpError({ code: 'INVALID_CREDENTIALS', httpStatus: 401, message: 'Invalid email or password' });
+        }
+
         if (!user || !passwordValid) {
             if (user && user.status === IDENTITY_STATUS.ACTIVE) {
                 await handleFailedLogin(state, user);
@@ -330,8 +353,11 @@ export async function refreshTokenHandler(req, res, next) {
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required' });
 
         const tokenHash = hashOpaqueToken(state, refreshTokenValue);
-        const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash);
-        if (!existing) throw new IdpError({ code: 'INVALID_REFRESH_TOKEN', httpStatus: 401, message: 'Invalid or expired refresh token' });
+        const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash, { reason: 'rotated' });
+        if (!existing) {
+            await handleRefreshReuse(state, tokenHash);
+            throw new IdpError({ code: 'INVALID_REFRESH_TOKEN', httpStatus: 401, message: 'Invalid or expired refresh token' });
+        }
         // An OAuth2 client's refresh token is redeemable only at /oauth2/token by that client — never
         // here, where it would mint a first-party session without client authentication. The row was
         // just consumed above; it stays revoked, since a client token showing up here means it leaked.
@@ -354,10 +380,16 @@ export async function refreshTokenHandler(req, res, next) {
         // A refresh is not an authentication: the original login time carries over (a row from
         // before 0.4.0 has none, which requireRecentAuth treats as "not recent").
         const authTime = existing.authTime ? Math.floor(new Date(existing.authTime).getTime() / 1000) : undefined;
+        // The family's absolute end applies however actively it's been refreshed.
+        const { familyId, familyCreatedAt } = familyOf(existing);
+        if (familyEndsAt(state, familyCreatedAt) <= new Date()) {
+            throw new IdpError({ code: 'INVALID_REFRESH_TOKEN', httpStatus: 401, message: 'Session has reached its maximum lifetime — please sign in again' });
+        }
+
         const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims }, { authTime });
         const newRefreshTokenValue = generateOpaqueToken();
         const newRefreshTokenHash = hashOpaqueToken(state, newRefreshTokenValue);
-        const refreshExpiresAt = refreshTokenExpiresAt(state);
+        const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, state.config.ttls.refreshToken);
         const deviceInfo = req.headers['user-agent'] || existing.deviceInfo || '';
 
         await state.storage.sessionRepository.createSession({
@@ -371,8 +403,11 @@ export async function refreshTokenHandler(req, res, next) {
             deviceFingerprint: buildDeviceFingerprint(deviceInfo),
             kind: SESSION_KINDS.FIRST_PARTY,
             authTime: existing.authTime ?? null,
+            familyId,
+            familyCreatedAt,
             claims,
         });
+        await assertChainNotRevoked(state, user.id, existing.createdAt, newRefreshTokenHash);
 
         await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${existing.jti}`, '1', state.config.ttls.revocationCache);
 
@@ -410,7 +445,7 @@ export async function logoutAllHandler(req, res, next) {
         const state = getState();
         if (!req.auth?.userId) throw new IdpError({ code: 'UNAUTHENTICATED', httpStatus: 401, message: 'Authentication required' });
 
-        await state.storage.sessionRepository.revokeAllForUser(req.auth.userId);
+        await revokeAllUserSessions(state, req.auth.userId);
         await auditLog(state.logger, state.hooks, 'LOGOUT_ALL', { userId: req.auth.userId });
         res.json({ status: 'ok' });
     } catch (err) {
@@ -426,10 +461,14 @@ export async function forgotPasswordHandler(req, res, next) {
         const { email } = req.body;
 
         await enforceRateLimit(state, `password-reset:ip:${req.ip}`, state.config.rateLimiting.passwordReset, { failMode: 'closed' });
+        // Per address too: per-IP alone lets a distributed sender flood one inbox.
+        await enforceRateLimit(state, `password-reset:email:${state.normalizeEmail(email)}`, state.config.rateLimiting.passwordResetByEmail, { failMode: 'closed' });
 
         const user = await state.storage.userRepository.findByEmail(email);
-        if (!user) return res.json({ status: 'ok' }); // enumeration-safe
+        if (!user || user.status === IDENTITY_STATUS.DELETED) return res.json({ status: 'ok' }); // enumeration-safe
 
+        // Only the newest link works: requesting another invalidates the earlier ones.
+        await state.storage.verificationTokenRepository.deleteAllForUser('password_reset', user.id);
         const resetToken = generateOpaqueToken(32);
         await state.storage.verificationTokenRepository.create('password_reset', {
             user: user.id,
@@ -459,8 +498,13 @@ export async function resetPasswordHandler(req, res, next) {
         if (!record) throw new IdpError({ code: 'INVALID_OR_EXPIRED_TOKEN', httpStatus: 400, message: 'Invalid or expired token' });
 
         const passwordHash = await hashPassword(newPassword, state.config.security.bcryptRounds);
-        await state.storage.userRepository.updateById(record.user, { passwordHash, passwordChangedAt: new Date() });
-        await state.storage.sessionRepository.revokeAllForUser(record.user);
+        // Proving the inbox and setting a new password also lifts a lockout (the lock exists to stop
+        // password guessing — the guessed password is gone).
+        const unlock = user.status === IDENTITY_STATUS.LOCKED ? { status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null } : {};
+        await state.storage.userRepository.updateById(record.user, { passwordHash, passwordChangedAt: new Date(), ...unlock });
+        await revokeAllUserSessions(state, record.user);
+        // Any other outstanding reset links die with this one.
+        await state.storage.verificationTokenRepository.deleteAllForUser('password_reset', record.user);
 
         await auditLog(state.logger, state.hooks, 'PASSWORD_RESET', { userId: String(record.user) });
         res.json({ status: 'ok' });
@@ -484,7 +528,7 @@ export async function changePasswordHandler(req, res, next) {
 
         const passwordHash = await hashPassword(newPassword, state.config.security.bcryptRounds);
         await state.storage.userRepository.updateById(userId, { passwordHash, passwordChangedAt: new Date() });
-        await state.storage.sessionRepository.revokeAllForUser(userId);
+        await revokeAllUserSessions(state, userId);
 
         await auditLog(state.logger, state.hooks, 'PASSWORD_CHANGED', { userId });
         await safeInvokeHook(state.logger, state.hooks, 'onPasswordChanged', {
@@ -552,7 +596,7 @@ export async function deleteMeHandler(req, res, next) {
         const user = await state.storage.userRepository.updateById(req.auth.userId, { status: IDENTITY_STATUS.DELETED });
         if (!user) throw new IdpError({ code: 'USER_NOT_FOUND', httpStatus: 404, message: 'User not found' });
 
-        await state.storage.sessionRepository.revokeAllForUser(req.auth.userId);
+        await revokeAllUserSessions(state, req.auth.userId);
         await auditLog(state.logger, state.hooks, 'ACCOUNT_DELETED', { userId: req.auth.userId });
         res.json({ status: 'ok' });
     } catch (err) {
@@ -593,7 +637,7 @@ export async function revokeAllSessionsHandler(req, res, next) {
         const state = getState();
         if (!req.auth?.userId) throw new IdpError({ code: 'UNAUTHENTICATED', httpStatus: 401, message: 'Authentication required' });
 
-        const result = await state.storage.sessionRepository.revokeAllForUser(req.auth.userId);
+        const result = await revokeAllUserSessions(state, req.auth.userId);
         await auditLog(state.logger, state.hooks, 'SESSIONS_REVOKED_ALL', { userId: req.auth.userId, revokedCount: result.revokedCount });
         res.json({ status: 'ok', revokedCount: result.revokedCount });
     } catch (err) {
@@ -601,4 +645,4 @@ export async function revokeAllSessionsHandler(req, res, next) {
     }
 }
 
-export { issueSession, setSessionCookies, clearSessionCookies, resolveClaims, cookieOptions, refreshTokenExpiresAt, assertUsableStatus, mfaChallengeResponse };
+export { issueSession, setSessionCookies, clearSessionCookies, resolveClaims, cookieOptions, assertUsableStatus, mfaChallengeResponse };

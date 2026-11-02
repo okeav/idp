@@ -41,9 +41,9 @@ export async function initIdentityProvider(config) {
     if (!['all', 'public'].includes(resolved.oauth2.requirePkce)) {
         throw new Error("config.oauth2.requirePkce must be 'all' or 'public'");
     }
-    const { recentAuthMaxAgeSeconds } = resolved.session;
-    if (!Number.isInteger(recentAuthMaxAgeSeconds) || recentAuthMaxAgeSeconds < 1) {
-        throw new Error(`config.session.recentAuthMaxAgeSeconds must be a positive integer (got ${recentAuthMaxAgeSeconds})`);
+    for (const [name, min] of [['recentAuthMaxAgeSeconds', 1], ['absoluteLifetimeSeconds', 1], ['refreshReuseGraceSeconds', 0]]) {
+        const value = resolved.session[name];
+        if (!Number.isInteger(value) || value < min) throw new Error(`config.session.${name} must be an integer >= ${min} (got ${value})`);
     }
     const webhookDispatcher = new WebhookDispatcher(resolved.webhooks, logger);
     const hooks = wrapHooksWithWebhooks(mergeHooks(resolved.hooks), webhookDispatcher);

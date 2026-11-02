@@ -29,6 +29,12 @@ export function defineSessionModel(connection) {
             // across refresh rotations; becomes the access token's `auth_time`.
             authTime: { type: Date, default: null },
 
+            // Refresh-token family: every row produced by rotating one login's (or one authorization
+            // code's) refresh token shares a familyId. Presenting an already-rotated token revokes the
+            // whole family (theft detection); familyCreatedAt bounds the family's absolute lifetime.
+            familyId: { type: String, default: null },
+            familyCreatedAt: { type: Date, default: null },
+
             // Opaque snapshot of whatever the consumer put in the access token's
             // `claims` at the time this session was created — carried here so a
             // refresh can re-mint an access token without an outbound call back
@@ -45,6 +51,7 @@ export function defineSessionModel(connection) {
     schema.index({ tokenHash: 1, revokedAt: 1 });
     schema.index({ user: 1, revokedAt: 1, expiresAt: 1 });
     schema.index({ jti: 1 }, { sparse: true });
+    schema.index({ familyId: 1, revokedAt: 1 }, { sparse: true });
     schema.index({ user: 1, deviceFingerprint: 1 }, { sparse: true });
 
     schema.plugin(mongoIdPlugin);

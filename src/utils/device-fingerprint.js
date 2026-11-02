@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { safeInvokeHook } from '../hooks/index.js';
 
 /**
  * Reduces a raw user-agent string to a stable "browser-family + os-family"
@@ -39,22 +40,11 @@ export function buildDeviceFingerprint(rawUserAgent) {
 }
 
 /**
- * Decides whether the current login is from a device this user hasn't
- * authenticated from before, and fires `onNewDeviceLogin` if so. Skipped on
- * a user's very first-ever login (nothing to compare against, and the
- * alert adds no value right after signup).
+ * Fires `onNewDeviceLogin`. Whether the device is new is decided by the caller BEFORE the login's own
+ * session row is written (see issueSession) — checking afterwards always finds that row, which is
+ * why the alert never fired before 0.4.0.
  */
-export async function detectAndNotifyNewDevice({ sessionRepository, hooks, logger, req, user, wasFirstLogin }) {
-    const currentDeviceInfo = req.headers?.['user-agent'] || '';
-    const fingerprint = buildDeviceFingerprint(currentDeviceInfo);
-
-    if (wasFirstLogin || !currentDeviceInfo) return { isNewDevice: false, deviceFingerprint: fingerprint };
-
-    const known = await sessionRepository.existsForDevice(user.id, fingerprint, currentDeviceInfo);
-    const isNewDevice = !known;
-    if (!isNewDevice) return { isNewDevice, deviceFingerprint: fingerprint };
-
-    const { safeInvokeHook } = await import('../hooks/index.js');
+export async function notifyNewDevice({ hooks, logger, req, user }) {
     await safeInvokeHook(logger, hooks, 'onNewDeviceLogin', {
         userId: String(user.id),
         email: user.email,
@@ -62,9 +52,7 @@ export async function detectAndNotifyNewDevice({ sessionRepository, hooks, logge
         lastName: user.profile?.lastName || '',
         locale: user.profile?.locale || 'en',
         when: new Date().toISOString(),
-        deviceInfo: currentDeviceInfo,
+        deviceInfo: req.headers?.['user-agent'] || '',
         ipAddress: req.ip || '',
     });
-
-    return { isNewDevice, deviceFingerprint: fingerprint };
 }

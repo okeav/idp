@@ -17,6 +17,9 @@ export function defineIdentityUserModel(connection, { hashEmail }) {
             status: { type: String, enum: Object.values(IDENTITY_STATUS), default: IDENTITY_STATUS.PENDING_VERIFICATION },
             lastLoginAt: { type: Date },
             passwordChangedAt: { type: Date },
+            // Set (before the rows are revoked) by every "revoke all of this user's sessions" — a refresh
+            // racing it re-checks this, so it can't leave a session alive.
+            sessionsRevokedAt: { type: Date, default: null },
             failedLoginAttempts: { type: Number, default: 0 },
             lockUntil: { type: Date, default: null },
 

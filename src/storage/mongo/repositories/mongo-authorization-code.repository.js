@@ -17,6 +17,11 @@ export class MongoAuthorizationCodeRepository {
         );
     }
 
+    /** A code that was already redeemed (for reuse detection). Null for an unknown or still-unused code. */
+    async findUsedByCodeHash(hash) {
+        return this.model.findOne({ code: hash, used: true });
+    }
+
     async pruneExpired() {
         return { deletedCount: 0 }; // native TTL index handles cleanup
     }

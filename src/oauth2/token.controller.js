@@ -7,6 +7,7 @@ import { sessionKindOf } from '../utils/session-kind.js';
 import { authenticateClient } from './client-auth.js';
 import { auditLog } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
+import { familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeFamily, assertChainNotRevoked } from '../utils/session-family.js';
 
 const INVALID_GRANT = (message) => new IdpError({ code: 'INVALID_GRANT', httpStatus: 400, message });
 
@@ -25,6 +26,21 @@ function verifyPkce(codeVerifier, authCode) {
     const computed = Buffer.from(crypto.createHash('sha256').update(codeVerifier).digest('base64url'));
     const stored = Buffer.from(authCode.codeChallenge);
     if (computed.length !== stored.length || !crypto.timingSafeEqual(computed, stored)) throw INVALID_GRANT('PKCE verification failed');
+}
+
+const codeFamilyId = (authCode) => `code:${authCode.id ?? authCode._id}`;
+
+/**
+ * A code that doesn't redeem may be one that already did (RFC 6749 §4.1.2): someone else holds it.
+ * Everything issued from its first redemption is revoked.
+ */
+async function handleCodeReuse(state, codeHash) {
+    const repo = state.storage.authorizationCodeRepository;
+    if (typeof repo.findUsedByCodeHash !== 'function') return;
+    const used = await repo.findUsedByCodeHash(codeHash);
+    if (!used) return;
+    const revokedSessions = await revokeFamily(state, codeFamilyId(used), 'code_reuse_detected');
+    await auditLog(state.logger, state.hooks, 'OAUTH2_CODE_REUSE_DETECTED', { userId: String(used.userId), clientId: used.clientId, revokedSessions });
 }
 
 /** A client must be explicitly registered for the grant it's trying to use — `allowedGrants` isn't decorative. */
@@ -69,8 +85,12 @@ async function handleAuthorizationCodeGrant(req, res) {
 
     const client = await authenticateClient(state, req);
     assertGrantAllowed(client, GRANT_TYPES.AUTHORIZATION_CODE);
-    const authCode = await state.storage.authorizationCodeRepository.consumeByCodeHash(hashOpaqueToken(state, code));
-    if (!authCode) throw INVALID_GRANT('Invalid or expired authorization code');
+    const codeHash = hashOpaqueToken(state, code);
+    const authCode = await state.storage.authorizationCodeRepository.consumeByCodeHash(codeHash);
+    if (!authCode) {
+        await handleCodeReuse(state, codeHash);
+        throw INVALID_GRANT('Invalid or expired authorization code');
+    }
     if (authCode.clientId !== client.clientId) throw INVALID_GRANT('Authorization code was issued to another client');
     if (authCode.redirectUri !== redirect_uri) throw INVALID_GRANT('redirect_uri mismatch');
     verifyPkce(code_verifier, authCode);
@@ -81,12 +101,15 @@ async function handleAuthorizationCodeGrant(req, res) {
     const scopes = authCode.scopes || [];
     const accessTokenResult = await issueOAuth2AccessToken(state, user, client, scopes);
     const refreshTokenValue = generateOpaqueToken();
-    const refreshExpiresAt = new Date(Date.now() + (client.refreshTokenTTL || state.config.ttls.refreshToken) * 1000);
+    const familyCreatedAt = new Date();
+    const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, client.refreshTokenTTL || state.config.ttls.refreshToken);
 
     await state.storage.sessionRepository.createSession({
         user: user.id, tokenHash: hashOpaqueToken(state, refreshTokenValue), expiresAt: refreshExpiresAt,
         kid: accessTokenResult.kid, jti: accessTokenResult.jti, ipAddress: req.ip, deviceInfo: req.headers['user-agent'],
         kind: SESSION_KINDS.OAUTH2, claims: { clientId: client.clientId, scopes },
+        // The code is the family root: if it is ever presented again, everything it produced is revoked.
+        familyId: codeFamilyId(authCode), familyCreatedAt,
     });
 
     const idToken = scopes.includes('openid')
@@ -116,8 +139,12 @@ async function handleRefreshTokenGrant(req, res) {
 
     const client = await authenticateClient(state, req);
     assertGrantAllowed(client, GRANT_TYPES.REFRESH_TOKEN);
-    const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(hashOpaqueToken(state, refresh_token));
-    if (!existing) throw INVALID_GRANT('Invalid or expired refresh token');
+    const tokenHash = hashOpaqueToken(state, refresh_token);
+    const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash, { reason: 'rotated' });
+    if (!existing) {
+        await handleRefreshReuse(state, tokenHash);
+        throw INVALID_GRANT('Invalid or expired refresh token');
+    }
     // RFC 6749 §6: a refresh token is bound to the client it was issued to. A first-party login's
     // refresh token, or another client's, is refused — and stays revoked (consumed above), since
     // presenting it here means it leaked.
@@ -134,15 +161,20 @@ async function handleRefreshTokenGrant(req, res) {
     const grantedScopes = existing.claims?.scopes || [];
     const allowedScopes = new Set(client.allowedScopes || []);
     const scopes = grantedScopes.filter((s) => s === 'openid' || allowedScopes.has(s));
+    const { familyId, familyCreatedAt } = familyOf(existing);
+    if (familyEndsAt(state, familyCreatedAt) <= new Date()) throw INVALID_GRANT('Refresh token has reached its maximum lifetime');
+
     const accessTokenResult = await issueOAuth2AccessToken(state, user, client, scopes);
     const newRefreshTokenValue = generateOpaqueToken();
-    const refreshExpiresAt = new Date(Date.now() + (client.refreshTokenTTL || state.config.ttls.refreshToken) * 1000);
+    const newTokenHash = hashOpaqueToken(state, newRefreshTokenValue);
+    const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, client.refreshTokenTTL || state.config.ttls.refreshToken);
 
     await state.storage.sessionRepository.createSession({
-        user: user.id, tokenHash: hashOpaqueToken(state, newRefreshTokenValue), expiresAt: refreshExpiresAt,
+        user: user.id, tokenHash: newTokenHash, expiresAt: refreshExpiresAt,
         kid: accessTokenResult.kid, jti: accessTokenResult.jti, ipAddress: req.ip, deviceInfo: req.headers['user-agent'],
-        kind: SESSION_KINDS.OAUTH2, claims: { clientId: client.clientId, scopes },
+        kind: SESSION_KINDS.OAUTH2, claims: { clientId: client.clientId, scopes }, familyId, familyCreatedAt,
     });
+    await assertChainNotRevoked(state, user.id, existing.createdAt, newTokenHash);
 
     if (existing.jti) await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${existing.jti}`, '1', state.config.ttls.revocationCache);
 
