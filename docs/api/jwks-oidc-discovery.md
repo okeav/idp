@@ -82,6 +82,7 @@ Returns the OIDC discovery document, all endpoints derived from `config.issuer`.
   "scopes_supported": ["openid", "email", "profile"],
   "claims_supported": ["sub", "iss", "aud", "azp", "exp", "iat", "jti", "nonce", "auth_time", "email", "email_verified", "name", "given_name", "family_name", "picture", "locale", "zoneinfo", "updated_at"],
   "code_challenge_methods_supported": ["S256"],
+  "prompt_values_supported": ["none", "login", "consent", "select_account"],
   "authorization_response_iss_parameter_supported": true,
   "request_parameter_supported": false,
   "claims_parameter_supported": false
@@ -96,6 +97,12 @@ Notes on what the document advertises:
   [OAuth2 Authorization Server](oauth2-authorization-server.md).
 - **PKCE.** Only `S256` — `plain` is refused, and a `code_challenge` must come with
   `code_challenge_method=S256`.
+- **`prompt_values_supported`.** `/oauth2/authorize` honours these `prompt` values, and `max_age`
+  (`select_account` behaves as `login`). See
+  [OAuth2 Authorization Server](oauth2-authorization-server.md#prompt-and-max_age).
+- **`end_session_endpoint`.** A `GET` from a signed-in browser without an `id_token_hint` asks for
+  confirmation (`POST` to the same URL) instead of ending the session — see
+  [OIDC](oidc.md#get--post-oidcend-session--endsessionhandler).
 - **`authorization_response_iss_parameter_supported`.** Authorization responses carry an `iss`
   parameter (RFC 9207); clients should check it equals `issuer`.
 - **Claims** in an ID token follow the granted scopes (`email` → `email`, `email_verified`;

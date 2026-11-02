@@ -26,9 +26,11 @@ export interface StorageContract {
     // Loosely typed for now — the full per-repository shapes are documented
     // as JSDoc in src/storage/interfaces.js; a future pass may promote them
     // to real TS interfaces here. 0.4.0 adds REQUIRED methods a custom adapter
-    // must implement: userRepository.updateByIdIfStatus,
-    // sessionRepository.isFamilyRevoked / isFamilyLive, verificationTokenRepository.findActive /
-    // clearCodes / replaceForUser — see docs/api/repository-adapters.md.
+    // must implement: userRepository.updateByIdIfStatus / bumpSessionEpoch,
+    // sessionRepository.isFamilyRevoked / isFamilyLive / rotatedWithin / raiseFamilyEpoch,
+    // verificationTokenRepository.findActive / clearCodes / replaceForUser — see
+    // docs/api/repository-adapters.md. initIdentityProvider refuses an adapter missing any
+    // required method (the list: REQUIRED_STORAGE_METHODS in src/storage/interfaces.js).
 }
 
 /**
@@ -107,8 +109,12 @@ export interface IdpConfig {
          * always trusted; Bearer-authenticated requests are unaffected.
          */
         trustedOrigins?: string[];
-        /** Default true. false: the refresh token is only ever in its httpOnly cookie, never in JSON bodies. */
-        refreshTokenInBody?: boolean;
+        /**
+         * Whether login/refresh JSON bodies also carry the refresh token. Default `'auto'`: only for
+         * non-browser clients — a browser request (it sends `Origin` or `Sec-Fetch-Site`) gets it in its
+         * httpOnly cookie only. `true`: always (a browser app that keeps the token itself). `false`: never.
+         */
+        refreshTokenInBody?: boolean | 'auto';
     };
     registration?: {
         /** Persist the user-supplied `metadata` from POST /register. Default false — it is attacker-controlled. */
@@ -152,10 +158,17 @@ export interface IdpConfig {
         /** Random, at least 32 characters (checked at startup). Never rotate — it keys the email lookup index. */
         emailHashPepper: string;
         /**
-         * Random, at least 32 characters, different from `emailHashPepper` (checked at startup). Keys every
-         * stored token/code hash and HMAC-stored client secret — rotating it invalidates all of them.
+         * Random, at least 32 characters, different from `emailHashPepper` (checked at startup). Every stored
+         * token/code/link/recovery-code hash and HMAC-stored client secret is keyed by a key derived from it
+         * per purpose. To rotate it, move the old value to `previousTokenHashSecrets`.
          */
         tokenHashSecret: string;
+        /**
+         * Earlier `tokenHashSecret` values, newest first (each at least 32 characters). What was hashed under
+         * them still verifies; new hashes always use `tokenHashSecret`. Drop one once everything hashed under
+         * it has expired or been replaced (see docs/api/bootstrap-config.md). Default [].
+         */
+        previousTokenHashSecrets?: string[];
         /** Wrong passwords per `accountLockDurationMs` window before password login (only) is locked — active accounts with a password only. Default 5. */
         maxFailedLoginAttempts?: number;
         /** The counting window and the password-login lock's length, in ms. Default 1_800_000 (30 min). */
@@ -184,7 +197,11 @@ export interface IdpConfig {
         previousEncryptionKeys?: MfaEncryptionKey[];
         /** Custom cipher (e.g. KMS) — takes precedence over `encryptionKey`. */
         secretCipher?: SecretCipher;
-        /** Refuse plain-text secrets left over from ≤0.2.x — set after `migrateMfaSecrets()` has run. */
+        /**
+         * Refuse plain-text secrets (left over from ≤0.2.x, or written straight into the database).
+         * Default: true whenever `encryptionKey` or `secretCipher` is set — run `migrateMfaSecrets()` to
+         * encrypt old ones, or set false to keep reading them during a migration.
+         */
         requireEncrypted?: boolean;
         /** Development only: allow MFA with no key, storing secrets in plain text (logs a loud warning). */
         allowPlaintext?: boolean;

@@ -76,7 +76,8 @@ the temp secret into `mfaSecret` (a legacy plain-text temp secret is sealed here
 (`0-9`, `A-Z` without `I L O U` — 100 bits) shown as four groups of five, `XXXXX-XXXXX-XXXXX-XXXXX`.
 (0.3.x codes were 48 bits — with the database and the HMAC key, every user's codes fell to one
 offline search.) Stored server-side only as `{ codeHash, usedAt: null }`, where `codeHash` is the
-HMAC-SHA256 (keyed by `security.tokenHashSecret`) of `mfa-recovery:<userId>:<normalized code>` —
+HMAC-SHA256 of `<userId>:<normalized code>` under the recovery-code key derived from
+`security.tokenHashSecret` (see [rotating it](bootstrap-config.md#rotating-securitytokenhashsecret)) —
 bound to the user, so one guess can't be tested against everyone's codes at once. Raw codes are
 never persisted. **Recovery codes issued before 0.4.0 (`XXXXXX-XXXXXX`) no longer verify** (they
 were hashed without the user binding) — users who enabled MFA earlier need a new set
@@ -84,10 +85,11 @@ were hashed without the user binding) — users who enabled MFA earlier need a n
 
 **Enabling MFA signs out the account's other sessions.** Every other session row is revoked
 (`sessionRepository.revokeAllForUser(userId, { exceptJti })`), keeping only the session that
-enrolled — any of them could be the reason the user is securing the account. It also writes the
-sign-out watermark (`sessionsRevokedAt`) with the enrolling session's family exempt
-(`sessionsRevokedExceptFamily`), so a refresh of another session that was already in flight is
-revoked too. The `MFA_ENABLED`
+enrolled — any of them could be the reason the user is securing the account. It first bumps the
+user's `sessionEpoch` (`userRepository.bumpSessionEpoch(userId, { exceptFamily })`) with the
+enrolling session's family exempt, so a refresh of another session that was already in flight is
+revoked too; the enrolling family's rows are moved into the new epoch
+(`sessionRepository.raiseFamilyEpoch`). The `MFA_ENABLED`
 audit event carries `revokedOtherSessions` (the count).
 
 → `{ mfaEnabled: true, recoveryCodes: [...] }` (`Cache-Control: no-store`) — **shown once, in plaintext.** Your UI must prompt
@@ -143,8 +145,10 @@ request is subject to the [CSRF origin check](middleware.md#csrf-origin-check) (
 
 **Verification order**: the challenge token is verified (signature, expiry, `type`, `iss` = the
 issuer and `aud` = `<issuer>#mfa-challenge`); the user must be `ACTIVE` with MFA still
-enabled; and a challenge issued **before the account's last password change is void** (it was
-earned with the old password). Then, under the [lockout](#per-account-lockout) (`method: 'totp'`,
+enabled; a challenge issued **before the account's last password change is void** (it was
+earned with the old password); and the token carries the user's `sessionEpoch` as read before the
+password was checked, so a "sign out everywhere" (password reset, logout-all, …) that lands between
+the password step and this call refuses the challenge (401 `INVALID_MFA_CHALLENGE_TOKEN`). Then, under the [lockout](#per-account-lockout) (`method: 'totp'`,
 counted before the code is checked): TOTP against `mfaSecret`, claiming its time step (single-use,
 see above); **only if that fails**, the code is treated as a recovery code — normalized (upper-cased,
 spaces and dashes removed, `O` read as `0` and `I`/`L` as `1`, so however it's typed off paper it
@@ -152,8 +156,10 @@ matches), HMAC'd bound to the user, and spent with one atomic
 conditional update (`userRepository.consumeRecoveryCode(userId, codeHash)`), so two concurrent
 requests can't both spend it. A spent recovery code is marked `usedAt: <now>` but **not removed**
 from the array (kept for audit history). TOTP and recovery codes count against the same
-per-account limit. On success, a plain-text `mfaSecret` (or one under a retired key) is
-re-encrypted under the current key.
+per-account limit. The stored TOTP secret is opened first, so while `requireEncrypted` refuses a
+plain-text secret (500 `MFA_SECRET_NOT_ENCRYPTED`) neither a TOTP code nor a recovery code gets
+that user through. On success, a plain-text `mfaSecret` (only readable with `requireEncrypted:
+false`) or one under a retired key is re-encrypted under the current key.
 
 **A challenge token completes one login only.** Once the factor checks out, the token's `jti` is
 claimed in the shared attempt-counter store (atomic, visible to every instance); presenting the
@@ -167,7 +173,8 @@ force here is stopped by the per-account MFA lockout, which has its own counter.
 
 **Success**: sets session cookies + `200 { accessToken, accessTokenExpiresAt, refreshToken,
 refreshTokenExpiresAt, userId }` — same shape as password login's non-MFA success (`refreshToken`
-is left out of the body under `cookies.refreshTokenInBody: false`). The new session's `auth_time`
+is in the body only as [`cookies.refreshTokenInBody`](bootstrap-config.md#cookiesrefreshtokeninbody)
+allows — by default, only for non-browser clients). The new session's `auth_time`
 is now, so it counts as a recent login for `requireRecentAuth()`.
 
 Errors:
@@ -235,7 +242,7 @@ additional authenticated data, so a ciphertext copied onto another user's row fa
 | `previousEncryptionKeys` | `[]` | Retired keys, accepted for decryption only. Env: `IDP_MFA_PREVIOUS_ENCRYPTION_KEYS` (comma-separated). |
 | `secretCipher` | — | Custom cipher (e.g. a KMS) — takes precedence over `encryptionKey`. See below. |
 | `enabled` | `true` | `false`: no key needed; setup/confirm respond 404 `FEATURE_DISABLED`. Env: `IDP_MFA_ENABLED`. |
-| `requireEncrypted` | `false` | Refuse any remaining plain-text secret (500 `MFA_SECRET_NOT_ENCRYPTED`) instead of using it. Env: `IDP_MFA_REQUIRE_ENCRYPTED`. |
+| `requireEncrypted` | `true` with `encryptionKey` or `secretCipher`, otherwise `false` | Refuse any remaining plain-text secret (500 `MFA_SECRET_NOT_ENCRYPTED`) instead of using it. Env: `IDP_MFA_REQUIRE_ENCRYPTED` (unset → this default). Before 0.4.0 the default was always `false`. |
 | `allowPlaintext` | `false` | Development only: boot with MFA enabled and no key, storing secrets unencrypted; logs a loud warning. Env: `IDP_MFA_ALLOW_PLAINTEXT`. |
 
 `initIdentityProvider()` throws if MFA is enabled with neither `encryptionKey` nor `secretCipher`
@@ -250,9 +257,13 @@ base64 (or base64url) of 32 bytes (trailing garbage used to be ignored silently)
 
 ### Migrating from 0.2.x
 
-Secrets written before 0.3.0 are plain base32. Any stored value matching `/^[A-Z2-7]+=*$/i` is
-treated as plain text and still read (unless `requireEncrypted`), and is re-encrypted on that
-user's next successful `POST /mfa/verify`. To do them all at once:
+Secrets written before 0.3.0 are plain base32 (so is anything written straight into the database).
+Any stored value matching `/^[A-Z2-7]+=*$/i` is treated as plain text. With a key configured,
+`requireEncrypted` defaults to `true` (since 0.4.0), so such a secret is refused — 500
+`MFA_SECRET_NOT_ENCRYPTED`, and **that user can't complete MFA with a TOTP code, not even with a
+recovery code** (a passkey second factor at `/webauthn/mfa/verify` still works) — until it is migrated. With
+`requireEncrypted: false` set explicitly, it is still read and is re-encrypted on that user's next
+successful `POST /mfa/verify`. To migrate them all at once:
 
 ```js
 import { migrateMfaSecrets } from '@okeav/idp-core';
@@ -266,8 +277,9 @@ plain-text `mfaSecret`/`mfaTempSecret` and re-encrypts any under a retired key. 
 while serving traffic, works with any storage adapter (uses only `countAll`, `findMany`,
 `findById`, `updateById`). `dryRun: true` counts without writing.
 
-Order: set `encryptionKey` → deploy → run `migrateMfaSecrets()` once → set
-`requireEncrypted: true`.
+Order when plain-text secrets may remain: set `encryptionKey` and `requireEncrypted: false` →
+deploy → run `migrateMfaSecrets()` once → remove `requireEncrypted: false` (the default is then
+`true`). Or run `migrateMfaSecrets()` against the database before the upgrade.
 
 ### Key rotation
 

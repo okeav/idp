@@ -109,12 +109,21 @@ authorizeUrl.search = new URLSearchParams({
 `GET /oauth2/authorize` answers JSON (or a redirect), so the IdP's own frontend calls it with the
 user's session and acts on the result:
 
-- `401 { action: 'login_required' }` — not logged in at the IdP: show your login UI, then retry the
-  same URL.
+- `401 { action: 'login_required', reason }` — not logged in at the IdP (`reason:
+  'unauthenticated'`), or the login is too old for the request's `prompt=login` / `max_age`
+  (`'prompt_login'` / `'max_age'`): show your login UI, then retry the same URL (a login within the
+  last 60 seconds satisfies `prompt=login` and `max_age=0`).
 - `200 { action: 'consent_required', consent_challenge, client, scopes, missingScopes }` — show a
   consent screen (step 3a).
 - `302` to `https://app.example.com/callback?code=...&state=...&iss=...` — the user already
   consented to these scopes.
+
+The client can add `prompt` (`none`, `login`, `consent`, `select_account`) and `max_age` to the
+authorize URL. With `prompt=none` there is never a login or consent screen: instead of
+`login_required` / `consent_required` the IdP redirects to the callback with
+`error=login_required` or `error=consent_required` (plus `state` and `iss`). `prompt=consent`
+always shows the consent screen. See
+[OAuth2 Authorization Server](../api/oauth2-authorization-server.md#prompt-and-max_age).
 
 ### 3a. The consent page
 
@@ -129,7 +138,8 @@ const res = await fetch(authorizeUrl, { credentials: 'include' }); // follows a 
 const body = res.redirected ? null : await res.json();
 
 if (body?.action === 'login_required') {
-  // send the user to your login page, then come back to this URL
+  // send the user to your login page (even if signed in — body.reason may be 'prompt_login' or
+  // 'max_age'), then come back to this URL
 } else if (body?.action === 'consent_required') {
   // render body.client.name, body.missingScopes … and a form carrying only the challenge:
   renderConsent(body);

@@ -112,7 +112,7 @@ curl -X POST http://localhost:3000/auth/login \
   beyond a demo (see [Tokens & Signing](../api/tokens-rs256.md)).
 - `emailHashPepper`/`tokenHashSecret` fall back to public placeholders — set real random secrets
   (at least 32 characters; `emailHashPepper` can never be rotated, since it keys the email lookup
-  index). The package's own `examples/express-quickstart/` uses its dev fallbacks only when
+  index — `tokenHashSecret` can, through `security.previousTokenHashSecrets`). The package's own `examples/express-quickstart/` uses its dev fallbacks only when
   `NODE_ENV=development` is set explicitly (its `.env.example` sets it) and otherwise refuses to
   start until every secret is set — an unset `NODE_ENV`, common in containers, counts as
   production; do the same.
@@ -122,8 +122,10 @@ curl -X POST http://localhost:3000/auth/login \
 - Browser frontend on another origin? List it in `cookies.trustedOrigins`, or its cookie-authenticated
   state-changing requests — and every login/refresh/MFA-verify call, cookies or not — get 403
   `CSRF_ORIGIN_REJECTED` (see
-  [Bootstrap & Config](../api/bootstrap-config.md#csrf-cookiestrustedorigins)). A browser-only app
-  should also set `cookies.refreshTokenInBody: false`.
+  [Bootstrap & Config](../api/bootstrap-config.md#csrf-cookiestrustedorigins)). Browser requests
+  get the refresh token only as its httpOnly cookie, never in the JSON body
+  (`cookies.refreshTokenInBody: 'auto'`, the default); set it `true` only if your browser code
+  must hold the refresh token itself.
 - `buildRouter()` with no options leaves OAuth2 client administration (`/oauth2/clients*`)
   unmounted — pass `clientManagement: { middleware: [yourAdminAuth] }` if you need it (see
   [Router & Schemas](../api/router-and-schemas.md)).

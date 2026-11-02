@@ -76,14 +76,17 @@ Claims are released **per granted scope only** (OIDC Core §5.4), read from `req
 Undefined fields are stripped before the response — absent profile data simply doesn't appear in
 the JSON (never sent as `null`).
 
-## `GET /oidc/end-session` — `endSessionHandler`
+## `GET` / `POST /oidc/end-session` — `endSessionHandler`
 
-RP-initiated logout (OIDC RP-Initiated Logout 1.0). Mounted behind `authContextMiddleware({
-optional: true })` — works with or without the browser's first-party session cookie.
+RP-initiated logout (OIDC RP-Initiated Logout 1.0). Both methods are mounted behind
+`authContextMiddleware({ optional: true })` — they work with or without the browser's first-party
+session cookie.
 
-Query: `id_token_hint?, post_logout_redirect_uri?, state?`.
+Parameters: `id_token_hint?, post_logout_redirect_uri?, state?` — in the query string for `GET`;
+in the body for `POST` (JSON — your app's `express.json()` — or `application/x-www-form-urlencoded`,
+parsed by the route itself).
 
-Because this is a plain GET any site can trigger, what it ends is deliberately narrow — **it never
+Because a GET is something any site can trigger, what it ends is deliberately narrow — **it never
 signs the user out of every device** (that's `POST /logout/all`):
 
 1. **`id_token_hint`**, if present, must be an **ID token** this IdP issued — an access token or
@@ -97,26 +100,53 @@ signs the user out of every device** (that's `POST /logout/all`):
    (`OAUTH_CLIENT_NOT_FOUND`, 400), and the URI must be in its `postLogoutRedirectUris` — **falling
    back to its regular `redirectUris`** when no dedicated post-logout list is set
    (`INVALID_REDIRECT_URI`, 400 otherwise).
-3. **The browser's own IdP session** — if a first-party session came with the request, that one
-   session is revoked and the session cookies are cleared.
-4. **The hinted client's sessions for that user** — only when a valid hint comes **together with
+3. **Confirmation.** A `GET` from a signed-in browser **without** an `id_token_hint` ends nothing
+   and answers `200 { "action": "logout_confirmation_required" }` (`Cache-Control: no-store`):
+   nothing shows that the user asked for it. Your IdP frontend asks the user, then sends the same
+   parameters as a `POST /oidc/end-session`, which carries on below. The POST must come from a
+   trusted origin — the issuer's origin or one of `cookies.trustedOrigins` (a browser request from
+   anywhere else → 403 `CSRF_ORIGIN_REJECTED`; see the
+   [CSRF origin check](middleware.md#csrf-origin-check)). A `GET` with a valid hint for the
+   signed-in user (the relying party the user signed in to asked for it) needs no confirmation.
+4. **The browser's own IdP session** — if a first-party session came with the request, that one
+   session is revoked and the session cookies are cleared. The browser counts as signed in when
+   only its refresh cookie is left (the access cookie has expired): a `GET` then asks for
+   confirmation as above, and the confirmed `POST` revokes that session's whole refresh-token
+   family and clears the cookies.
+5. **The hinted client's sessions for that user** — only when a valid hint comes **together with
    that same user's first-party session** (normally the browser's cookie): every session issued to the hint's
    client (`aud`) for the hint's `sub` is then revoked (`SessionRepository.revokeForClient`). A
    hint alone ends nothing (0.4.0) — ID tokens travel through URLs and logs, and whoever holds one
    must not be able to sign its user out of the relying party. The user's other clients and
    devices are untouched.
-5. Revoked sessions' access tokens are marked revoked in the cache as well; with
+6. Revoked sessions' access tokens are marked revoked in the cache as well; with
    `session.verifyOnEachRequest` (default — see [Middleware](middleware.md)) they stop working on
    every instance at the next request.
-6. Fires `auditLog('END_SESSION', { userId, clientId, revokedSessions })` when a user was
+7. Fires `auditLog('END_SESSION', { userId, clientId, revokedSessions })` when a user was
    identified.
-7. Redirects to `post_logout_redirect_uri?state=...` if supplied; otherwise `200 { status: 'ok' }`.
+8. Redirects to `post_logout_redirect_uri?state=...` if supplied; otherwise `200 { status: 'ok' }`.
 
 A call without a session is a no-op `200` (apart from the redirect, when a valid hint and URI are
-given). There is **no confirmation step**: a page that triggers this GET in the user's browser ends
-that browser's IdP session (and, with a hint, that client's sessions for the user) — narrow by
-design, as above. Error and rejection logs record the path only — never the query string, which
-carries the `id_token_hint`.
+given). So a page that triggers the GET in the user's browser ends nothing without a hint for that
+user, and with one ends only that browser's IdP session and that client's sessions for the user.
+Error and rejection logs record the path only — never the query string, which carries the
+`id_token_hint`.
+
+The confirmed request, from the IdP's own page once the user has agreed:
+
+```js
+// The same parameters the GET carried (here, none but `state`).
+await fetch('/auth/oidc/end-session', {
+  method: 'POST',
+  credentials: 'include', // the session cookie identifies the browser's IdP session
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ state }),
+}); // → 200 { status: 'ok' }, session cookies cleared
+```
+
+(A confirmation is only ever asked for without an `id_token_hint`, and a
+`post_logout_redirect_uri` needs one — so a confirmed POST answers `200 { status: 'ok' }` unless it
+adds a hint.)
 
 ## Related
 

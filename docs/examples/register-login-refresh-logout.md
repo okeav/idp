@@ -94,7 +94,7 @@ async function login(email, password) {
     // with { mfaChallengeToken: body.mfaChallengeToken, code }.
     return { mfaRequired: true, mfaChallengeToken: body.mfaChallengeToken };
   }
-  return body; // { accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt, userId }
+  return body; // { accessToken, accessTokenExpiresAt, refreshTokenExpiresAt, userId } (+ refreshToken for non-browser clients)
 }
 ```
 
@@ -105,11 +105,13 @@ the plain `access_token` / `refresh_token` only without `Secure`, e.g. under
 A browser client typically only needs `credentials: 'include'` and never touches the token strings
 directly — and since they're `httpOnly`, frontend code can't read them by any name (if yours
 checked for an `access_token` cookie to decide whether the user is signed in, call `GET /me`
-instead). For a browser-only app, set
-`cookies.refreshTokenInBody: false` on the server: `refreshToken` is then left out of the JSON
-body, so page script can never read it. A non-browser client (a mobile app, a service) reads the
-JSON body's `accessToken`/`refreshToken` instead (keep `refreshTokenInBody` at its default `true`)
-and sends the access token as `Authorization: Bearer <token>` on subsequent calls.
+instead). By default (`cookies.refreshTokenInBody: 'auto'`) a browser request — one carrying
+`Origin` or `Sec-Fetch-Site`, as browsers send on these POSTs — gets no `refreshToken` in the JSON
+body, so page script can never read it; the refresh cookie carries it. A non-browser client (a
+mobile app, a service) sends neither header, so it gets `refreshToken` in the body, reads
+`accessToken`/`refreshToken` from there, and sends the access token as
+`Authorization: Bearer <token>` on subsequent calls. A browser app that has to keep the refresh
+token itself sets `refreshTokenInBody: true` on the server (`false` never includes it).
 
 ## Authenticated request
 
@@ -142,7 +144,7 @@ async function refresh(refreshToken) {
     credentials: 'include',
   });
   if (!res.ok) throw await res.json(); // 401 INVALID_REFRESH_TOKEN → log in again
-  return res.json(); // a NEW accessToken (+ refreshToken unless refreshTokenInBody: false)
+  return res.json(); // a NEW accessToken (+ the new refreshToken for non-browser clients — see above)
 }
 ```
 

@@ -81,7 +81,8 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
     async create(data) {
       const id = String(nextId++);
       const email = normalizeEmail(data.email);
-      const user = { id, ...data, email, emailHash: hashEmail(email), createdAt: new Date(), updatedAt: new Date() };
+      // sessionEpoch: an integer on every user read (0.4.0) — a read without one fails sign-in closed.
+      const user = { id, ...data, email, emailHash: hashEmail(email), sessionEpoch: 0, createdAt: new Date(), updatedAt: new Date() };
       users.set(id, user);
       return user;
     },
@@ -109,11 +110,17 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
       Object.assign(user, patch, { updatedAt: new Date() });
       return user;
     },
-    async incrementFailedLoginAttempts(id) { // still in the interface, no longer called (0.4.0)
+    // Required (0.4.0): "revoke all of this user's sessions" is ordered by this counter, never by
+    // comparing app-server clocks. ONE atomic update in a real database (UPDATE ... SET
+    // session_epoch = session_epoch + 1 ... RETURNING session_epoch); resolve the NEW epoch.
+    // sessionEpoch (an integer, default 0) must come back on every user read, findByEmail included.
+    async bumpSessionEpoch(id, { exceptFamily = null } = {}) {
       const user = users.get(id);
       if (!user) return null;
-      user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
-      return user;
+      user.sessionEpoch = (user.sessionEpoch ?? 0) + 1;
+      user.sessionsRevokedExceptFamily = exceptFamily;
+      user.sessionsRevokedAt = new Date();
+      return user.sessionEpoch;
     },
     // Optional but recommended (0.4.0): single-use TOTP steps and recovery codes. In a real
     // database each is ONE conditional update (e.g. UPDATE ... WHERE mfa_last_totp_step IS NULL
@@ -156,17 +163,25 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
   //   async findByJti(jti) { return sessionsByJti.get(jti) ?? null; } // → { user, expiresAt, revokedAt, familyId, createdAt } | null
   //
   // Since 0.4.0, session rows also carry kind ('first_party' | 'oauth2'), authTime,
-  // familyId and familyCreatedAt — store them as given. revokeByRefreshTokenHash must
-  // persist opts.reason as revokeReason (and findByRefreshTokenHash return it), and
-  // revokeAllForUser must honour opts.exceptJti. Implement revokeFamily(familyId) and
+  // familyId, familyCreatedAt and sessionEpoch — store them as given. revokeByRefreshTokenHash
+  // must persist opts.reason as revokeReason (and findByRefreshTokenHash return it), writing
+  // revokedAt from the DATABASE clock (SQL now(), Mongo $$NOW), and revokeAllForUser must
+  // honour opts.exceptJti. Required (0.4.0): rotatedWithin(hash, seconds) — was this row
+  // revoked with reason 'rotated' less than `seconds` ago, by the database's clock
+  // (e.g. WHERE revoke_reason = 'rotated' AND revoked_at > now() - $2 * interval '1 second');
+  // raiseFamilyEpoch(familyId, epoch) — set sessionEpoch = max(sessionEpoch, epoch) on every
+  // row of the family. Implement revokeFamily(familyId) and
   // revokeForClient(clientId, { userId }) (both → { revokedCount, jtis }) so refresh-token
   // reuse, consent revocation and client deactivation actually revoke tokens. revokeFamily must
   // also set familyRevokedAt on EVERY row of the family, and isFamilyRevoked(familyId) (required,
   // 0.4.0) reports it — refreshes and code redemptions call it after inserting their row.
   // isFamilyLive(familyId) (required, 0.4.0): whether the family has an unrevoked, unexpired row.
   // findByJti should also return familyId and revokeReason.
-  // Authorization codes carry sessionJti; optional markReused(hash) sets reuseDetectedAt.
-  // Users carry sessionsRevokedExceptFamily alongside sessionsRevokedAt.
+  // Authorization codes carry sessionJti, sessionEpoch and consentVersion (persist them, return
+  // them from consumeByCodeHash); optional markReused(hash) sets reuseDetectedAt.
+  // Consents carry a version (default 0) that upsert AND revoke increment atomically; upsert
+  // resolves the consent after the write, and find returns version (an integer — 0 for an old row).
+  // Users carry sessionEpoch, sessionsRevokedExceptFamily and sessionsRevokedAt.
   // credentialRepository.updateCounter / deleteByCredentialId resolve a boolean
   // (conditional writes), and a custom cache adapter needs an atomic take().
   // serviceKeyRepository.upsertByKid must return null (and change nothing) for a
@@ -205,7 +220,8 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
     close: async () => { users.clear(); },
     userRepository,
     attemptCounterRepository,
-    // ...the other seven repositories
+    // ...the other seven repositories — initIdentityProvider() refuses the adapter, naming each
+    // missing method, until every required one is there.
   };
 }
 
@@ -227,10 +243,12 @@ read-then-write. Leave out `revokeFamily`, `revokeForClient` or
 `authorizationCodeRepository.findUsedByCodeHash` and token reuse is refused but not punished, and
 revoking consent or deactivating a client leaves its tokens working. Fine for a single-process
 test store; implement all of them for anything real — the full table is in
-[Repository Adapters](../api/repository-adapters.md#optional-methods-and-their-fallbacks). The
-0.4.0 methods `updateByIdIfStatus`, `isFamilyRevoked`, `isFamilyLive`, `findActive`, `clearCodes`
-and `replaceForUser` have **no** fallback: without them re-registration, email verification, password reset,
-magic links and refresh fail.
+[Repository Adapters](../api/repository-adapters.md#optional-methods-and-their-fallbacks). Every
+other method is **required** (`REQUIRED_STORAGE_METHODS` in `src/storage/interfaces.js`, plus
+`close`), including the 0.4.0 additions `updateByIdIfStatus`, `bumpSessionEpoch`, `rotatedWithin`,
+`raiseFamilyEpoch`, `isFamilyRevoked`, `isFamilyLive`, `findActive`, `clearCodes` and
+`replaceForUser`: `initIdentityProvider()` checks for them once the factory returns, and throws
+`Storage adapter is missing required methods: ...` listing every one that's absent.
 
 Note `mongo.skipTransactionCheck` and the whole Mongo-transaction-support startup probe (see
 [Repository Adapters](../api/repository-adapters.md#transactions-are-required)) only apply to the

@@ -129,7 +129,7 @@ with no error (and `req.auth` left `undefined`) when **no token is presented at 
 rejecting. A malformed/expired/revoked token still rejects even in optional mode — "optional"
 means "anonymous is allowed," not "an invalid token is silently ignored." Used by
 `/oauth2/authorize` (behaves differently for logged-in vs. anonymous callers) and
-`/oidc/end-session`.
+`/oidc/end-session` (`GET` and `POST`).
 
 Throws:
 - `AUTH_REQUIRED` (401) — no token presented, `optional` not set.

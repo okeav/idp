@@ -197,17 +197,31 @@ spec) and then insists the hint is an ID token.
 
 ## Opaque-token hashing
 
-Refresh tokens, password-reset tokens, email-verification tokens, and magic-link tokens are
-**not** JWTs — they're random opaque strings, hashed at rest with HMAC-SHA256 keyed by
-`config.security.tokenHashSecret` (at least 32 characters, checked at startup), so a database read
-alone can't be used to forge a valid token.
+Refresh tokens, authorization codes, password-reset tokens, email-verification tokens and codes,
+magic-link tokens, MFA recovery codes and OAuth2 client secrets are **not** JWTs — they're random
+opaque strings, stored only as HMAC-SHA256 hashes, so a database read alone can't be used to forge
+a valid one. Each purpose has its own key, derived from `config.security.tokenHashSecret` (at least
+32 characters, checked at startup) with HKDF-SHA256 (the purpose name as `info`): a hash made for
+one purpose never verifies as another, and nothing is keyed by the secret itself. The secret can be
+rotated through `security.previousTokenHashSecrets` — see
+[Bootstrap & Configuration](bootstrap-config.md#rotating-securitytokenhashsecret).
 
 ```js
 // internal, not exported on the public surface — documented for context on
 // what SessionRepository/VerificationTokenRepository store
-hashOpaqueToken(state, rawToken) // => hex HMAC-SHA256
-generateOpaqueToken(byteLength = 64) // => crypto.randomBytes(byteLength).toString('hex')
+HASH_PURPOSES                                   // REFRESH_TOKEN, AUTHORIZATION_CODE, EMAIL_VERIFICATION_LINK, ...
+hashOpaqueToken(state, rawToken, purpose)       // => hex HMAC-SHA256 under the current key — what is stored
+opaqueTokenHashes(state, rawToken, purpose)     // => the hash under the current key, then under each previous one
+generateOpaqueToken(byteLength = 64)            // => crypto.randomBytes(byteLength).toString('hex')
 ```
+
+**Upgrading from 0.3.x:** hashes written by 0.3.x (keyed by the secret itself) don't verify under
+0.4.0, and listing the old secret in `previousTokenHashSecrets` doesn't change that (previous
+secrets are derived per purpose too). Every refresh token and every outstanding verification
+link, reset link and magic link issued before the upgrade stops working, so every user signs in
+again; 0.3.x recovery codes were already invalidated by the new code format. OAuth2 client secrets
+from 0.3.x are bcrypt and still verify (re-stored as HMAC on first use); an HMAC-stored client
+secret written by a 0.4.0 build from before per-purpose keys doesn't verify — rotate it.
 
 Magic-link and password-reset/email-verification tokens use `generateOpaqueToken(32)` (32 raw
 bytes → 64 hex chars); refresh tokens use the 64-byte default.

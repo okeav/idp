@@ -88,7 +88,7 @@ validation list.
 | `RATE_LIMIT_EXCEEDED` | 429 | Generic — thrown by `enforceRateLimit` |
 | `RATE_LIMITER_UNAVAILABLE` | 503 | Generic — rate-limiter backend errored (or `MemoryRateLimiter` is full) on a fail-closed key — every limit except token refresh; see [Rate Limiter Interface](rate-limiter-interface.md) |
 | `FEATURE_DISABLED` | 404 | Generic — `setupMfaHandler`/`confirmMfaHandler` with `config.mfa.enabled: false` |
-| `CSRF_ORIGIN_REJECTED` | 403 | Generic — a state-changing request authenticated by the session **cookie**, or any browser request to an endpoint that sets or clears session cookies (`/login`, `/refresh`, `/logout`, `/mfa/verify`, `/magic-link/verify`, `/webauthn/authentication/verify`, `/webauthn/mfa/verify`), came from an `Origin` that is neither the issuer's nor in `cookies.trustedOrigins`; see [Middleware](middleware.md) |
+| `CSRF_ORIGIN_REJECTED` | 403 | Generic — a state-changing request authenticated by the session **cookie**, or any browser request to an endpoint that sets or clears session cookies (`/login`, `/refresh`, `/logout`, `/mfa/verify`, `/magic-link/verify`, `/webauthn/authentication/verify`, `/webauthn/mfa/verify`, and the confirmed `POST /oidc/end-session`), came from an `Origin` that is neither the issuer's nor in `cookies.trustedOrigins`; see [Middleware](middleware.md) |
 | `PAYLOAD_TOO_LARGE` | 413 | Generic — only produced by `idpErrorHandler()`, for an oversized body |
 | `COOKIE_CONFLICT` | 400 | Generic — a request carried a session cookie (or an SSO binding cookie) twice, as a cookie planted by a sibling subdomain would make it (possible in practice only with `cookies.domain`, where the names are `__Secure-` rather than `__Host-`). Sign in again; find and remove the planted cookie |
 | `AUTH_REQUIRED` | 401 | AuthN — `authContextMiddleware`, no token presented and not `optional` |
@@ -126,7 +126,7 @@ validation list.
 | `INVALID_MFA_CHALLENGE_TOKEN` | 401 | MFA — invalid, expired or already-used challenge token, one issued before the account's last password change, or one without this issuer's `iss` and `aud` `<issuer>#mfa-challenge` (e.g. from another environment sharing a signing key, or a 0.3.x token) |
 | `MFA_LOCKED` | 429 | MFA — per-account second-factor lockout; returned for the attempt that exhausts the budget and every attempt while locked, right code or not (see [MFA](mfa.md#per-account-lockout)) |
 | `MFA_ENCRYPTION_NOT_CONFIGURED` | 500 | MFA — an encrypted secret was found, or one must be written, with no `mfa.encryptionKey`/`secretCipher` |
-| `MFA_SECRET_NOT_ENCRYPTED` | 500 | MFA — a plain-text secret was found with `mfa.requireEncrypted: true`; run `migrateMfaSecrets()` |
+| `MFA_SECRET_NOT_ENCRYPTED` | 500 | MFA — a plain-text secret was found while `mfa.requireEncrypted` is on (the default whenever a key or cipher is configured, since 0.4.0); run `migrateMfaSecrets()` |
 | `MFA_SECRET_UNREADABLE` | 500 | MFA — stored secret failed to decrypt (tampered, wrong key, unknown key id); fails closed, no tokens issued |
 | `UNKNOWN_KID` | 404 | OAuth2/OIDC/JWKS |
 | `KEY_NOT_ALLOWED` | 403 | OAuth2/OIDC/JWKS |

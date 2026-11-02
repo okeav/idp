@@ -50,7 +50,9 @@ Behavior by email state:
   `assertUsableStatus`, not at request time).
 
 **Token**: 32 raw bytes (`generateOpaqueToken(32)` → 64 hex chars), hashed at rest with HMAC-SHA256
-(`config.security.tokenHashSecret`) under `verificationTokenRepository` type `'magic_link'`.
+(under the magic-link key derived from `config.security.tokenHashSecret` — see
+[Opaque-token hashing](tokens-rs256.md#opaque-token-hashing)) under `verificationTokenRepository`
+type `'magic_link'`.
 **Only the newest link works**: issuing one replaces the account's magic-link token atomically
 (`verificationTokenRepository.replaceForUser('magic_link', userId, …)`, backed by a partial unique
 index — one live link per user even under concurrent requests).
@@ -118,8 +120,9 @@ Complete it at `POST /mfa/verify` (TOTP or recovery code) or `POST /webauthn/mfa
 }
 ```
 Also sets the session cookies (`__Host-access_token`/`__Host-refresh_token` — same names and `cookieOptions()` as every other login
-method — see [Password & Email Auth](password-email-auth.md)). `refreshToken` is left out of the
-body under `cookies.refreshTokenInBody: false`.
+method — see [Password & Email Auth](password-email-auth.md)). `refreshToken` is in the body only
+as [`cookies.refreshTokenInBody`](bootstrap-config.md#cookiesrefreshtokeninbody) allows — by
+default, only for non-browser clients.
 
 **Errors**:
 - `INVALID_OR_EXPIRED_TOKEN` (400) — token not found, already used, or expired.

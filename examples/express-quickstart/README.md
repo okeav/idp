@@ -55,6 +55,8 @@ curl -X POST http://localhost:3000/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"you@example.com","password":"Str0ng!Passw0rd"}'
 # -> { "accessToken": "...", "refreshToken": "...", "userId": "..." }
+#    (curl sends no Origin / Sec-Fetch-Site header, so refreshToken is in the body;
+#     a browser gets it only as the httpOnly refresh cookie — cookies.refreshTokenInBody: 'auto')
 ```
 
 Every request handled goes through `server.js`'s `onAuditLog` hook and prints

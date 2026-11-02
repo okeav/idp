@@ -42,7 +42,7 @@ settings, `hookTimeoutMs`, `oauth2.requirePkce`, `cookies`, `issuer` + `ttls` + 
 so bad config fails the boot) → webhook dispatcher (validates every endpoint) → hooks (wrapped so
 notification hooks also fire webhook deliveries) → cache adapter → rate limiter (sharing the cache
 adapter's Redis connection when applicable) → signing-key registry (every key validated) → storage
-(Mongo by default, or `config.storage.factory` if provided).
+(Mongo by default, or `config.storage.factory` if provided) → storage contract check.
 
 Some storage capabilities are optional, and an adapter missing them still boots with a
 `logger.warn` at startup: no `attemptCounterRepository` → the attempt budgets (the per-account MFA
@@ -51,6 +51,11 @@ in-process only (not shared across instances); no `userRepository.claimTotpStep`
 `consumeRecoveryCode` → TOTP replay and recovery-code reuse are checked with a non-atomic
 read-then-write; no `sessionRepository.findByJti` while `session.verifyOnEachRequest` is on → falls
 back to the per-process revocation cache. See [Repository Adapters](repository-adapters.md).
+
+The **required** methods are checked as soon as storage is built (since 0.4.0): an adapter missing
+any method listed in `REQUIRED_STORAGE_METHODS` (`src/storage/interfaces.js`), or `close`, is closed
+and `initIdentityProvider()` throws, naming every missing method — instead of failing in the middle
+of the first request that needs one.
 
 Returns a read-only-ish view of the wired state for consumers who want direct access (e.g. to
 close the Mongo connection in tests). You don't need to hold onto or pass around this return
@@ -67,6 +72,8 @@ errors):
 | `config.security.emailHashPepper` / `tokenHashSecret` missing | `config.security.<name> is required` |
 | `emailHashPepper` / `tokenHashSecret` shorter than 32 characters | `config.security.<name> must be a random string of at least 32 characters` |
 | `tokenHashSecret` equal to `emailHashPepper` | `config.security.tokenHashSecret and emailHashPepper must be different secrets` |
+| `security.previousTokenHashSecrets` not an array | `config.security.previousTokenHashSecrets must be an array of strings` |
+| A `previousTokenHashSecrets` entry under 32 characters, equal to the current `tokenHashSecret` or to `emailHashPepper`, or listed twice | `config.security.previousTokenHashSecrets[i] must be a string of at least 32 characters` / `config.security.previousTokenHashSecrets[i] is the current tokenHashSecret` / `config.security.previousTokenHashSecrets[i] must not be the emailHashPepper` / `config.security.previousTokenHashSecrets has duplicates` |
 | `issuer` not an `https` URL (`http` only for `localhost`, `127.0.0.1`, `[::1]`, or any `http` with `NODE_ENV=development`) | `config.issuer must be an https URL (http only for localhost) — got ...` |
 | Any `ttls.*` value that isn't a positive integer (seconds) | `config.ttls.<name> must be a positive integer of seconds (got ...)` |
 | `session.verifyOnEachRequest: false` and `ttls.revocationCache` < `ttls.accessToken` (a revocation marker would expire before the token it revokes) | `config.ttls.revocationCache must be at least ttls.accessToken when session.verifyOnEachRequest is false ...` |
@@ -85,6 +92,7 @@ errors):
 | SSO providers configured and `sso.baseCallbackUrl` plain `http` to anything but localhost (any `http` is allowed with `NODE_ENV=development`) | `config.sso.baseCallbackUrl must be https (http only for localhost) — provider codes are returned to it` |
 | `cookies.sameSite` not `'lax'`, `'strict'` or `'none'` (case-insensitive — normalised to lower case, so `Lax` from an env var is fine) | `config.cookies.sameSite must be 'lax', 'strict' or 'none' (got ...)` |
 | `cookies.sameSite: 'none'` with `cookies.secure` false (explicitly, or by the `NODE_ENV=development` default) — browsers drop such cookies | `config.cookies.sameSite 'none' requires secure cookies ...` |
+| `cookies.refreshTokenInBody` not `true`, `false` or `'auto'` | `config.cookies.refreshTokenInBody must be true, false or 'auto' (got ...)` |
 | `cookies.trustedOrigins` not an array of exact origins (`https://app.example.com` — no path, no trailing slash; the host's case is normalised) | `config.cookies.trustedOrigins must be an array of exact origins ...` |
 | `serviceMesh.bootstrapSecret`, `serviceMesh.sharedSecret` or any `serviceMesh.bootstrapSecrets` value shorter than 32 characters | `config.serviceMesh.<name> must be at least 32 characters` |
 | A `serviceMesh.bootstrapSecrets` value equal to the shared `bootstrapSecret` | `config.serviceMesh.bootstrapSecrets.<name> must differ from the shared bootstrapSecret` |
@@ -97,6 +105,7 @@ errors):
 | `rateLimiting.adapter: 'redis'` with neither `rateLimiting.redis.host` nor a Redis cache to share | `Rate limiter adapter "redis" needs config.rateLimiting.redis.host, or config.cache.adapter "redis" to share its connection ...` |
 | A signing key with an unknown `status`, an unparseable PEM, a non-RSA key, under 2048 bits, or a `privateKey` that doesn't match its `publicKey` | `config.signingKeys.keys["<kid>"] ...` |
 | No `ACTIVE`/`ROTATING` key has a `privateKey` | `config.signingKeys: at least one ACTIVE (or ROTATING) key needs a privateKey to sign with` |
+| The storage adapter lacks a required method (or `close`) | `Storage adapter is missing required methods: userRepository.bumpSessionEpoch, ... — see src/storage/interfaces.js` |
 
 **Upgrading from 0.3.x:** check your secrets (≥ 32 characters, `tokenHashSecret` ≠
 `emailHashPepper`; service-mesh secrets too), `bcryptRounds` and signing keys (RSA ≥ 2048 bits,
@@ -154,9 +163,10 @@ else must be recognisable or `configFromEnv()` throws:
 | `IDP_COOKIE_SAME_SITE` | `cookies.sameSite` | `lax` |
 | `IDP_COOKIE_DOMAIN` | `cookies.domain` | |
 | `IDP_COOKIE_TRUSTED_ORIGINS` | `cookies.trustedOrigins` | list; empty |
-| `IDP_COOKIE_REFRESH_TOKEN_IN_BODY` | `cookies.refreshTokenInBody` | `true` |
+| `IDP_COOKIE_REFRESH_TOKEN_IN_BODY` | `cookies.refreshTokenInBody` | `auto`; also accepts a boolean |
 | `IDP_EMAIL_HASH_PEPPER` | `security.emailHashPepper` | required, ≥ 32 characters |
 | `IDP_TOKEN_HASH_SECRET` | `security.tokenHashSecret` | required, ≥ 32 characters |
+| `IDP_PREVIOUS_TOKEN_HASH_SECRETS` | `security.previousTokenHashSecrets` | list, newest first; empty — see [Rotating `tokenHashSecret`](#rotating-securitytokenhashsecret) |
 | `IDP_MAX_FAILED_LOGIN_ATTEMPTS` | `security.maxFailedLoginAttempts` | `5` (integer ≥ 1) |
 | `IDP_ACCOUNT_LOCK_DURATION_MS` | `security.accountLockDurationMs` | `1800000` (integer ≥ 1000) |
 | `IDP_BCRYPT_ROUNDS` | `security.bcryptRounds` | `12` (integer ≥ 10; ≤ 15 is enforced at startup) |
@@ -165,7 +175,7 @@ else must be recognisable or `configFromEnv()` throws:
 | `IDP_MFA_ENABLED` | `mfa.enabled` | `true` |
 | `IDP_MFA_ENCRYPTION_KEY` | `mfa.encryptionKey` | |
 | `IDP_MFA_PREVIOUS_ENCRYPTION_KEYS` | `mfa.previousEncryptionKeys` | list |
-| `IDP_MFA_REQUIRE_ENCRYPTED` | `mfa.requireEncrypted` | `false` |
+| `IDP_MFA_REQUIRE_ENCRYPTED` | `mfa.requireEncrypted` | unset: `true` when a key or cipher is configured, otherwise `false` |
 | `IDP_MFA_ALLOW_PLAINTEXT` | `mfa.allowPlaintext` | `false` |
 | `IDP_SESSION_VERIFY_ON_EACH_REQUEST` | `session.verifyOnEachRequest` | `true` |
 | `IDP_SSO_GOOGLE_CLIENT_ID`, `_CLIENT_SECRET` | `oauthProviders.google` | provider left `undefined` without a client id |
@@ -230,7 +240,7 @@ interface IdpConfig {
     sameSite?: 'lax' | 'strict' | 'none'; // default 'lax'; 'none' requires secure
     domain?: string;     // set → cookies are __Secure-… and shared with subdomains; unset → __Host-… (host-only)
     trustedOrigins?: string[];   // default [] — your frontends' exact origins (see "CSRF" below)
-    refreshTokenInBody?: boolean; // default true — false keeps the refresh token in its httpOnly cookie only
+    refreshTokenInBody?: boolean | 'auto'; // default 'auto' — refresh token in JSON bodies only for non-browser clients (see below)
   };
 
   registration?: {
@@ -249,7 +259,8 @@ interface IdpConfig {
 
   security: {
     emailHashPepper: string;   // required, ≥ 32 chars — HMAC key for the email blind index, never rotate
-    tokenHashSecret: string;   // required, ≥ 32 chars, ≠ emailHashPepper — HMAC key for hashing opaque tokens at rest (can't be rotated — see README "Known limitations")
+    tokenHashSecret: string;   // required, ≥ 32 chars, ≠ emailHashPepper — the per-purpose HMAC keys for opaque tokens at rest are derived from it
+    previousTokenHashSecrets?: string[]; // default [] — earlier tokenHashSecret values, newest first: what was hashed under them still verifies
     maxFailedLoginAttempts?: number;  // default 5 wrong passwords per accountLockDurationMs window — then password login (only) is locked
     accountLockDurationMs?: number;   // default 1_800_000 (30 min) — the counting window and the lock's length
     bcryptRounds?: number;            // default 12; integer 10–15 (also the cost of the dummy hash for unknown accounts)
@@ -265,7 +276,7 @@ interface IdpConfig {
     encryptionKey?: string | { id: string; key: string }; // exactly the base64 of 32 bytes
     previousEncryptionKeys?: Array<string | { id: string; key: string }>; // default [] — decrypt only
     secretCipher?: SecretCipher;    // custom (e.g. KMS) — takes precedence over encryptionKey
-    requireEncrypted?: boolean;     // default false — refuse plain-text secrets left from <=0.2.x
+    requireEncrypted?: boolean;     // default: true with encryptionKey or secretCipher, false without — refuse plain-text secrets left from <=0.2.x
     allowPlaintext?: boolean;       // default false — development only
     lockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number }; // defaults 5, 900, 900
   };
@@ -366,8 +377,58 @@ cookies: { trustedOrigins: ['https://app.example.com'] } // IDP_COOKIE_TRUSTED_O
 Each entry must be an exact origin — `https://app.example.com`, not `https://app.example.com/` or
 `…/login` (checked at startup; such an entry used to silently match nothing).
 
-For browser-only apps, also consider `cookies.refreshTokenInBody: false`: the refresh token is then
-never in a JSON response, only in its httpOnly cookie, out of reach of page script.
+### `cookies.refreshTokenInBody`
+
+Whether the refresh token is also returned in the JSON body of `/login`, `/refresh`, `/mfa/verify`,
+`/magic-link/verify`, `/webauthn/authentication/verify` and `/webauthn/mfa/verify` (it is always set
+as the httpOnly refresh cookie):
+
+| Value | Refresh token in the JSON body |
+|---|---|
+| `'auto'` (default since 0.4.0) | Only for non-browser clients. A request carrying an `Origin` or `Sec-Fetch-Site` header (which page script can't remove) gets it only as the cookie, so script on the page — an XSS — never reads it. |
+| `true` | Always — for a browser app that keeps the refresh token itself (e.g. cross-site, without cookies). |
+| `false` | Never. |
+
+`'auto'` relies on the browser sending `Origin` or `Sec-Fetch-Site` on these POSTs, as all current
+browsers do; a very old browser that sends neither is treated as a non-browser client and gets the
+token in the body. A browser-only app that must cover such browsers sets `false`.
+
+`IDP_COOKIE_REFRESH_TOKEN_IN_BODY` accepts `auto` or a boolean. **Upgrading from 0.3.x:** the
+default was `true`; a browser app that reads `refreshToken` from the JSON body must set `true` (or
+rely on the refresh cookie instead).
+
+### Rotating `security.tokenHashSecret`
+
+What idp-core stores in place of an opaque value — refresh tokens, authorization codes,
+email-verification links and codes, password-reset links, magic links, MFA recovery codes, OAuth2
+client secrets — is an HMAC-SHA256 under a key derived from `tokenHashSecret` for that purpose
+(HKDF-SHA256, one key per `HASH_PURPOSES` entry in `src/signing/token.service.js`). Nothing is keyed
+by the secret itself, and a hash made for one purpose never verifies as another.
+
+To rotate it, set the new value as `tokenHashSecret` and move the old one to the front of
+`previousTokenHashSecrets` (env `IDP_PREVIOUS_TOKEN_HASH_SECRETS`, comma-separated, newest first).
+New hashes use the current secret; anything hashed under a listed previous secret still verifies.
+An OAuth2 client secret that verifies under a previous secret is re-stored under the current one on
+that use; nothing else is re-hashed (a refresh token moves to the current secret when it is rotated,
+since its successor is new). Entries are checked at startup: ≥ 32 characters, not the current
+`tokenHashSecret`, not `emailHashPepper`, no duplicates.
+
+Drop an old secret once nothing hashed under it is still needed:
+
+- **Refresh tokens** — after `session.absoluteLifetimeSeconds` (default 90 days); links,
+  verification codes and authorization codes expire much sooner (`ttls`).
+- **OAuth2 client secrets** — once every confidential client has authenticated since the rotation
+  (or had its secret rotated); a client that hasn't is refused after the drop.
+- **MFA recovery codes** — not re-stored on use. Keep the old secret until users have regenerated
+  their codes (`POST /me/mfa/recovery-codes`), or accept that unused old codes stop working.
+
+Previous secrets are derived the same way, so this covers values hashed by 0.4.0 or later only:
+hashes written by 0.3.x (keyed by the secret itself) don't verify even with that secret listed —
+see [Tokens & Signing](tokens-rs256.md#opaque-token-hashing).
+
+A lookup that finds nothing (an unknown or expired token) tries every previous secret in turn, so
+keep the list short. `emailHashPepper` is different: it keys the email blind index and can never be
+rotated.
 
 ### Client IPs and `trust proxy`
 
@@ -397,7 +458,13 @@ The key must be exactly the base64 of 32 bytes — trailing garbage is refused (
 ignored). If the deployment doesn't use TOTP at all, set `mfa.enabled: false` instead (no key
 needed; `setupMfaHandler`/`confirmMfaHandler` then respond 404 `FEATURE_DISABLED`).
 `mfa.allowPlaintext: true` boots without a key for local development only, with a loud warning.
-Format, rotation, and migrating secrets written by 0.2.x: [MFA](mfa.md#secret-encryption-at-rest).
+
+Since 0.4.0 `mfa.requireEncrypted` defaults to `true` whenever `encryptionKey` or `secretCipher` is
+set (`false` without one — the `allowPlaintext` development mode), so a plain-text TOTP secret is
+refused (500 `MFA_SECRET_NOT_ENCRYPTED`) rather than used — that user can't complete MFA with a TOTP
+code or even a recovery code (only a passkey second factor) until it is migrated. If secrets written by ≤ 0.2.x may remain,
+run `migrateMfaSecrets()` before upgrading, or set `requireEncrypted: false` explicitly until it has
+run. Format, rotation, and migration: [MFA](mfa.md#secret-encryption-at-rest).
 
 ### `SigningKeyEntry`
 

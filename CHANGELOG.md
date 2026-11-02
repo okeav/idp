@@ -102,9 +102,10 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   every refresh). **Upgrade:** set it false to keep the old behaviour; make sure your hook is fast.
 - **Enabling MFA now signs out the account's other sessions** (keeping the one that enrolled):
   any of them could be the reason the user is securing the account. `SessionRepository.revokeAllForUser`
-  takes `{ exceptJti }`. It also writes the sign-out watermark (`sessionsRevokedAt`) with the
-  enrolling session's family exempt (new user field `sessionsRevokedExceptFamily`), so a refresh of
-  another session that was already in flight is caught too. **Upgrade (custom storage adapters):**
+  takes `{ exceptJti }`. It also bumps the user's `sessionEpoch` (see "Revocation no longer
+  compares app-server clocks") with the enrolling session's family exempt (new user field
+  `sessionsRevokedExceptFamily`), so a refresh of another session that was already in flight is
+  caught too. **Upgrade (custom storage adapters):**
   persist `sessionsRevokedExceptFamily`, and return `familyId` from `findByJti` (it identifies the
   enrolling session's family — without it the enrolling session is signed out at its next refresh).
 - **Magic links.** Requests are limited per address as well as per IP
@@ -173,9 +174,16 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   both worked. Passwords over 72 bytes (UTF-8) are now refused at register, reset and change.
 - **Profile fields.** `avatarUrl` (released as the ID token's `picture`) must be `https` —
   `javascript:` and `data:` URLs were accepted; `locale` and `zoneinfo` must be well-formed.
-- **The refresh token can be kept out of JSON bodies.** With `cookies.refreshTokenInBody: false`
-  (`IDP_COOKIE_REFRESH_TOKEN_IN_BODY`) it lives only in its httpOnly cookie, out of reach of page
-  script. Recommended for browser-only apps.
+- **The refresh token was readable by page script.** Login, `/refresh`, `/mfa/verify`,
+  `/magic-link/verify` and the passkey login/MFA responses returned it in the JSON body as well as
+  in its httpOnly cookie, so an XSS could read the long-lived token the cookie was protecting.
+  `cookies.refreshTokenInBody` is now `true | false | 'auto'`, default **`'auto'`**: the token is
+  in the body only for non-browser clients — a request carrying `Origin` or `Sec-Fetch-Site`
+  (headers page script can't remove) gets it only as the cookie. `IDP_COOKIE_REFRESH_TOKEN_IN_BODY`
+  accepts `auto` or a boolean (default `auto`); any other config value fails startup. All current
+  browsers send one of those headers on these POSTs; a very old browser that sends neither gets the
+  token in the body — set `false` for a browser-only app that must cover such browsers.
+  **Upgrade:** a browser app that reads `refreshToken` from the JSON body must set `true`.
 - **Dependencies.** `zod` floor raised to `^4.6.7` (GHSA-mrhx-c7xc-m3w5, memory exhaustion); the
   Express peer range is `^4.21.2 || ^5.1.0`. The lockfile is audit-clean; run `npm audit` in your
   app too — `proxy-addr` ≤ 2.0.7 (IP spoofing through `trust proxy` subnets), `body-parser` and `qs`
@@ -368,8 +376,18 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   the browser's own IdP session if its cookie came with the request (cookies are cleared), and the
   hinted client's sessions for that user **only together with that user's own session** — a hint
   alone ends nothing (ID tokens travel through URLs and logs; holding one must not sign its user out
-  of the relying party). Expired hints are accepted, per the spec. There is still no confirmation
-  step (see "Known limitations" below).
+  of the relying party). Expired hints are accepted, per the spec.
+- **`GET /oidc/end-session` could be triggered by any page.** A GET ends the browser's IdP session
+  now only with an `id_token_hint` for that same signed-in user. Without one, a signed-in browser's
+  GET ends nothing and answers `200 { "action": "logout_confirmation_required" }`; the IdP's
+  frontend asks the user, then sends the same parameters (JSON or
+  `application/x-www-form-urlencoded`) to the new `POST /oidc/end-session`, which must come from a
+  trusted origin (the issuer's or `cookies.trustedOrigins`; otherwise 403 `CSRF_ORIGIN_REJECTED`).
+  A browser whose access cookie has expired but whose refresh cookie remains counts as signed in:
+  its GET asks for confirmation, and the confirmed POST revokes that session's whole refresh-token
+  family and clears the cookies. The rest is unchanged (a hint alone ends nothing;
+  `post_logout_redirect_uri` needs a hint and a registered URI). **Upgrade:** an IdP frontend that
+  links to end-session handles `logout_confirmation_required`.
 - **Client redirect URIs** must be `https` (or `http` to a loopback host, or a reverse-DNS
   private-use scheme for native apps) and may not contain a fragment or credentials;
   `javascript:`/`data:` URIs were previously registrable. Authorization responses carry `iss`
@@ -387,11 +405,13 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   ends `session.absoluteLifetimeSeconds` (default 90 days) after its login, and no refresh token
   outlives that.
 - **A refresh racing "log out everywhere" could survive it.** Logout-all, password reset/change and
-  account deletion now record `sessionsRevokedAt` on the user before revoking, and a refresh
-  re-checks it after writing its successor. So does a **login**: it records when its credential
-  check began, and if a password reset or logout-all landed while it was in flight, the session it
-  just created is revoked and it answers 401 `TOKEN_REVOKED`; the OAuth2 code grant checks the same
-  watermark after creating its session.
+  account deletion now bump the user's `sessionEpoch` before revoking, and a refresh re-checks it
+  after writing its successor. So does a **login**: its session records the epoch of the user it
+  loaded before checking the credential, and if a password reset or logout-all landed while it was
+  in flight, the session it just created is revoked and it answers 401 `TOKEN_REVOKED`; the OAuth2
+  code grant checks the same after creating its session. An MFA challenge token carries the epoch
+  read before the password check, so a "sign out everywhere" between the password step and
+  `/mfa/verify` refuses the challenge.
 - **Sessions raced their own revocation (Medium).** An authorization code now records the session
   that authorized it (`sessionJti`, the access token's `jti`) and is refused (`INVALID_GRANT`) if
   that session was signed out before redemption — a sign-out landing while `/authorize` was in
@@ -486,7 +506,8 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   one atomic conditional update.
 - **Recovery codes were 48 bits (Medium).** With the database and the HMAC key, every user's codes
   fell to one offline search. They are now 20 characters of Crockford base32 — 100 bits — shown as
-  `XXXXX-XXXXX-XXXXX-XXXXX`, and hashed bound to the user (HMAC of `mfa-recovery:<userId>:<code>`),
+  `XXXXX-XXXXX-XXXXX-XXXXX`, and hashed bound to the user (HMAC of `<userId>:<code>` under the
+  recovery-code key — see "Per-purpose hash keys"),
   so one guess can't be tested against everyone's codes at once. Typing is forgiving: any case,
   spaces and dashes optional, `O` read as `0` and `I`/`L` as `1`. **Upgrade:** recovery codes issued
   before 0.4.0 no longer verify — ask users with MFA to regenerate them
@@ -533,6 +554,70 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   `UserRepository.consumeRecoveryCode(id, codeHash)` (both atomic, both optional for now — without
   them a non-atomic fallback is used and a startup warning is logged). The built-in Mongo adapter
   implements both; users get an `mfaLastTotpStep` field.
+- **Revocation no longer compares app-server clocks.** "Sign out everywhere", authorization-code
+  revocation and the refresh-reuse grace window were ordered by timestamps written by different app
+  servers (`sessionsRevokedAt` against a session's or code's `createdAt`, a consent's `grantedAt`,
+  a rotation's `revokedAt` against `Date.now()`), so clock skew between instances could let a
+  revoked chain survive or punish a legitimate refresh. Now: a per-user `sessionEpoch` counter,
+  incremented by every "revoke all sessions" (logout-all, revoke-all-sessions, password
+  reset/change, account deletion, MFA enrolment's sign-out of the other sessions) and recorded on
+  session rows and authorization codes; a consent `version`, incremented on every grant and
+  revocation and recorded on codes; and the rotation's `revokedAt` written with the database's
+  clock, with the grace window measured by the database (`rotatedWithin`). Expiry checks (token,
+  code, link and lockout lifetimes) still use each server's clock, like any JWT `exp` — keep clocks
+  roughly in sync. `sessionsRevokedAt` is now informational.
+- **`prompt` and `max_age` were ignored at `/oauth2/authorize`**, so an existing session was
+  reused however old. They are now honoured (OIDC Core §3.1.2.1): `prompt=none` never shows UI — it
+  redirects to the client's `redirect_uri` with `error=login_required` or `error=consent_required`
+  (plus `state` and `iss`); `prompt=login`, `prompt=select_account` and `max_age=0` need a login
+  within the last 60 seconds (`FRESH_LOGIN_SECONDS`), else `401 { action: 'login_required',
+  reason: 'prompt_login' }` — the IdP page signs the user in and repeats the authorize request;
+  `max_age=N` refuses a login older than N seconds, or of unknown age (`reason: 'max_age'`);
+  `prompt=consent` shows the consent screen even when consent exists. Not signed in now answers
+  `reason: 'unauthenticated'` (`action` is unchanged). Unknown `prompt` values, `none` combined with
+  another, or a `scope` holding no scope at all → 400 `INVALID_REQUEST`. Discovery adds
+  `prompt_values_supported`.
+- **`mfa.requireEncrypted` defaulted to `false`**, so a plain-text TOTP secret (from ≤ 0.2.x, or
+  written straight into the database) was used as-is even with a key configured. It now defaults to
+  `true` whenever `mfa.encryptionKey` or `mfa.secretCipher` is set (`false` without one — the
+  `allowPlaintext` development mode); `IDP_MFA_REQUIRE_ENCRYPTED` unset means that default.
+  **Upgrade:** a user whose secret is still plain text **can't complete MFA with a TOTP code or
+  even a recovery code** (500 `MFA_SECRET_NOT_ENCRYPTED`; only a passkey second factor still works)
+  until `migrateMfaSecrets()` has run — run it before upgrading, or set `requireEncrypted: false`
+  explicitly until it has.
+- **Per-purpose hash keys; `tokenHashSecret` can be rotated.** One key, `security.tokenHashSecret`
+  itself, keyed every stored hash, and changing it invalidated everything at once. Each stored hash
+  is now HMAC-SHA256 under a key derived per purpose (HKDF-SHA256; `HASH_PURPOSES` in
+  `src/signing/token.service.js`) — refresh tokens, authorization codes, email-verification links
+  and codes, reset links, magic links, MFA recovery codes, client secrets — so a hash made for one
+  purpose never verifies as another and nothing is keyed by the secret itself. New
+  `security.previousTokenHashSecrets` (`IDP_PREVIOUS_TOKEN_HASH_SECRETS`, comma-separated, newest
+  first): to rotate, move the old secret there. Anything hashed under it still verifies, new hashes
+  use the current secret, and a client secret that verifies under an old secret is re-stored under
+  the new one on that use. Entries are checked at startup (≥ 32 characters, not the current secret,
+  not `emailHashPepper`, no duplicates). Drop an old secret once nothing hashed under it is needed:
+  refresh tokens last up to `session.absoluteLifetimeSeconds` (default 90 days); client secrets
+  upgrade on first use; recovery codes don't, so keep it until users regenerate them, or accept
+  that unused old codes stop working. **Upgrade:** hashes written by 0.3.x (keyed by the secret
+  itself) don't verify, even with the old secret listed in `previousTokenHashSecrets` (it is
+  derived too): every refresh token and every outstanding email-verification link, reset link and
+  magic link stops working — with the cookie rename, every user signs in again (0.3.x recovery codes
+  were already invalidated above). OAuth2 client secrets from 0.3.x are bcrypt and still verify (and
+  are upgraded on use); an HMAC-stored client secret written by an earlier 0.4.0 build must be
+  rotated. Data written by earlier 0.4.0 builds is affected the same way.
+- **A custom storage adapter missing a method failed mid-request.** `initIdentityProvider()` now
+  checks the adapter against `REQUIRED_STORAGE_METHODS` (`src/storage/interfaces.js`, plus
+  `close`) and refuses it, naming every missing method. New **required** methods:
+  `userRepository.bumpSessionEpoch(id, { exceptFamily })` (atomic; resolves the new epoch),
+  `sessionRepository.rotatedWithin(hash, seconds)` (by the database's clock) and
+  `sessionRepository.raiseFamilyEpoch(familyId, epoch)`. New persisted fields: `sessionEpoch` on
+  users, session rows and authorization codes, `consentVersion` on codes, `version` on consents
+  (incremented by `upsert` and `revoke`; `upsert` resolves the updated consent).
+  `revokeByRefreshTokenHash` must write `revokedAt` from the database clock. A user read must return
+  an integer `sessionEpoch` and a consent read an integer `version` — otherwise sign-in and code
+  redemption fail closed, with an error logged. `userRepository.deleteById`,
+  `sessionRepository.listHistoryForUser` and `credentialRepository.countForUser` are not called and
+  not required. See `docs/api/repository-adapters.md`.
 - `ERROR_CODES` now lists `COOKIE_CONFLICT`, `REGISTRATION_PASSWORD_REQUIRED`,
   `PASSWORD_CHANGE_LOCKED` and `SERVICE_KEY_REVOKED`. `GET /me` reports the effective status (a
   pre-0.4.0 automatic lock reads `ACTIVE`, as everywhere else).
@@ -542,20 +627,17 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
 
 ### Known limitations
 
-Deliberately not changed in this release (see README, "Known limitations"):
+See README, "Known limitations":
 
-- `security.tokenHashSecret` can't be rotated without invalidating every stored token and code hash
-  and every HMAC-stored OAuth2 client secret, and one key serves all those purposes (no per-purpose
-  key derivation).
-- Revocation watermarks (`sessionsRevokedAt`) and code/consent timestamps come from each app
-  server's clock — keep the servers NTP-synced.
-- `prompt` and `max_age` are ignored at `/oauth2/authorize`; the ID token carries `auth_time` for
-  relying parties to enforce.
-- `mfa.requireEncrypted` still defaults to `false` — set it `true` after `migrateMfaSecrets()`.
-- `cookies.refreshTokenInBody` still defaults to `true` — set it `false` for browser-only apps.
-- The refresh cookie is `Path=/` (required by the `__Host-` prefix), so it accompanies every request
-  to the IdP's host.
-- `GET /oidc/end-session` has no confirmation step.
+- The refresh cookie is `Path=/`, so it accompanies every request to the IdP's host: the `__Host-`
+  prefix requires it, and `__Host-` (which stops a sibling subdomain planting the cookie) matters
+  more than path scoping.
+- Expiry times are compared against each server's clock, as with any JWT — keep clocks roughly in
+  sync.
+- Anyone who knows an address can use up its email-verification code budget (the codes are
+  cleared; the emailed link keeps working, so verification emails must include the link).
+- `prompt=login` accepts a login made within the last 60 seconds rather than tracking each
+  authorization request.
 
 ## [0.3.0] - 2026-10-05
 

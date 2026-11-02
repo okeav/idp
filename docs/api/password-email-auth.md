@@ -17,7 +17,7 @@ Every login method in this package (password, MFA-verify, magic link, WebAuthn, 
 through the same internal helpers in `src/password-auth/controllers.js` (module exports used by the
 other flows — not part of the public package surface):
 
-- **`issueSession(state, { user, claims, req, authStartedAt? })`** — mints an access token (`issueAccessToken`,
+- **`issueSession(state, { user, claims, req })`** — mints an access token (`issueAccessToken`,
   carrying `auth_time` = now) and an opaque refresh token, then persists both via
   `sessionRepository.createSessionForLogin(...)` — a single atomic Mongo transaction writing the
   session, an access-token audit record, and `lastLoginAt` together (see
@@ -29,10 +29,11 @@ other flows — not part of the public package surface):
   keyed by that `jti`. New-device detection runs **before** the session row is written (otherwise
   the device would always already be "known"); if the device is new, `onNewDeviceLogin` fires
   (fire-and-forget, `.catch`-guarded). A user's first-ever login never counts as a new device.
-  After the row is written it re-checks the user's sign-out watermark (`sessionsRevokedAt`)
-  against `authStartedAt` — when this sign-in began checking credentials (password login passes
-  it; default now): a password reset or "log out everywhere" that landed while the login was in
-  flight revokes the new row and answers 401 `TOKEN_REVOKED`.
+  The row records the user's `sessionEpoch` as read when the sign-in loaded the user — before any
+  credential was checked. After the row is written the epoch is read again: if a password reset or
+  "log out everywhere" bumped it while the login was in flight, the new row is revoked and the
+  login answers 401 `TOKEN_REVOKED`. (A counter, not a timestamp, so it holds whichever app server
+  each step ran on.)
 - **`setSessionCookies(res, state, session)`** — sets the session cookies via
   `cookieOptions()`: `{ httpOnly: true, secure: config.cookies.secure ?? (NODE_ENV !== 'development'), sameSite: config.cookies.sameSite || 'lax', path: '/', domain?: config.cookies.domain }`.
   `secure` defaults to **true** in every environment except `NODE_ENV === 'development'` with no
@@ -43,10 +44,13 @@ other flows — not part of the public package surface):
   refused with 400 `COOKIE_CONFLICT`; without Secure (development over http, or `cookies.secure:
   false`), the plain `access_token` / `refresh_token`. The refresh cookie is `Path=/` too (required
   by `__Host-`).
-- **`refreshTokenInBody`** — the refresh token is also returned in login/refresh JSON bodies (for
-  non-browser clients) unless **`config.cookies.refreshTokenInBody: false`** (env
-  `IDP_COOKIE_REFRESH_TOKEN_IN_BODY=false`). Set that for browser-only apps: the token then lives
-  only in its httpOnly cookie, out of reach of page script.
+- **`refreshTokenInBody`** — whether the refresh token is also returned in login/refresh JSON
+  bodies (`config.cookies.refreshTokenInBody`, env `IDP_COOKIE_REFRESH_TOKEN_IN_BODY`). The default
+  `'auto'` includes it only for non-browser clients: a request carrying `Origin` or
+  `Sec-Fetch-Site` gets it only in its httpOnly cookie, out of reach of page script. `true` always
+  includes it (a browser app that keeps the refresh token itself — set this if your browser code
+  reads `refreshToken` from the body, as the 0.3.x default allowed); `false` never does. See
+  [Bootstrap & Configuration](bootstrap-config.md#cookiesrefreshtokeninbody).
 - **`resolveClaims(state, user, ctx)`** — calls `hooks.resolveAuthContext(user, ctx)`, returns
   `result?.claims ?? {}`.
 - **`assertUsableStatus(user)`** — throws based on `user.status`: `LOCKED` (an **administrative**
@@ -208,7 +212,8 @@ yet; complete via [`verifyMfaChallengeHandler`](mfa.md) or the WebAuthn-MFA flow
 token completes one login only.
 
 **Success (no MFA)**: sets cookies + `200 { accessToken, accessTokenExpiresAt, refreshToken,
-refreshTokenExpiresAt, userId }` (`refreshToken` omitted when `cookies.refreshTokenInBody: false`).
+refreshTokenExpiresAt, userId }` (`refreshToken` only as `cookies.refreshTokenInBody` allows — by
+default, only for non-browser clients).
 
 **Errors**: `INVALID_CREDENTIALS` (401 — unknown user, wrong password, password login locked, a
 pending account, or `DELETED` status), `TOKEN_REVOKED` (401 — signed out everywhere while the login
@@ -276,7 +281,10 @@ rotation adds a row to it. Two rules hang off that:
   a copy, so the whole family is revoked (both the thief and the legitimate client must log in
   again) and `auditLog('REFRESH_TOKEN_REUSE_DETECTED')` fires. Within
   `config.session.refreshReuseGraceSeconds` (default 10 s — two tabs refreshing at once) a replay
-  is only refused. Needs the storage methods `findByRefreshTokenHash` and `revokeFamily`; an
+  is only refused. The window is measured by the database alone: the rotation's `revokedAt` is
+  written with the database clock and `sessionRepository.rotatedWithin(hash, seconds)` compares
+  against that same clock, so app servers whose clocks differ agree on it. Needs the storage
+  methods `findByRefreshTokenHash` and `revokeFamily`; an
   adapter without `revokeFamily` just refuses the replay. `revokeFamily` also tombstones every row
   of the family (`familyRevokedAt`), and a refresh checks `sessionRepository.isFamilyRevoked` after
   inserting its successor — so a legitimate refresh racing the replay can't leave a live successor
@@ -315,12 +323,14 @@ rotation instead of the next full login. Keep the hook fast. Set it to `false` t
 login-time claims forward unchanged — they then stay frozen for the whole family (up to
 `absoluteLifetimeSeconds`).
 
-**Racing "log out everywhere".** Logout-all, password reset/change and account deletion record
-`sessionsRevokedAt` on the user *before* revoking the rows; a refresh re-checks it after writing
-its successor and, if the chain was revoked meanwhile, revokes the new row and answers 401
-`TOKEN_REVOKED`. MFA enrolment writes the same watermark with the enrolling session's family
-exempt (`sessionsRevokedExceptFamily`), so a refresh of another session already in flight is
-caught too.
+**Racing "log out everywhere".** Logout-all, revoke-all-sessions, password reset/change and
+account deletion increment the user's `sessionEpoch` (`userRepository.bumpSessionEpoch`) *before*
+revoking the rows. Every session row records the epoch its chain was authenticated in, and its
+successor inherits it; a refresh re-reads the user's epoch after writing the successor and, if it
+has moved past the chain's, revokes the new row and answers 401 `TOKEN_REVOKED`. MFA enrolment
+bumps the epoch with the enrolling session's family exempt (`sessionsRevokedExceptFamily`), so a
+refresh of another session already in flight is caught too. Counters rather than timestamps: the
+outcome doesn't depend on the app servers' clocks agreeing.
 
 Errors: `REFRESH_TOKEN_REQUIRED` (400), `VALIDATION_ERROR` (400, e.g. a non-string token),
 `COOKIE_CONFLICT` (400 — the refresh cookie sent twice),
@@ -338,7 +348,7 @@ a revocation-cache entry for its `jti`. Clears both cookies with the same attrib
 with (including `config.cookies.domain`). Errors: `REFRESH_TOKEN_REQUIRED` (400) if no token found
 anywhere, `COOKIE_CONFLICT` (400), `CSRF_ORIGIN_REJECTED` (403).
 
-**`POST /logout/all`** (auth required) — records `sessionsRevokedAt`, then revokes every session
+**`POST /logout/all`** (auth required) — bumps the user's `sessionEpoch`, then revokes every session
 for the caller (`revokeAllForUser`) but, unlike `revokeAllSessionsHandler` below, does **not**
 return `revokedCount` and does **not** write per-session revocation-cache entries — with
 `session.verifyOnEachRequest: false`, already-issued access tokens for those sessions stay valid

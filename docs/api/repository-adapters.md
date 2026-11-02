@@ -18,6 +18,12 @@ Several newer pieces are **optional**: an adapter without them still boots and w
 weaker fallback — some logged at startup, some when first needed. See
 [Optional methods and their fallbacks](#optional-methods-and-their-fallbacks).
 
+Everything else is **required**, and checked at startup (0.4.0): `initIdentityProvider()` refuses
+an adapter that lacks any method listed in `REQUIRED_STORAGE_METHODS` (`src/storage/interfaces.js`)
+or `close`, closing it and naming every missing method —
+`Storage adapter is missing required methods: userRepository.bumpSessionEpoch, ... — see
+src/storage/interfaces.js`. In the listings below, the methods without `?` are the required ones.
+
 ## `StorageContract`
 
 ```ts
@@ -68,11 +74,12 @@ findByEmail(email, opts?: { select?: string }): Promise<User | null>
 findByExternalProvider(provider, providerId): Promise<User | null>
 updateById(id, patch, opts?): Promise<User | null>
 updateByIdIfStatus(id, status: string, patch): Promise<User | null> // required (0.4.0), ATOMIC — see below
-incrementFailedLoginAttempts(id): Promise<User | null> // atomic $inc, returns post-increment doc (no longer called since 0.4.0)
+bumpSessionEpoch(id, opts?: { exceptFamily?: string | null }): Promise<number | null> // required (0.4.0), ATOMIC — see below
+incrementFailedLoginAttempts?(id): Promise<User | null> // atomic $inc, returns post-increment doc (no longer called since 0.4.0)
 claimTotpStep?(id, step: number): Promise<boolean>        // optional (0.4.0), ATOMIC — see below
 consumeRecoveryCode?(id, codeHash: string): Promise<boolean> // optional (0.4.0), ATOMIC — see below
 linkExternalProvider(id, link: { provider, providerId, email, connectedAt }): Promise<User>
-deleteById(id): Promise<void>
+deleteById?(id): Promise<void>  // not called by idp-core
 countAll(): Promise<number>
 findMany(opts: { skip?: number; limit?: number }): Promise<User[]>
 ```
@@ -82,6 +89,12 @@ findMany(opts: { skip?: number; limit?: number }): Promise<User[]>
   changed. Every activation of a pending account (verify-email, magic link, SSO, a password reset)
   and the repeat registration of a pending address write through it, so a registration that read
   the account as pending can't put its password on an account its owner activated meanwhile.
+- **`bumpSessionEpoch(id, { exceptFamily })`** — one atomic write: increment the user's
+  `sessionEpoch` (a number, default 0), set `sessionsRevokedExceptFamily = exceptFamily` (`null`
+  when omitted) and `sessionsRevokedAt` to now; resolve the **new** epoch (`null` for an unknown
+  user). Every "revoke all of this user's sessions" calls it *before* revoking the rows — logout-all,
+  revoke-all-sessions, password reset/change, account deletion, and MFA enrolment's sign-out of the
+  other sessions (the only caller that passes `exceptFamily`, the enrolling session's family).
 - **`claimTotpStep(id, step)`** — set `mfaLastTotpStep = step` only if it is unset or lower;
   resolve whether *this* call set it. This is what stops a TOTP code (including the one that
   confirmed enrolment) from being accepted twice.
@@ -90,17 +103,17 @@ findMany(opts: { skip?: number; limit?: number }): Promise<User[]>
   array index (a concurrent regeneration would make an index point at the wrong code).
 
 User fields an adapter must persist (in addition to the profile/status fields it already had):
-`mfaLastTotpStep` (number, the last accepted TOTP time step) and `sessionsRevokedAt` (date —
-written by logout-all, password reset/change and account deletion *before* the sessions are
-revoked; a refresh re-reads it via `findById(id, { select: 'sessionsRevokedAt' })` after writing
-its successor row, so a refresh racing "log out everywhere" can't survive it; the OAuth2 code grant
-also refuses a code created at or before it, and a login re-checks it after inserting its session),
-`sessionsRevokedExceptFamily` (string or null — the one session family exempt from
-`sessionsRevokedAt`: MFA enrolment signs out every *other* session with the same watermark; every
-other writer of `sessionsRevokedAt` sets it back to `null`; read together with it, `findById(id, {
-select: 'sessionsRevokedAt sessionsRevokedExceptFamily' })`), and `registrationContested` (boolean,
-default `false` — set when a still-pending address is registered again; verify-email then needs the
-password). Since 0.4.0 the failed-password lockout lives in the attempt counter
+`mfaLastTotpStep` (number, the last accepted TOTP time step); `sessionEpoch` (an **integer**,
+default 0, written only by `bumpSessionEpoch` — return it on **every** user read, including
+`findByEmail`; a read without an integer `sessionEpoch` makes sign-in and code redemption fail
+closed, with an error logged: a
+login records the epoch of the user it loaded before checking the password, and a refresh, login or
+code redemption re-reads it via `findById(id, { select: 'sessionEpoch sessionsRevokedExceptFamily'
+})` after writing its row, so one racing "log out everywhere" can't survive it);
+`sessionsRevokedExceptFamily` (string or null — the one session family exempt from the latest
+bump); `sessionsRevokedAt` (date, informational since 0.4.0 — nothing compares it); and
+`registrationContested` (boolean, default `false` — set when a still-pending address is registered
+again; verify-email then needs the password). Since 0.4.0 the failed-password lockout lives in the attempt counter
 (`password-login:<userId>`), not on the user: `failedLoginAttempts`/`lockUntil` are only read (rows
 locked before 0.4.0) and cleared, never set. The user also has a
 generic `metadata` object — see
@@ -111,7 +124,9 @@ generic `metadata` object — see
 createSession(input): Promise<Session>
 findByRefreshTokenHash(hash): Promise<Session | null>
 findByJti?(jti): Promise<{ user, expiresAt: Date, revokedAt: Date | null, revokeReason?, familyId?, createdAt? } | null>  // optional (0.3.0) — see below
-revokeByRefreshTokenHash(hash, opts?: { onlyIfActive?: boolean; reason?: string }): Promise<Session | null>
+revokeByRefreshTokenHash(hash, opts?: { onlyIfActive?: boolean; reason?: string }): Promise<Session | null>  // revokedAt from the DATABASE clock (0.4.0)
+rotatedWithin(hash, seconds: number): Promise<boolean>     // required (0.4.0) — see below
+raiseFamilyEpoch(familyId, epoch: number): Promise<void>   // required (0.4.0) — see below
 isFamilyRevoked(familyId): Promise<boolean>  // required (0.4.0) — see below
 isFamilyLive(familyId): Promise<boolean>     // required (0.4.0) — see below
 revokeFamily?(familyId, opts?: { reason?: string }): Promise<{ revokedCount: number; jtis: string[] }>       // optional (0.4.0)
@@ -119,7 +134,7 @@ revokeForClient?(clientId, opts?: { userId?: string }): Promise<{ revokedCount: 
 revokeById(id, userId): Promise<Session | null>
 revokeAllForUser(userId, opts?: { exceptTokenHash?: string; exceptJti?: string }): Promise<{ revokedCount: number }>
 listActiveForUser(userId): Promise<Session[]>
-listHistoryForUser(userId, opts?: { limit?: number }): Promise<Session[]>
+listHistoryForUser?(userId, opts?: { limit?: number }): Promise<Session[]>  // not called by idp-core
 existsForDevice(userId, fingerprint: string | null, rawDeviceInfo: string): Promise<boolean>  // Mongo adapter: via Model.exists(), which resolves { _id } | null — truthy/falsy-compatible, not a literal boolean
 recordIssuedAccessToken?(entry): Promise<void>  // optional, write-only audit
 createSessionForLogin(input): Promise<Session>  // atomic composite write — see below
@@ -143,6 +158,7 @@ and return them from `findByRefreshTokenHash` / `revokeByRefreshTokenHash`:
 | `familyCreatedAt` | Start of the family; no row may outlive `familyCreatedAt + session.absoluteLifetimeSeconds`. |
 | `familyRevokedAt` | Tombstone written by `revokeFamily` on **every** row of the family, live or already revoked (see below). |
 | `revokeReason` | Written by `revokeByRefreshTokenHash` from `opts.reason` (see below). |
+| `sessionEpoch` | The user's `sessionEpoch` when this chain was authenticated (number, default 0); copied across rotations, raised by `raiseFamilyEpoch`. A row whose epoch is behind the user's belongs to a revoked chain. |
 
 **`findByRefreshTokenHash(hash)`** is called on **every** refresh (0.4.0): `/refresh` and the OAuth2
 `refresh_token` grant read the row first and run every check — kind/client binding, user status,
@@ -155,7 +171,21 @@ callers only one gets the row. Resolves the row **as it was before** revocation.
 `reason` as the row's `revokeReason`: a refresh passes `'rotated'` (and `'misused'` when a token is
 presented at the wrong endpoint or by the wrong client), and that is how a replayed,
 already-rotated token is recognised later (`findByRefreshTokenHash` must return `revokedAt` and
-`revokeReason`).
+`revokeReason`). Since 0.4.0, write `revokedAt` from the **database's** clock (Mongo: `$$NOW` in a
+pipeline update; SQL: `now()`), not the app server's — `rotatedWithin` compares it with that same
+clock.
+
+**`rotatedWithin(hash, seconds)`** (required, 0.4.0) — whether the row with this token hash was
+revoked with `revokeReason: 'rotated'` less than `seconds` ago, **measured by the database's
+clock** (Mongo: `$expr: { $gt: ['$revokedAt', { $subtract: ['$$NOW', seconds * 1000] }] }`). It
+decides whether a replayed rotated token is inside `session.refreshReuseGraceSeconds` (only refused)
+or past it (the whole family is revoked); the rotation and the replay may run on servers whose
+clocks differ, so neither server's clock is used.
+
+**`raiseFamilyEpoch(familyId, epoch)`** (required, 0.4.0) — set `sessionEpoch` to at least `epoch`
+(never lower it) on every row with that `familyId`; do nothing for a falsy id. Used when MFA
+enrolment signs out the other sessions: the enrolling session's family moves into the new epoch,
+so a later revocation that exempts it again still recognises it.
 
 **`revokeFamily(familyId, { reason })`** — revokes every live row with that `familyId` and returns
 their `jti`s (which are pushed into the revocation cache). Used when a rotated refresh token is
@@ -183,7 +213,8 @@ revocation, client deactivation and `GET /oidc/end-session`. Match pre-0.4.0 row
 their `{ clientId, scopes[] }` claims shape, as the Mongo adapter does. Without it, those operations
 log a warning and leave the client's tokens working.
 
-**`revokeAllForUser(userId, { exceptTokenHash, exceptJti })`** — `exceptJti` (0.4.0) keeps the row
+**`revokeAllForUser(userId, { exceptTokenHash, exceptJti })`** — always called right after
+`userRepository.bumpSessionEpoch`. `exceptJti` (0.4.0) keeps the row
 whose `jti` matches: enabling MFA signs out every *other* session of the account. An adapter that
 ignores `exceptJti` also signs out the session that just enrolled.
 
@@ -196,8 +227,8 @@ a real backend failure (→ 503 `SESSION_STORE_UNAVAILABLE`). Without it, the mi
 to the per-process revocation cache, with a startup warning — logout-all and password reset then
 don't revoke access tokens before they expire. See [Middleware](middleware.md). Since 0.4.0 it is
 also used outside the middleware, so return the row's `familyId`, `revokeReason` (and `createdAt`) too: MFA
-enrolment reads the enrolling session's family through it (to exempt it from the sign-out
-watermark), and the code grant checks that the session which authorized a code is still live
+enrolment reads the enrolling session's family through it (to exempt it from the `sessionEpoch`
+bump), and the code grant checks that the session which authorized a code is still live
 (`revokedAt`). Without `findByJti`, both checks are skipped.
 
 ### `AuthorizationCodeRepository`
@@ -208,12 +239,14 @@ findUsedByCodeHash?(hash): Promise<AuthCode | null>  // optional (0.4.0)
 markReused?(hash): Promise<void>                      // optional (0.4.0) — set reuseDetectedAt on a redeemed code
 pruneExpired?(): Promise<{ deletedCount: number }>
 ```
-Codes now also carry `nonce` (OIDC, from `/authorize`, echoed into the ID token), `authTime` and
+Codes now also carry `nonce` (OIDC, from `/authorize`, echoed into the ID token), `authTime`,
 `sessionJti` (the `jti` of the access token — i.e. the session — that authorized the code; at
-redemption the code is refused with `INVALID_GRANT` if that session row is missing or revoked) —
-persist all three — and should return `createdAt`: the code grant refuses a code created at or before
-the user's `sessionsRevokedAt`, or before the consent's `grantedAt` (a code without `createdAt`
-skips those two time comparisons). **`findUsedByCodeHash(hash)`** returns a code that was *already* redeemed (null for an
+redemption the code is refused with `INVALID_GRANT` if that session row is missing or revoked),
+`sessionEpoch` (the user's epoch when the code was issued) and `consentVersion` (the consent's
+`version` it was issued under) — persist all five as given and return them from
+`consumeByCodeHash`. The code grant refuses a code whose `sessionEpoch` is behind the user's (a "log
+out everywhere" since) or whose `consentVersion` differs from the consent's current `version` (the
+consent was granted again or revoked since). **`findUsedByCodeHash(hash)`** returns a code that was *already* redeemed (null for an
 unknown or still-unused one), so keep consumed codes until they expire rather than deleting them on
 use. When a code is presented a second time, everything its first redemption issued (session family
 `code:<id of the code>`) is revoked and `OAUTH2_CODE_REUSE_DETECTED` is audited. Without it, a
@@ -230,10 +263,15 @@ find(userId, clientId): Promise<Consent | null>
 listForUser(userId): Promise<Consent[]>
 revoke(userId, clientId): Promise<void>
 ```
-`find` must return only a live (unrevoked) consent, with its `scopes`, `expiresAt` (if any) and
-`grantedAt` — `upsert` must reset `grantedAt` to now. The OAuth2 code grant (0.4.0) refuses a code
-whose consent is missing, expired, doesn't cover the code's scopes, or was (re)granted after the
-code was issued.
+Every consent has a `version` (number, default 0) that `upsert` **and** `revoke` both increment
+atomically (Mongo: `$inc: { version: 1 }` in the same update). `upsert` must resolve the consent
+**after** the write, with its new `version`. `find` must return only a live (unrevoked) consent,
+with its `scopes`, `expiresAt` (if any), `grantedAt` (`upsert` resets it to now; shown to the user)
+and `version` — an **integer** (0 for a consent that predates the field); a consent read without
+one makes authorization and code redemption fail closed, with an error logged. An authorization
+code records the `version` it was issued under, and the OAuth2 code
+grant (0.4.0) refuses a code whose consent is missing, expired, doesn't cover the code's scopes, or
+has a different `version` — a counter, so no clocks are compared.
 
 ### `OAuthClientRepository`
 ```ts
@@ -245,9 +283,10 @@ listMany(opts: { skip?: number; limit?: number }): Promise<Client[]>
 countAll(): Promise<number>
 ```
 `clientSecretHash` is an opaque string to the adapter. New secrets are stored as
-`hmac-sha256:<hex>` (keyed by `security.tokenHashSecret`); bcrypt hashes from before 0.4.0 still
-verify and are replaced through `updateByClientId(clientId, { clientSecretHash })` on their next
-successful use — so `updateByClientId` must accept that field.
+`hmac-sha256:<hex>` (under a key derived from `security.tokenHashSecret`); bcrypt hashes from before
+0.4.0, and hashes under a secret in `security.previousTokenHashSecrets`, still verify and are
+replaced through `updateByClientId(clientId, { clientSecretHash })` on their next successful use —
+so `updateByClientId` must accept that field.
 
 ### `VerificationTokenRepository`
 ```ts
@@ -278,9 +317,11 @@ Both consume methods must be ATOMIC and honour `expiresAt`.
   Email verification is not covered — a contested address legitimately has one row per
   registration.
 
-Since 0.4.0 the email-verification `verificationCode` is stored as an HMAC (keyed by
+Since 0.4.0 the email-verification `verificationCode` is stored as an HMAC (under a key derived from
 `security.tokenHashSecret`), not the 6 digits, so `consumeByCode` is called with that HMAC — it is
-an exact-match lookup, nothing more. (Codes issued before 0.4.0 were stored in plain text; the
+an exact-match lookup, nothing more. After a `tokenHashSecret` rotation, a token or code may be
+looked up under several hashes in turn (the current secret's, then each previous one's) — each an
+ordinary exact-match call. (Codes issued before 0.4.0 were stored in plain text; the
 verify endpoint tries a raw 6-digit code as a second lookup until they expire.) `deleteAllForUser` is
 now used more: a completed reset (its reset tokens, and on a pending account its email-verification
 tokens), every activation, and a resend of an uncontested verification email all invalidate the
@@ -325,7 +366,7 @@ findByCredentialId(credentialId): Promise<Credential | null>
 findByUserId(userId): Promise<Credential[]>
 updateCounter(credentialId, newCounter): Promise<boolean>        // ATOMIC conditional write (0.4.0)
 deleteByCredentialId(credentialId, userId): Promise<boolean>     // scoped to the claimed owner; resolves whether one was deleted
-countForUser(userId): Promise<number>
+countForUser?(userId): Promise<number>  // not called by idp-core
 ```
 `credentialId` is the base64url credential ID from the browser (globally unique per WebAuthn spec)
 and is the natural lookup key during both passwordless and MFA-second-factor authentication.
@@ -387,11 +428,14 @@ adapters don't yet and get the fallbacks.
 | `ServiceKeyRepository.findByKid` | 0.4.0 | A revoked key is still refused (by `upsertByKid`, before any demotion), just without the early check. |
 
 Changed **required** behaviour in 0.4.0, with no fallback: persist the new session fields (`kind`,
-`authTime`, `familyId`, `familyCreatedAt`, `revokeReason`) and `revokeByRefreshTokenHash`'s
-`reason`; honour `revokeAllForUser`'s `exceptJti`; persist `nonce`/`authTime`/`sessionJti` on
-authorization codes, `mfaLastTotpStep`/`sessionsRevokedAt`/`sessionsRevokedExceptFamily`/
-`registrationContested` on users and `passwordHash` on email-verification tokens; implement
-`UserRepository.updateByIdIfStatus`, `SessionRepository.isFamilyRevoked` and `isFamilyLive` (with `revokeFamily`
+`authTime`, `familyId`, `familyCreatedAt`, `revokeReason`, `sessionEpoch`) and
+`revokeByRefreshTokenHash`'s `reason`, writing its `revokedAt` from the database clock; honour
+`revokeAllForUser`'s `exceptJti`; persist `nonce`/`authTime`/`sessionJti`/`sessionEpoch`/
+`consentVersion` on authorization codes, `mfaLastTotpStep`/`sessionEpoch`/`sessionsRevokedAt`/
+`sessionsRevokedExceptFamily`/`registrationContested` on users, a `version` on consents (incremented
+by `upsert` and `revoke`; `upsert` resolves the updated consent) and `passwordHash` on
+email-verification tokens; implement `UserRepository.updateByIdIfStatus` and `bumpSessionEpoch`,
+`SessionRepository.rotatedWithin`, `raiseFamilyEpoch`, `isFamilyRevoked` and `isFamilyLive` (with `revokeFamily`
 tombstoning every row, `familyRevokedAt`), `VerificationTokenRepository.findActive`, `clearCodes`
 and `replaceForUser` (with a unique constraint on one live `password_reset` / `magic_link` per
 user), and `ServiceKeyRepository.setStatusByKid` (recording `statusChangedAt`, honouring
@@ -399,6 +443,16 @@ user), and `ServiceKeyRepository.setStatusByKid` (recording `statusChangedAt`, h
 make `CredentialRepository.updateCounter` and `deleteByCredentialId` conditional writes that resolve
 a boolean. A custom **cache** adapter also needs the new atomic `take()` — see
 [Cache Interface](cache-interface.md).
+
+**Existing rows.** Users and consents written before these fields existed must read back with
+`sessionEpoch` / `version` 0 — the Mongo models' schema defaults do this; a custom adapter returns
+0 for a missing value (or backfills it); one that reads back without an integer `sessionEpoch` /
+`version` is refused — sign-in and code redemption fail closed, with an error log. On codes and
+session rows a missing `sessionEpoch` is read as 0 (also failing closed once the user's epoch has
+moved on); a code without `consentVersion` is refused at redemption. The hashes in `tokenHash`,
+`code`, `verificationCode`, `mfaRecoveryCodes[].codeHash` and `clientSecretHash` are keyed per
+purpose since 0.4.0, and those written by 0.3.x don't verify (bcrypt client secrets excepted) — see
+[Tokens & Signing](tokens-rs256.md#opaque-token-hashing).
 
 ## The built-in MongoDB adapter
 
@@ -448,7 +502,10 @@ cluster).
 `attempt-counter` (collection model `IdpAttemptCounter`, unique on `key`, TTL index on
 `expiresAt`) — one per repository (session backs two models). All registered on the dedicated
 connection via `defineXModel(connection, ...)` factories. The session model's `{ jti: 1 }` index
-serves `findByJti`, and `{ familyId: 1, revokedAt: 1 }` serves `revokeFamily` / `isFamilyRevoked`.
+serves `findByJti`, and `{ familyId: 1, revokedAt: 1 }` serves `revokeFamily` / `isFamilyRevoked` /
+`raiseFamilyEpoch`. `revokeByRefreshTokenHash` writes `revokedAt` as `$$NOW` (a pipeline update)
+and `rotatedWithin` compares it against `$$NOW`, so the reuse grace window uses the database's
+clock alone.
 The verification-token model adds the partial unique index `one_link_per_user` (`{ kind: 1, user: 1
 }`, `kind ∈ { password_reset, magic_link }`) behind `replaceForUser`; Mongoose builds it on startup
 unless `autoIndex` is off. `createMongoStorage()` waits for every model's indexes (`Model.init()`)

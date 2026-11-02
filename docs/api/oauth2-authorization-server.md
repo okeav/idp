@@ -68,12 +68,11 @@ set for OAuth2 tokens. For an `oauth2-client` (client_credentials) token `req.au
 ## Authorization endpoint
 
 **`GET /oauth2/authorize`** — query (`authorizeQuerySchema`): `client_id, redirect_uri,
-response_type, scope?, state?, nonce?, code_challenge?, code_challenge_method?`. Mounted behind
-`authContextMiddleware({ optional: true })` — it behaves differently for logged-in vs. anonymous
-callers rather than requiring auth outright. It answers JSON (or a redirect), so your frontend
-calls it with the user's session (cookie or Bearer) and acts on the result. OIDC `prompt` and
-`max_age` are **not** supported — they're ignored, so an existing session is reused however old it
-is; an RP that needs a fresh login checks the ID token's `auth_time` itself.
+response_type, scope?, state?, nonce?, prompt?, max_age?, code_challenge?, code_challenge_method?`.
+Mounted behind `authContextMiddleware({ optional: true })` — it behaves differently for logged-in
+vs. anonymous callers rather than requiring auth outright. It answers JSON (or a redirect), so your
+frontend calls it with the user's session (cookie or Bearer) and acts on the result. OIDC `prompt`
+and `max_age` are honoured — see [`prompt` and `max_age`](#prompt-and-max_age).
 
 The request is validated **before** the login check, in this order — so an anonymous caller still
 gets these errors:
@@ -84,16 +83,22 @@ gets these errors:
    approved yet".
 3. `redirect_uri` must exactly match one of `client.redirectUris` → `INVALID_REDIRECT_URI` (400).
 4. Every requested scope must be in `client.allowedScopes` → `INVALID_REQUEST` (400). Scope
-   defaults to `'openid'` if omitted. **`openid` is not implicitly allowed** — it must be listed
+   defaults to `'openid'` if omitted; a `scope` that holds no scope at all (e.g. only spaces) →
+   `INVALID_REQUEST` (400). **`openid` is not implicitly allowed** — it must be listed
    in the client's `allowedScopes` like any other scope (the registration default,
    `['openid', 'email', 'profile']`, includes it).
 5. PKCE (see below) → `INVALID_REQUEST` (400) if a required `code_challenge` is missing.
+6. `prompt` may hold only `none`, `login`, `consent` and `select_account` (space-separated), and
+   `none` only on its own → `INVALID_REQUEST` (400). (`max_age` must be a non-negative integer of
+   seconds — checked with the rest of the query schema, before step 1: `VALIDATION_ERROR`, 400.)
 
 Then one of three outcomes:
 
-1. **Not authenticated** → `401 { action: 'login_required' }` — your frontend sends the user
-   through your own login UI and replays the same authorize URL afterwards.
-2. **Missing consent** → `200 { action: 'consent_required', consent_challenge, client: { name,
+1. **Login required** → `401 { action: 'login_required', reason }` — `reason` is
+   `'unauthenticated'` (no session), `'prompt_login'` or `'max_age'` (see below). Your frontend
+   sends the user through your own login UI and replays the same authorize URL afterwards. (With
+   `prompt=none` this is a redirect instead.)
+2. **Missing consent** (or `prompt=consent`) → `200 { action: 'consent_required', consent_challenge, client: { name,
    logoUrl, websiteUrl, privacyPolicyUrl }, scopes, missingScopes }` with `Cache-Control:
    no-store`. The whole validated request (client, redirect URI, scopes, `state`, `nonce`, PKCE
    challenge, and the user's `auth_time`) is stored server-side under `consent_challenge` — a
@@ -105,6 +110,26 @@ Then one of three outcomes:
 Consent is scope-set-based (`missingScopes = requested − previously consented`) — there's no
 separate "skip consent for first-party clients" flag; the only bypass is a prior matching consent
 record, written by `POST /oauth2/authorize/confirm`.
+
+### `prompt` and `max_age`
+
+OIDC Core §3.1.2.1. Discovery lists `prompt_values_supported: ["none", "login", "consent",
+"select_account"]`.
+
+| Parameter | Behaviour |
+|---|---|
+| `prompt=none` | Never asks for UI. Where a login would be required it redirects to `redirect_uri` with `error=login_required`; where consent would be required, `error=consent_required` (both with `state` and `iss`). Otherwise it issues a code as usual. |
+| `prompt=login` | The user's login must have happened within the last 60 seconds (`FRESH_LOGIN_SECONDS`), else `401 { action: 'login_required', reason: 'prompt_login' }`. |
+| `prompt=select_account` | Treated as `prompt=login` — there is no account chooser; signing in again is how the user picks an account. |
+| `prompt=consent` | Shows the consent screen (`consent_required`) even when a consent covering the scopes exists. |
+| `max_age=0` | Same as `prompt=login`. |
+| `max_age=N` | If the login (`auth_time`, from the access token) is more than N seconds old, or unknown, → `401 { action: 'login_required', reason: 'max_age' }`. |
+
+The login's age comes from the session's access token (`auth_time`, which a refresh keeps
+unchanged). The 60-second window is what lets the flow complete: your IdP page signs the user in,
+then repeats the same authorize request, which must find that new login fresh rather than ask for
+another one. A login in the last 60 seconds therefore satisfies `prompt=login` for any authorize
+request, not only the one that triggered it.
 
 Every authorization response (code or error) carries **`iss`** — the issuer (RFC 9207). Clients
 should check it against the issuer they started the flow with, to detect authorization-server
@@ -195,11 +220,12 @@ its secret.
 malformed Basic header — answers the same `401 INVALID_CLIENT`**, so the endpoint doesn't reveal
 which client ids exist.
 
-Client secrets are 256-bit random values, stored as `hmac-sha256:<hex>` keyed by
-`security.tokenHashSecret` (a slow hash adds nothing for a random secret, and bcrypt's cost per
-attempt was a cheap way to stall the server). Secrets stored as bcrypt by earlier versions still
-verify and are re-stored as HMAC on their next successful use. Changing `tokenHashSecret`
-therefore invalidates every HMAC-stored client secret.
+Client secrets are 256-bit random values, stored as `hmac-sha256:<hex>` under the client-secret
+key derived from `security.tokenHashSecret` (a slow hash adds nothing for a random secret, and
+bcrypt's cost per attempt was a cheap way to stall the server). Secrets stored as bcrypt by earlier
+versions, or under a secret now listed in `security.previousTokenHashSecrets`, still verify and are
+re-stored under the current key on their next successful use (see
+[rotating `tokenHashSecret`](bootstrap-config.md#rotating-securitytokenhashsecret)).
 
 ### `authorization_code`
 
@@ -218,11 +244,14 @@ stores its access token's `jti`, `sessionJti`) has since been signed out or is g
 landing while `/authorize` was in flight. An ordinary refresh of that session doesn't count: a row
 retired by rotation whose family still has a live row (`isFamilyLive`) keeps the code redeemable.
 (A sessionless token — from the public `issueAccessToken()` export — binds no session to the code.)
-It is also refused if it was issued at or before the user's
-`sessionsRevokedAt` (logout-all, password reset/change, account deletion), or if the user's
-consent for this client is missing, expired, doesn't cover the code's scopes, or was (re)granted
-after the code was issued — so a code minted with a stolen session just before the victim signed
-out everywhere, or withdrew consent, can't become a fresh long-lived session. After the new session
+It is also refused if the user's sessions were revoked since it was issued (logout-all, password
+reset/change, account deletion, MFA enrolment — the code records the user's `sessionEpoch` and the
+user's has moved on), or if the user's consent for this client is missing, expired, doesn't cover
+the code's scopes, or has changed since the code was issued (the code records the consent's
+`version`, which every grant and revocation increments) — so a code minted with a stolen session
+just before the victim signed out everywhere, or withdrew consent, can't become a fresh long-lived
+session. Both are counters, so the check doesn't depend on the clocks of the servers that issued
+and redeem the code. After the new session
 row is written, the redemption re-checks that the code wasn't replayed meanwhile (`reuseDetectedAt`,
 the family tombstone) and that no "log out everywhere" landed while it ran; either way the new row
 is revoked and the request fails (`INVALID_GRANT` / 401 `TOKEN_REVOKED`).
@@ -254,7 +283,8 @@ the old token cannot be used again).
   first-party `POST /refresh` refuses OAuth2 refresh tokens.
 - **Reuse detection.** A token that was already rotated, presented again after
   `session.refreshReuseGraceSeconds` (default 10 s), revokes its whole family and emits
-  `REFRESH_TOKEN_REUSE_DETECTED`; within the grace window the replay is only refused. A refresh
+  `REFRESH_TOKEN_REUSE_DETECTED`; within the grace window (measured by the database's clock —
+  `rotatedWithin`) the replay is only refused. A refresh
   racing that revocation is caught after it inserts its successor (`isFamilyRevoked`) and fails
   `TOKEN_REVOKED` (401).
 - **Absolute lifetime.** A family ends `session.absoluteLifetimeSeconds` (default 90 days) after

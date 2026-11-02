@@ -172,7 +172,8 @@ Every route runs behind `clientManagement.middleware` first.
 | Method | Path | Middleware |
 |---|---|---|
 | GET | `/userinfo` | `authContextMiddleware({ accept: ['oauth2-user'] })` — the one route that takes a token issued to an OAuth2 client |
-| GET | `/oidc/end-session` | `authContextMiddleware({ optional: true })` |
+| GET | `/oidc/end-session` | `authContextMiddleware({ optional: true })` — signed in without an `id_token_hint`, answers `{ action: 'logout_confirmation_required' }` |
+| POST | `/oidc/end-session` | `express.urlencoded()`, `authContextMiddleware({ optional: true })` — the confirmed request (JSON or form body); trusted origins only |
 | GET | `/.well-known/openid-configuration` | — |
 
 ### SSO — `features.sso`
@@ -233,7 +234,7 @@ Rules worth knowing (most body schemas are `.strict()` — unknown keys are a 40
 | `updateProfileSchema` | `avatarUrl` must be `https`; `locale` a BCP 47 tag; `zoneinfo` an IANA zone name. |
 | `disableMfaSchema`, `regenerateRecoveryCodesSchema` | `{ password?, code }` — `password` is required by the handler only when the account has one; `code` is a current TOTP code. |
 | `verifyMfaChallengeSchema` | `code` 6–32 characters, so a recovery code (`XXXXX-XXXXX-XXXXX-XXXXX`, 23 characters) fits. |
-| `authorizeQuerySchema` | `nonce` (≤ 512 chars) and PKCE: `code_challenge` must be a 43-character base64url S256 value and requires `code_challenge_method=S256` (`plain` is refused). Not `.strict()`. |
+| `authorizeQuerySchema` | `nonce` (≤ 512 chars), `prompt` (≤ 100 chars; its values are checked by the handler), `max_age` (a non-negative integer of seconds, ≤ 10 digits), and PKCE: `code_challenge` must be a 43-character base64url S256 value and requires `code_challenge_method=S256` (`plain` is refused). Not `.strict()`. |
 | `confirmAuthorizeSchema`, `denyAuthorizeSchema` | Only `{ consent_challenge }` — the value `/oauth2/authorize` returned. Client, scopes, redirect URI, state, nonce and PKCE come from the stored request, never this body. |
 | `tokenSchema` | `client_id`/`client_secret` optional (they may come as HTTP Basic instead); `code_verifier` 43–128 unreserved characters; `.passthrough()`. |
 | `revokeTokenSchema`, `introspectTokenSchema` | `{ token, token_type_hint?, client_id?, client_secret? }`. |

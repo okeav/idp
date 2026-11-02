@@ -63,7 +63,12 @@ await initIdentityProvider({
     // with `issuer` and pass idp-core's CSRF origin check on cookie-
     // authenticated POSTs without any extra config. If you ever serve the
     // pages from another origin, list it here.
-    cookies: { trustedOrigins: [BASE_URL] },
+    //
+    // refreshTokenInBody: true — the harness pages display the refresh token
+    // and flow #3 pastes it back. The default ('auto') leaves it out of the
+    // JSON body for browser requests, keeping it in the httpOnly cookie only;
+    // a real browser app should keep that default.
+    cookies: { trustedOrigins: [BASE_URL], refreshTokenInBody: true },
     security: {
         // idp-core refuses to boot with either of these under 32 characters.
         emailHashPepper: 'harness-dev-only-email-hash-pepper-not-secret',

@@ -63,6 +63,10 @@ updated for it. The ones you'll notice while clicking through:
   `http://localhost` as secure accept them). A Bearer header wins over the
   cookie, a body refresh token over the refresh cookie. The server listens
   on 127.0.0.1 only — it hands out any user's tokens.
+- **Refresh token in the JSON body** — `cookies.refreshTokenInBody` now
+  defaults to `'auto'`: browser requests get the refresh token only as the
+  httpOnly cookie. The harness sets it `true` so flow 2 can show the raw
+  token and flow 3 can paste it back; a real browser app keeps the default.
 - **CSRF** — cookie-authenticated POST/DELETEs, and every browser request to
   the endpoints that set or clear session cookies (`/login`, `/refresh`, `/logout`,
   `/mfa/verify`, `/magic-link/verify`, `/webauthn/*/verify`), must come from

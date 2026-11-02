@@ -161,8 +161,9 @@ request is subject to the [CSRF origin check](middleware.md#csrf-origin-check) (
 login only); a passkey login doesn't lift it either (only a lock recorded before 0.4.0 is cleared).
 
 **Success (200)**: `{ accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt, userId }`
-+ session cookies set (`refreshToken` is left out of the body under
-`cookies.refreshTokenInBody: false`).
++ session cookies set (`refreshToken` is in the body only as
+[`cookies.refreshTokenInBody`](bootstrap-config.md#cookiesrefreshtokeninbody) allows — by default,
+only for non-browser clients).
 
 **Errors**: `RATE_LIMIT_EXCEEDED` (429) / `RATE_LIMITER_UNAVAILABLE` (503); `INVALID_REQUEST`
 (400, malformed assertion — can't decode challenge or missing `response.id`);
