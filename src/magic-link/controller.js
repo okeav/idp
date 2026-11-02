@@ -5,7 +5,7 @@ import { hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.j
 import { auditLog, auditLogDetached, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey } from '../rate-limit/keys.js';
-import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus, mfaChallengeResponse } from '../password-auth/controllers.js';
+import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus, mfaChallengeResponse, refreshTokenInBody } from '../password-auth/controllers.js';
 
 /**
  * POST /magic-link/request
@@ -105,7 +105,7 @@ export async function verifyMagicLinkHandler(req, res, next) {
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,
-            refreshToken: session.refreshTokenValue,
+            ...refreshTokenInBody(state, session.refreshTokenValue),
             refreshTokenExpiresAt: session.refreshExpiresAt,
             userId: String(user.id),
             isNewUser,

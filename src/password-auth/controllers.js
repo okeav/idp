@@ -11,6 +11,7 @@ import { auditLog, auditLogDetached, safeInvokeHook, invokeHookDetached } from '
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey, emailKey } from '../rate-limit/keys.js';
 import { withAttemptBudget } from '../security/attempt-budget.js';
+import { assertTrustedOrigin } from '../middleware/csrf.js';
 
 function cookieOptions(state) {
     const c = state.config.cookies || {};
@@ -99,6 +100,15 @@ function clearSessionCookies(res, state) {
     res.clearCookie(COOKIE_NAMES.REFRESH_TOKEN, opts);
 }
 
+/**
+ * The refresh token also appears in login/refresh JSON bodies (for non-browser clients) unless
+ * `config.cookies.refreshTokenInBody` is false — set that for browser-only apps, so script on the
+ * page (an XSS) can never read the long-lived token the httpOnly cookie is protecting.
+ */
+function refreshTokenInBody(state, value) {
+    return state.config.cookies?.refreshTokenInBody === false ? {} : { refreshToken: value };
+}
+
 function setSessionCookies(res, state, { accessToken, refreshTokenValue, refreshExpiresAt }) {
     const opts = cookieOptions(state);
     res.cookie(COOKIE_NAMES.ACCESS_TOKEN, accessToken.token, { ...opts, expires: accessToken.expiresAt });
@@ -145,7 +155,8 @@ export async function registerHandler(req, res, next) {
             passwordHash,
             status: IDENTITY_STATUS.PENDING_VERIFICATION,
             profile: { firstName, lastName },
-            metadata: metadata || {},
+            // Written by whoever registers — persisted only when the app opted in (see registerSchema).
+            metadata: state.config.registration.acceptMetadata === true ? (metadata || {}) : {},
         });
 
         const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, user.id);
@@ -292,7 +303,7 @@ export async function loginHandler(req, res, next) {
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,
-            refreshToken: session.refreshTokenValue,
+            ...refreshTokenInBody(state, session.refreshTokenValue),
             refreshTokenExpiresAt: session.refreshExpiresAt,
             userId: String(user.id),
         });
@@ -350,8 +361,10 @@ export async function refreshTokenHandler(req, res, next) {
         const state = getState();
         await enforceRateLimit(state, `refresh:ip:${ipKey(req.ip)}`, state.config.rateLimiting.refreshToken);
 
-        const refreshTokenValue = req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN] || req.body?.refreshToken;
+        const cookieValue = req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN];
+        const refreshTokenValue = cookieValue || req.body?.refreshToken;
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required' });
+        if (refreshTokenValue === cookieValue) assertTrustedOrigin(state, req);
 
         const tokenHash = hashOpaqueToken(state, refreshTokenValue);
         const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash, { reason: 'rotated' });
@@ -415,7 +428,7 @@ export async function refreshTokenHandler(req, res, next) {
         await auditLog(state.logger, state.hooks, 'TOKEN_REFRESHED', { userId: String(user.id) });
 
         setSessionCookies(res, state, { accessToken, refreshTokenValue: newRefreshTokenValue, refreshExpiresAt });
-        res.json({ accessToken: accessToken.token, accessTokenExpiresAt: accessToken.expiresAt, refreshToken: newRefreshTokenValue, refreshTokenExpiresAt: refreshExpiresAt });
+        res.json({ accessToken: accessToken.token, accessTokenExpiresAt: accessToken.expiresAt, ...refreshTokenInBody(state, newRefreshTokenValue), refreshTokenExpiresAt: refreshExpiresAt });
     } catch (err) {
         next(err);
     }
@@ -426,6 +439,7 @@ export async function logoutHandler(req, res, next) {
         const state = getState();
         const refreshTokenValue = req.body?.refreshToken || req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN];
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required to log out' });
+        if (!req.body?.refreshToken) assertTrustedOrigin(state, req);
 
         const tokenHash = hashOpaqueToken(state, refreshTokenValue);
         const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash, { onlyIfActive: false });
@@ -646,4 +660,4 @@ export async function revokeAllSessionsHandler(req, res, next) {
     }
 }
 
-export { issueSession, setSessionCookies, clearSessionCookies, resolveClaims, cookieOptions, assertUsableStatus, mfaChallengeResponse };
+export { issueSession, setSessionCookies, clearSessionCookies, refreshTokenInBody, resolveClaims, cookieOptions, assertUsableStatus, mfaChallengeResponse };

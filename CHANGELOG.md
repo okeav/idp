@@ -72,6 +72,44 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   with `error=provider_error`). Google, Microsoft and GitHub exchanges use PKCE (S256); Apple's
   `id_token` must carry this login's `nonce` and the right `iss`/`aud`/`exp`. **Upgrade:** mount
   `cookie-parser` before the router (already needed for cookie sessions).
+- **Cookie-authenticated requests had no CSRF defence beyond SameSite (Medium).** `SameSite=Lax`
+  stops cross-*site* requests, but not ones from a sibling subdomain, and none at all under
+  `cookies.sameSite: 'none'`. A state-changing request whose credential is a cookie (the session
+  cookie, or the refresh cookie at `/refresh` and `/logout`) must now come from the issuer's origin
+  or one of `cookies.trustedOrigins` (or be `Sec-Fetch-Site: same-origin`); otherwise 403
+  `CSRF_ORIGIN_REJECTED`. Requests without `Origin`/`Sec-Fetch-Site` (non-browser clients) and
+  Bearer-authenticated requests are unaffected. **Upgrade:** list your frontends' origins in
+  `cookies.trustedOrigins` (`IDP_COOKIE_TRUSTED_ORIGINS`) if they use cookie sessions.
+- **Errors leaked internals.** The error handler shown in the README echoed every error's message
+  — database errors naming collections, indexes and values; body-parser errors echoing the request
+  body — and `IdpError` had no `status`, so Express's default handler answered 500 for every
+  401/429. `IdpError` now carries `status`/`statusCode`/`expose`, and the new `idpErrorHandler()`
+  export answers `{ error, message }` for client errors and a bare `{ error: 'INTERNAL_ERROR' }` (logged)
+  for everything else, with fixed messages for malformed or oversized bodies. `POST /refresh` now
+  validates its body (a non-string token was a 500). **Upgrade:** mount `idpErrorHandler()` after
+  the router, or apply the same rule in your own handler.
+- **Token-bearing responses were cacheable.** Every response from the router is now
+  `Cache-Control: no-store`, except the discovery and JWKS documents (now `public, max-age=300`).
+- **Self-registration could write `metadata`.** `POST /register` stored a user-supplied object on
+  the account and handed it to `resolveAuthContext` — any app that kept a role or tenant there
+  granted it to whoever registered. It is now ignored unless `registration.acceptMetadata: true`.
+  **Upgrade:** set that only if you treat the field as untrusted.
+- **bcrypt silently truncated long passwords** at 72 bytes, so two passwords sharing that prefix
+  both worked. Passwords over 72 bytes (UTF-8) are now refused at register, reset and change.
+- **Profile fields.** `avatarUrl` (released as the ID token's `picture`) must be `https` —
+  `javascript:` and `data:` URLs were accepted; `locale` and `zoneinfo` must be well-formed.
+- **The refresh token can be kept out of JSON bodies.** With `cookies.refreshTokenInBody: false`
+  (`IDP_COOKIE_REFRESH_TOKEN_IN_BODY`) it lives only in its httpOnly cookie, out of reach of page
+  script. Recommended for browser-only apps.
+- **Dependencies.** `zod` floor raised to `^4.6.7` (GHSA-mrhx-c7xc-m3w5, memory exhaustion); the
+  Express peer range is `^4.21.2 || ^5.1.0`. The lockfile is audit-clean; run `npm audit` in your
+  app too — `proxy-addr` ≤ 2.0.7 (IP spoofing through `trust proxy` subnets), `body-parser` and `qs`
+  had advisories, all fixed by updating within Express's own ranges.
+- **Examples and dev files.** The quickstart refuses to start in production on its public dev
+  fallbacks (secrets, MFA key, ephemeral signing key) and uses `idpErrorHandler()`. `.env.example`
+  no longer sets `NODE_ENV=development` (which turned off secure cookies for anyone copying it) and
+  documents every new variable. `docker-compose.yml` binds Mongo and Redis (both without auth) to
+  127.0.0.1 — Docker-published ports bypass host firewalls.
 - **`configFromEnv` silently turned protections off (Medium).** Only the exact string `"true"` was
   true, so `IDP_COOKIE_SECURE=` (blank), `=1` or `=TRUE` meant insecure cookies (likewise rate
   limiting, per-request session checks), and a non-numeric `IDP_MAX_FAILED_LOGIN_ATTEMPTS` became

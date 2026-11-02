@@ -15,7 +15,7 @@ import {
 } from '../password-auth/controllers.js';
 import {
     registerSchema, verifyEmailSchema, resendVerificationSchema, loginSchema,
-    forgotPasswordSchema, resetPasswordSchema, changePasswordSchema, logoutSchema, updateProfileSchema,
+    forgotPasswordSchema, resetPasswordSchema, changePasswordSchema, logoutSchema, refreshSchema, updateProfileSchema,
 } from '../password-auth/schemas.js';
 
 import { requestMagicLinkHandler, verifyMagicLinkHandler } from '../magic-link/controller.js';
@@ -84,13 +84,20 @@ export function buildRouter(opts = {}) {
     const clientManagementMiddleware = resolveClientManagement(opts.clientManagement);
     const router = express.Router();
 
+    // Every response here may carry tokens, codes or account data: never cache it. Discovery and
+    // JWKS handlers set their own (public) Cache-Control, overriding this.
+    router.use((_req, res, next) => {
+        res.set('Cache-Control', 'no-store');
+        next();
+    });
+
     // Password / email identity
     router.post('/register', validateBody(registerSchema), registerHandler);
     router.post('/register/verify-email', validateBody(verifyEmailSchema), verifyEmailHandler);
     router.post('/register/resend-verification', validateBody(resendVerificationSchema), resendVerificationEmailHandler);
     router.post('/login', validateBody(loginSchema), loginHandler);
     router.post('/mfa/verify', validateBody(verifyMfaChallengeSchema), verifyMfaChallengeHandler);
-    router.post('/refresh', refreshTokenHandler);
+    router.post('/refresh', validateBody(refreshSchema), refreshTokenHandler);
     router.post('/logout', validateBody(logoutSchema), logoutHandler); // refreshToken in the body OR the httpOnly cookie
     router.post('/logout/all', authContextMiddleware(), logoutAllHandler);
     router.post('/password/forgot', validateBody(forgotPasswordSchema), forgotPasswordHandler);

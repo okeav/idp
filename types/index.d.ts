@@ -1,4 +1,4 @@
-import type { Request, Response, NextFunction, RequestHandler, Router } from 'express';
+import type { Request, Response, NextFunction, RequestHandler, ErrorRequestHandler, Router } from 'express';
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -79,7 +79,23 @@ export interface IdpConfig {
         redis?: { host: string; port: number; username?: string; password?: string; db?: number; tls?: boolean | Record<string, unknown>; keepAliveMs?: number };
     };
     signingKeys: { keys: Record<string, SigningKeyEntry> };
-    cookies?: { secure?: boolean; sameSite?: 'lax' | 'strict' | 'none'; domain?: string };
+    cookies?: {
+        secure?: boolean;
+        sameSite?: 'lax' | 'strict' | 'none';
+        domain?: string;
+        /**
+         * Origins of your frontends that make cookie-authenticated requests. A cookie-authenticated
+         * POST/PUT/PATCH/DELETE from any other origin is refused (403 CSRF_ORIGIN_REJECTED). The
+         * issuer's origin is always trusted; Bearer-authenticated requests are unaffected.
+         */
+        trustedOrigins?: string[];
+        /** Default true. false: the refresh token is only ever in its httpOnly cookie, never in JSON bodies. */
+        refreshTokenInBody?: boolean;
+    };
+    registration?: {
+        /** Persist the user-supplied `metadata` from POST /register. Default false — it is attacker-controlled. */
+        acceptMetadata?: boolean;
+    };
     session?: {
         /**
          * Default false: `POST /refresh` carries forward the access token's
@@ -383,10 +399,17 @@ export function configFromEnv(env?: NodeJS.ProcessEnv): IdpConfig;
 export class IdpError extends Error {
     code: string;
     httpStatus: number;
+    /** Mirrors httpStatus, for Express's default handler and similar conventions. */
+    status: number;
+    statusCode: number;
+    /** True below 500: the message is written for clients. */
+    expose: boolean;
     cause?: unknown;
     constructor(opts: { code: string; httpStatus?: number; message?: string; cause?: unknown });
 }
 export function isIdpError(err: unknown): err is IdpError;
+/** Express error handler safe for the internet: IdpError < 500 → { error, message }; anything else → 500 { error } with no internals. */
+export function idpErrorHandler(opts?: { logger?: Logger }): ErrorRequestHandler;
 export const ERROR_CODES: Record<string, string>;
 
 // ── Token issuance / verification ────────────────────────────────────────

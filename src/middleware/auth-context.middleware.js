@@ -3,6 +3,7 @@ import { verifyAccessToken, classifyAccessToken } from '../signing/token.service
 import { isRevoked } from '../cache/index.js';
 import { IdpError } from '../errors/idp-error.js';
 import { CACHE_KEY_PREFIXES, COOKIE_NAMES, ACCESS_TOKEN_KINDS } from '../config/constants.js';
+import { assertTrustedOrigin } from './csrf.js';
 
 function parseBearer(header) {
     if (!header || typeof header !== 'string') return null;
@@ -54,6 +55,8 @@ export function authContextMiddleware(opts = {}) {
                 throw new IdpError({ code: 'AUTH_REQUIRED', httpStatus: 401, message: 'Authentication is required to access this resource' });
             }
 
+            // The cookie is attached by the browser whoever builds the request — so it must come from a trusted origin.
+            if (token === cookieToken) assertTrustedOrigin(state, req);
             const payload = await verifyAccessToken(state, token, { issuer: opts.issuer, audience: opts.audience, accept });
             await assertSessionLive(state, payload);
 

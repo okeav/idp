@@ -6,7 +6,7 @@ import { IDENTITY_STATUS } from '../config/constants.js';
 import { verifyPassword } from '../utils/password.js';
 import { hashOpaqueToken, verifyMfaChallengeToken as verifyMfaChallengeTokenJwt } from '../signing/token.service.js';
 import { auditLog } from '../hooks/index.js';
-import { issueSession, setSessionCookies, resolveClaims } from '../password-auth/controllers.js';
+import { issueSession, setSessionCookies, resolveClaims, refreshTokenInBody } from '../password-auth/controllers.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey } from '../rate-limit/keys.js';
 import { sealMfaSecret, openMfaSecret } from './secrets.js';
@@ -270,7 +270,7 @@ export async function verifyMfaChallengeHandler(req, res, next) {
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,
-            refreshToken: session.refreshTokenValue,
+            ...refreshTokenInBody(state, session.refreshTokenValue),
             refreshTokenExpiresAt: session.refreshExpiresAt,
             userId,
         });

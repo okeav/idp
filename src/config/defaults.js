@@ -78,6 +78,8 @@ export function withDefaults(config = {}) {
             ssoInitiate: { ...DEFAULT_RATE_LIMITS.ssoInitiatePerIp, ...config.rateLimiting?.ssoInitiate },
             serviceKeyRegistration: { ...DEFAULT_RATE_LIMITS.serviceKeyRegistrationPerIp, ...config.rateLimiting?.serviceKeyRegistration },
         },
+        // acceptMetadata: persist the user-supplied `metadata` from POST /register (off by default).
+        registration: { acceptMetadata: false, ...config.registration },
         hooks: config.hooks || {},
         hookTimeoutMs: config.hookTimeoutMs ?? 10_000,
         webhooks: { ...DEFAULT_WEBHOOK_CONFIG, ...config.webhooks },

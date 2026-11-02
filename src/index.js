@@ -6,7 +6,7 @@ export { initIdentityProvider } from './config/init.js';
 export { configFromEnv } from './config/from-env.js';
 
 // ── Errors ───────────────────────────────────────────────────────────────
-export { IdpError, isIdpError } from './errors/idp-error.js';
+export { IdpError, isIdpError, idpErrorHandler } from './errors/idp-error.js';
 export { ERROR_CODES } from './errors/error-codes.js';
 
 // ── Token issuance / verification (RS256) ───────────────────────────────

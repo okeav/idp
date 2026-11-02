@@ -68,6 +68,8 @@ export function configFromEnv(env = process.env) {
             secure: bool('IDP_COOKIE_SECURE', env.NODE_ENV !== 'development'),
             sameSite: env.IDP_COOKIE_SAME_SITE || 'lax',
             domain: env.IDP_COOKIE_DOMAIN || undefined,
+            trustedOrigins: list(env.IDP_COOKIE_TRUSTED_ORIGINS),
+            refreshTokenInBody: bool('IDP_COOKIE_REFRESH_TOKEN_IN_BODY', true),
         },
         security: {
             maxFailedLoginAttempts: int('IDP_MAX_FAILED_LOGIN_ATTEMPTS', 5, { min: 1 }),

@@ -1,6 +1,17 @@
 import crypto from 'crypto';
 import express from 'express';
-import { initIdentityProvider, buildRouter, cookieParser } from '@okeav/idp-core';
+import { initIdentityProvider, buildRouter, cookieParser, idpErrorHandler } from '@okeav/idp-core';
+
+// This quickstart falls back to throwaway dev values for anything not set in the environment.
+// Those values are public (they're in this file), so outside development every one of them must
+// be set — refuse to start rather than run with known keys.
+const isProduction = process.env.NODE_ENV === 'production';
+function devFallback(name, value) {
+    if (process.env[name]) return process.env[name];
+    if (isProduction) throw new Error(`[quickstart] ${name} must be set when NODE_ENV=production — the dev fallback is public`);
+    console.warn(`[quickstart] ${name} not set — using a DEV-ONLY value`);
+    return value;
+}
 
 // ── Signing key ──────────────────────────────────────────────────────────
 // A real deployment generates this once, stores it somewhere durable, and
@@ -12,6 +23,7 @@ let signingKey;
 if (process.env.IDP_SIGNING_KEY_PRIVATE && process.env.IDP_SIGNING_KEY_PUBLIC) {
     signingKey = { privateKey: process.env.IDP_SIGNING_KEY_PRIVATE, publicKey: process.env.IDP_SIGNING_KEY_PUBLIC };
 } else {
+    if (isProduction) throw new Error('[quickstart] IDP_SIGNING_KEY_PRIVATE/PUBLIC must be set when NODE_ENV=production');
     console.warn('[quickstart] No IDP_SIGNING_KEY_PRIVATE/PUBLIC set — generating an ephemeral RSA keypair for this run only.');
     const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
         modulusLength: 2048,
@@ -37,8 +49,8 @@ await initIdentityProvider({
     signingKeys: { keys: { 'quickstart-key-1': { ...signingKey, status: 'ACTIVE' } } },
 
     security: {
-        emailHashPepper: process.env.IDP_EMAIL_HASH_PEPPER || 'quickstart-dev-only-pepper-do-not-use-in-prod',
-        tokenHashSecret: process.env.IDP_TOKEN_HASH_SECRET || 'quickstart-dev-only-token-secret-do-not-use-in-prod',
+        emailHashPepper: devFallback('IDP_EMAIL_HASH_PEPPER', 'quickstart-dev-only-pepper-do-not-use-in-prod'),
+        tokenHashSecret: devFallback('IDP_TOKEN_HASH_SECRET', 'quickstart-dev-only-token-secret-do-not-use-in-prod'),
     },
 
     // 0.3.0+: TOTP secrets are encrypted at rest and a key is required at
@@ -46,7 +58,7 @@ await initIdentityProvider({
     // (`openssl rand -base64 32`) for anything real.
     mfa: {
         issuerLabel: 'IdpQuickstart',
-        encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY || Buffer.alloc(32, 0x51).toString('base64'),
+        encryptionKey: devFallback('IDP_MFA_ENCRYPTION_KEY', Buffer.alloc(32, 0x51).toString('base64')),
     },
 
     hooks: {
@@ -73,11 +85,10 @@ app.use(cookieParser());
 app.use(express.json());
 app.use('/auth', buildRouter());
 
-// Every error this package throws is an IdpError — map it to your API's
-// response shape in exactly one place.
-app.use((err, _req, res, _next) => {
-    res.status(err.httpStatus || 500).json({ error: err.code || 'INTERNAL_ERROR', message: err.message });
-});
+// Answers IdpErrors with { error, message } and everything else with a bare 500 — never an internal
+// message, stack trace or database detail. (Write your own handler if your API needs another shape,
+// but keep that rule: only show `message` for an IdpError with httpStatus < 500.)
+app.use(idpErrorHandler({ logger: console }));
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {

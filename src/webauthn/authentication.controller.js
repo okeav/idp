@@ -6,7 +6,7 @@ import { getWebauthnConfig } from './config.js';
 import { storeChallenge, consumeChallenge } from './challenge-store.js';
 import { auditLog } from '../hooks/index.js';
 import { verifyStoredCredentialAssertion } from './shared.js';
-import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus } from '../password-auth/controllers.js';
+import { issueSession, setSessionCookies, resolveClaims, assertUsableStatus, refreshTokenInBody } from '../password-auth/controllers.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey } from '../rate-limit/keys.js';
 
@@ -113,7 +113,7 @@ export async function verifyAuthenticationHandler(req, res, next) {
         res.json({
             accessToken: session.accessToken.token,
             accessTokenExpiresAt: session.accessToken.expiresAt,
-            refreshToken: session.refreshTokenValue,
+            ...refreshTokenInBody(state, session.refreshTokenValue),
             refreshTokenExpiresAt: session.refreshExpiresAt,
             userId: String(user.id),
         });

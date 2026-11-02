@@ -21,7 +21,9 @@ services:
     container_name: idp-mongo
     command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
     ports:
-      - "27017:27017"
+      # Bound to localhost only: this Mongo has no authentication. (Docker-published ports bypass
+      # host firewalls such as ufw, so 0.0.0.0 would expose it to the network.)
+      - "127.0.0.1:27017:27017"
     volumes:
       - idp-mongo-data:/data/db
     healthcheck:
@@ -56,7 +58,8 @@ services:
     image: redis:7-alpine
     container_name: idp-redis
     ports:
-      - "6379:6379"
+      # Localhost only, for the same reason: no password.
+      - "127.0.0.1:6379:6379"
     volumes:
       - idp-redis-data:/data
     healthcheck:
