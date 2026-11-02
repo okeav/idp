@@ -81,7 +81,9 @@ export async function verifyMfaWebauthnChallengeHandler(req, res, next) {
                 throw new IdpError({ code: 'WEBAUTHN_CHALLENGE_EXPIRED', httpStatus: 400, message: 'MFA challenge expired or not found — restart login' });
             }
 
-            const credentialDoc = await verifyStoredCredentialAssertion(state, { response, expectedChallenge });
+            // Matches the options' `userVerification: 'discouraged'`: the password was the knowledge
+            // factor, so a PIN-less security key (presence only) is a valid second factor here.
+            const credentialDoc = await verifyStoredCredentialAssertion(state, { response, expectedChallenge, requireUserVerification: false });
 
             // Defense in depth: allowCredentials scoping in the browser should
             // already prevent this, but a malicious client could submit any

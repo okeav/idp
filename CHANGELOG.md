@@ -101,6 +101,34 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   password the account doesn't have). `password` is now required only when the account has one.
 - Wrong MFA codes no longer also count toward the *password* lockout (`failedLoginAttempts`); the
   MFA lockout has its own counter.
+- **A stolen session could become permanent access (Medium).** Registering a passkey, enrolling MFA
+  and deleting the account needed only a valid access token, and a passkey is a login of its own
+  that survives logout-all and password reset (with no way to list or remove it). Access tokens now
+  carry `auth_time` (the last real login — kept unchanged across refreshes), and the new
+  `requireRecentAuth()` middleware (exported) refuses with 401 `REAUTHENTICATION_REQUIRED` unless
+  that login is within `session.recentAuthMaxAgeSeconds` (default 15 min). It guards passkey
+  registration, `/me/mfa/setup` and `/confirm`, `DELETE /me`, and the new `DELETE
+  /me/passkeys/:credentialId`. New `GET /me/passkeys`. **Upgrade:** on `REAUTHENTICATION_REQUIRED`,
+  send the user through a login and retry. Sessions created before 0.4.0 have no `auth_time` and
+  count as not recent.
+- **WebAuthn hardening.**
+  - Primary passkey login and passkey registration now *explicitly* require user verification
+    (they relied on a library default). WebAuthn-as-MFA explicitly doesn't — its options already
+    said `discouraged`, but verification then demanded UV, failing PIN-less security keys.
+  - A discoverable assertion's `userHandle` must name the credential's owner.
+  - Challenges are redeemed with a new atomic `cache.take()` (MULTI GET+DEL on Redis) instead of
+    get-then-delete, and the signature counter is written only if it advanced (atomically), so
+    neither a challenge nor a cloned authenticator's assertion can be used twice concurrently.
+  - `POST /webauthn/authentication/options` ignored no one: with `email` it returned that account's
+    credential ids, telling anyone whether the address had an account with passkeys. `email` is now
+    ignored unless `webauthn.allowCredentialsByEmail: true`, and then unknown addresses get a stable
+    decoy id and no transports are listed.
+  - The unauthenticated passkey-login endpoints are rate limited per IP
+    (`rateLimiting.webauthnAuthentication`, 60 / 5 min, fail-closed); each options call used to
+    park a challenge in the cache with no limit.
+  - `CredentialRepository.updateCounter` now resolves whether the counter advanced, and
+    `deleteByCredentialId` whether a credential was deleted. **Upgrade (custom adapters):**
+    implement both as conditional writes, and add `take()` to a custom cache adapter.
 - Storage interface: `UserRepository.claimTotpStep(id, step)` and
   `UserRepository.consumeRecoveryCode(id, codeHash)` (both atomic, both optional for now — without
   them a non-atomic fallback is used and a startup warning is logged). The built-in Mongo adapter

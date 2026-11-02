@@ -1,6 +1,7 @@
 import express from 'express';
 
 import { authContextMiddleware } from '../middleware/auth-context.middleware.js';
+import { requireRecentAuth } from '../middleware/require-recent-auth.middleware.js';
 import { serviceContextMiddleware } from '../middleware/service-context.middleware.js';
 import { validateBody } from '../middleware/validate-body.js';
 import { validateQuery } from '../middleware/validate-query.js';
@@ -20,7 +21,7 @@ import {
 import { requestMagicLinkHandler, verifyMagicLinkHandler } from '../magic-link/controller.js';
 import { requestMagicLinkSchema, verifyMagicLinkSchema } from '../magic-link/schemas.js';
 
-import { generateRegistrationOptionsHandler, verifyRegistrationHandler } from '../webauthn/registration.controller.js';
+import { generateRegistrationOptionsHandler, verifyRegistrationHandler, listPasskeysHandler, deletePasskeyHandler } from '../webauthn/registration.controller.js';
 import { generateAuthenticationOptionsHandler, verifyAuthenticationHandler } from '../webauthn/authentication.controller.js';
 import { generateMfaWebauthnChallengeOptionsHandler, verifyMfaWebauthnChallengeHandler } from '../webauthn/mfa.controller.js';
 import {
@@ -105,23 +106,28 @@ export function buildRouter(opts = {}) {
     // Self-service identity ("me")
     router.get('/me', authContextMiddleware(), getMeHandler);
     router.patch('/me', authContextMiddleware(), validateBody(updateProfileSchema), updateMeHandler);
-    router.delete('/me', authContextMiddleware(), deleteMeHandler);
+    router.delete('/me', authContextMiddleware(), requireRecentAuth(), deleteMeHandler);
     router.get('/me/sessions', authContextMiddleware(), listSessionsHandler);
     router.delete('/me/sessions/:id', authContextMiddleware(), revokeSessionHandler);
     router.delete('/me/sessions', authContextMiddleware(), revokeAllSessionsHandler);
 
     // MFA
     router.get('/me/mfa', authContextMiddleware(), getMfaStatusHandler);
-    router.post('/me/mfa/setup', authContextMiddleware(), setupMfaHandler);
-    router.post('/me/mfa/confirm', authContextMiddleware(), validateBody(confirmMfaSchema), confirmMfaHandler);
+    // Enrolling a second factor requires a recent login: otherwise a stolen session could enrol
+    // the attacker's authenticator on an account that has none, locking the owner out.
+    router.post('/me/mfa/setup', authContextMiddleware(), requireRecentAuth(), setupMfaHandler);
+    router.post('/me/mfa/confirm', authContextMiddleware(), requireRecentAuth(), validateBody(confirmMfaSchema), confirmMfaHandler);
     router.delete('/me/mfa', authContextMiddleware(), validateBody(disableMfaSchema), disableMfaHandler);
     router.post('/me/mfa/recovery-codes', authContextMiddleware(), validateBody(regenerateRecoveryCodesSchema), regenerateRecoveryCodesHandler);
 
     if (features.webauthn) {
-        // WebAuthn / passkeys — registering a credential always requires an
-        // authenticated caller (adding a passkey to an existing account).
-        router.post('/webauthn/registration/options', authContextMiddleware(), validateBody(registrationOptionsSchema), generateRegistrationOptionsHandler);
-        router.post('/webauthn/registration/verify', authContextMiddleware(), validateBody(verifyRegistrationSchema), verifyRegistrationHandler);
+        // WebAuthn / passkeys — registering a credential requires an authenticated caller who
+        // logged in recently: a passkey is a permanent login, so a stolen session must not be
+        // able to add one.
+        router.post('/webauthn/registration/options', authContextMiddleware(), requireRecentAuth(), validateBody(registrationOptionsSchema), generateRegistrationOptionsHandler);
+        router.post('/webauthn/registration/verify', authContextMiddleware(), requireRecentAuth(), validateBody(verifyRegistrationSchema), verifyRegistrationHandler);
+        router.get('/me/passkeys', authContextMiddleware(), listPasskeysHandler);
+        router.delete('/me/passkeys/:credentialId', authContextMiddleware(), requireRecentAuth(), deletePasskeyHandler);
 
         // Primary passwordless login — no prior auth required.
         router.post('/webauthn/authentication/options', validateBody(authenticationOptionsSchema), generateAuthenticationOptionsHandler);

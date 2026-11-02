@@ -18,12 +18,23 @@ export class MongoCredentialRepository {
         return withIds(await this.model.find({ user: userId }).lean());
     }
 
+    /**
+     * Stores the authenticator's new signature counter — only if it moved forward (an authenticator
+     * that doesn't implement a counter reports 0 every time, which is allowed to stay 0). Atomic, so
+     * of two concurrent uses of one signed assertion only one gets through. Returns whether it did.
+     */
     async updateCounter(credentialId, newCounter) {
-        await this.model.findOneAndUpdate({ credentialId }, { $set: { counter: newCounter, lastUsedAt: new Date() } });
+        const filter = newCounter > 0
+            ? { credentialId, counter: { $lt: newCounter } }
+            : { credentialId, counter: 0 };
+        const result = await this.model.updateOne(filter, { $set: { counter: newCounter, lastUsedAt: new Date() } });
+        return result.modifiedCount === 1;
     }
 
+    /** Scoped to the owner. Returns whether a credential was deleted. */
     async deleteByCredentialId(credentialId, userId) {
-        await this.model.deleteOne({ credentialId, user: userId });
+        const result = await this.model.deleteOne({ credentialId, user: userId });
+        return result.deletedCount === 1;
     }
 
     async countForUser(userId) {

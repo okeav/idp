@@ -16,7 +16,9 @@ export function withDefaults(config = {}) {
         // verifyOnEachRequest (default true since 0.3.0): authContextMiddleware
         // checks the token's session row in storage on every request, so a
         // logout-all / password reset takes effect on every instance at once.
-        session: { reresolveClaimsOnRefresh: false, verifyOnEachRequest: true, ...config.session },
+        // recentAuthMaxAgeSeconds: how recent a login must be for requireRecentAuth (passkey / MFA
+        // enrolment, account and passkey deletion).
+        session: { reresolveClaimsOnRefresh: false, verifyOnEachRequest: true, recentAuthMaxAgeSeconds: 15 * 60, ...config.session },
         ttls: { ...DEFAULT_TTL_SECONDS, ...config.ttls },
         security: {
             maxFailedLoginAttempts: 5,
@@ -62,6 +64,7 @@ export function withDefaults(config = {}) {
             register: { ...DEFAULT_RATE_LIMITS.registerPerIp, ...config.rateLimiting?.register },
             emailVerification: { ...DEFAULT_RATE_LIMITS.emailVerificationPerIp, ...config.rateLimiting?.emailVerification },
             verificationEmailByEmail: { ...DEFAULT_RATE_LIMITS.verificationEmailPerEmail, ...config.rateLimiting?.verificationEmailByEmail },
+            webauthnAuthentication: { ...DEFAULT_RATE_LIMITS.webauthnAuthenticationPerIp, ...config.rateLimiting?.webauthnAuthentication },
         },
         hooks: config.hooks || {},
         webhooks: { ...DEFAULT_WEBHOOK_CONFIG, ...config.webhooks },

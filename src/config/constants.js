@@ -118,6 +118,9 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
     // Every request that makes this IdP send a verification email to an address
     // (registering it, re-registering a pending one, asking for a resend).
     verificationEmailPerEmail: { max: 3, windowSeconds: 60 * 60 },
+    // Unauthenticated passkey login: options + verify both count (a login is 2 requests). Also
+    // bounds how many challenges one IP can park in the cache.
+    webauthnAuthenticationPerIp: { max: 60, windowSeconds: 5 * 60 },
 });
 
 // Per-ACCOUNT limit on wrong email-verification codes/tokens. When it is used

@@ -35,6 +35,7 @@ function prefixed(adapter, prefix) {
         set: (key, value, ttlSeconds) => adapter.set(k(key), value, ttlSeconds),
         del: (key) => adapter.del(k(key)),
         expire: (key, ttlSeconds) => adapter.expire(k(key), ttlSeconds),
+        take: (key) => adapter.take(k(key)),
         close: () => adapter.close?.(),
         // Present only when the underlying adapter is Redis-backed — lets the
         // rate limiter (and anything else that wants Redis) reuse this

@@ -41,6 +41,19 @@ export class RedisCacheAdapter extends BaseCacheAdapter {
         await this._redis.del(key);
     }
 
+    /** GET + DEL in one MULTI/EXEC transaction — atomic, and works on every Redis version (GETDEL needs 6.2). */
+    async take(key) {
+        const results = await this._redis.multi().get(key).del(key).exec();
+        const [err, raw] = results?.[0] ?? [];
+        if (err) throw err;
+        if (raw === null || raw === undefined) return null;
+        try {
+            return JSON.parse(raw);
+        } catch {
+            return raw;
+        }
+    }
+
     async expire(key, ttlSeconds) {
         await this._redis.expire(key, ttlSeconds);
     }

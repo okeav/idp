@@ -80,17 +80,29 @@ test('WebAuthn primary passwordless login: usernameless (discoverable) flow', as
     assert.equal(claims.sub, session.userId);
 });
 
-test('WebAuthn primary login: email-scoped options include the registered credential', async () => {
+test('WebAuthn primary login: email-scoped options are opt-in (allowCredentialsByEmail) and then include the registered credential', async () => {
     const email = uniqueEmail('webauthn-scoped');
     const { accessToken } = await registerVerifyLogin(email, 'Str0ng!Passw0rd');
     const { credentialId } = await registerPasskey(accessToken);
+    const options = async () => {
+        const res = await fetch(`${app.baseUrl}/webauthn/authentication/options`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }),
+        });
+        assert.equal(res.status, 200);
+        return res.json();
+    };
 
-    const optionsRes = await fetch(`${app.baseUrl}/webauthn/authentication/options`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }),
-    });
-    const options = await optionsRes.json();
-    assert.equal(optionsRes.status, 200);
-    assert.ok(options.allowCredentials.some((c) => c.id === credentialId));
+    // Default: the email is ignored — the answer must not reveal which addresses have passkeys.
+    assert.equal((await options()).allowCredentials, undefined);
+
+    app.state.config.webauthn.allowCredentialsByEmail = true;
+    try {
+        const scoped = await options();
+        assert.ok(scoped.allowCredentials.some((c) => c.id === credentialId));
+        assert.ok(scoped.allowCredentials.every((c) => c.transports === undefined), 'transports would tell real ids from decoys');
+    } finally {
+        delete app.state.config.webauthn.allowCredentialsByEmail;
+    }
 });
 
 test('WebAuthn: a stale/replayed assertion cannot be used twice (challenge is single-use)', async () => {

@@ -38,7 +38,9 @@ async function issueSession(state, { user, claims, req }) {
     const deviceInfo = req.headers['user-agent'] || '';
     const deviceFingerprint = buildDeviceFingerprint(deviceInfo);
 
-    const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims });
+    // Every caller of issueSession has just authenticated the user (password+MFA, magic link, SSO, passkey).
+    const authTime = Math.floor(Date.now() / 1000);
+    const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims }, { authTime });
     const refreshTokenValue = generateOpaqueToken();
     const refreshTokenHash = hashOpaqueToken(state, refreshTokenValue);
     const expiresAt = refreshTokenExpiresAt(state);
@@ -59,6 +61,7 @@ async function issueSession(state, { user, claims, req }) {
             deviceInfo,
             deviceFingerprint,
             kind: SESSION_KINDS.FIRST_PARTY,
+            authTime: new Date(authTime * 1000),
             claims,
         },
         userId: user.id,
@@ -340,7 +343,10 @@ export async function refreshTokenHandler(req, res, next) {
             ? await resolveClaims(state, user, { isNewUser: false, method: 'refresh' })
             : existing.claims || {};
 
-        const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims });
+        // A refresh is not an authentication: the original login time carries over (a row from
+        // before 0.4.0 has none, which requireRecentAuth treats as "not recent").
+        const authTime = existing.authTime ? Math.floor(new Date(existing.authTime).getTime() / 1000) : undefined;
+        const accessToken = await issueAccessToken(state, { sub: String(user.id), email: user.email, claims }, { authTime });
         const newRefreshTokenValue = generateOpaqueToken();
         const newRefreshTokenHash = hashOpaqueToken(state, newRefreshTokenValue);
         const refreshExpiresAt = refreshTokenExpiresAt(state);
@@ -356,6 +362,7 @@ export async function refreshTokenHandler(req, res, next) {
             deviceInfo,
             deviceFingerprint: buildDeviceFingerprint(deviceInfo),
             kind: SESSION_KINDS.FIRST_PARTY,
+            authTime: existing.authTime ?? null,
             claims,
         });
 

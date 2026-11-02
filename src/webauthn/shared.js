@@ -16,7 +16,8 @@ import { getWebauthnConfig } from './config.js';
  * @returns the stored credential document (with its `user` field) on success
  * @throws {IdpError} CREDENTIAL_NOT_FOUND | WEBAUTHN_VERIFICATION_FAILED
  */
-export async function verifyStoredCredentialAssertion(state, { response, expectedChallenge }) {
+export async function verifyStoredCredentialAssertion(state, { response, expectedChallenge, requireUserVerification }) {
+    if (typeof requireUserVerification !== 'boolean') throw new Error('verifyStoredCredentialAssertion: requireUserVerification must be set explicitly');
     const { rpID, origin } = getWebauthnConfig(state);
 
     const credentialId = response?.id;
@@ -40,6 +41,7 @@ export async function verifyStoredCredentialAssertion(state, { response, expecte
             expectedOrigin: origin,
             expectedRPID: rpID,
             credential: webAuthnCredential,
+            requireUserVerification,
         });
     } catch (cause) {
         throw new IdpError({ code: 'WEBAUTHN_VERIFICATION_FAILED', httpStatus: 400, message: 'WebAuthn assertion verification failed', cause });
@@ -49,7 +51,13 @@ export async function verifyStoredCredentialAssertion(state, { response, expecte
         throw new IdpError({ code: 'WEBAUTHN_VERIFICATION_FAILED', httpStatus: 400, message: 'WebAuthn assertion verification failed' });
     }
 
-    await state.storage.credentialRepository.updateCounter(stored.credentialId, result.authenticationInfo.newCounter);
+    // The library compared against the counter read above; the conditional write closes the window
+    // in which two concurrent uses of one assertion both pass that comparison. (`undefined` from an
+    // adapter predating the boolean return is treated as success.)
+    const advanced = await state.storage.credentialRepository.updateCounter(stored.credentialId, result.authenticationInfo.newCounter);
+    if (advanced === false) {
+        throw new IdpError({ code: 'WEBAUTHN_VERIFICATION_FAILED', httpStatus: 400, message: 'WebAuthn assertion verification failed (signature counter did not advance)' });
+    }
 
     return stored;
 }

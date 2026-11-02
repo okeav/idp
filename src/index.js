@@ -55,6 +55,7 @@ export {
 
 // ── Middleware ───────────────────────────────────────────────────────────
 export { authContextMiddleware } from './middleware/auth-context.middleware.js';
+export { requireRecentAuth } from './middleware/require-recent-auth.middleware.js';
 export { serviceContextMiddleware } from './middleware/service-context.middleware.js';
 export { requireServiceCallerMiddleware } from './middleware/require-service-caller.middleware.js';
 export { validateBody } from './middleware/validate-body.js';
@@ -119,7 +120,7 @@ export { migrateMfaSecrets } from './mfa/secrets.js';
 export { AesGcmSecretCipher } from './mfa/secret-cipher.js';
 
 // ── WebAuthn / passkeys ──────────────────────────────────────────────────
-export { generateRegistrationOptionsHandler, verifyRegistrationHandler } from './webauthn/registration.controller.js';
+export { generateRegistrationOptionsHandler, verifyRegistrationHandler, listPasskeysHandler, deletePasskeyHandler } from './webauthn/registration.controller.js';
 export { generateAuthenticationOptionsHandler, verifyAuthenticationHandler } from './webauthn/authentication.controller.js';
 export { generateMfaWebauthnChallengeOptionsHandler, verifyMfaWebauthnChallengeHandler } from './webauthn/mfa.controller.js';
 

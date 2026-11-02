@@ -9,7 +9,7 @@ const ALGORITHM = 'RS256';
 /**
  * @param {object} state - the initialized IDP state (see config/state.js)
  * @param {{ sub: string, email?: string, claims?: Record<string, unknown> }} input
- * @param {{ ttlSeconds?: number, audience?: string, sessionless?: boolean }} [opts] - `sessionless: true`
+ * @param {{ ttlSeconds?: number, audience?: string, sessionless?: boolean, authTime?: number }} [opts] - `sessionless: true`
  *   marks a token that has no session row behind it, so authContextMiddleware's per-request session
  *   check (`session.verifyOnEachRequest`) skips it instead of refusing it. Internal session-backed
  *   issuance (login, refresh) never sets it.
@@ -33,6 +33,9 @@ export async function issueAccessToken(state, input, opts = {}) {
         jti: crypto.randomUUID(),
         iat: issuedAt,
         exp: expiresAt,
+        // When the user last actually authenticated (seconds) — carried unchanged across refreshes,
+        // so requireRecentAuth can demand a fresh login before sensitive changes.
+        ...(Number.isInteger(opts.authTime) ? { auth_time: opts.authTime } : {}),
         ...(opts.sessionless ? { sessionless: true } : {}),
     };
 

@@ -34,7 +34,8 @@ export async function generateRegistrationOptionsHandler(req, res, next) {
             userID: new TextEncoder().encode(String(user.id)),
             attestationType: 'none',
             excludeCredentials: existingCredentials.map((c) => ({ id: c.credentialId, transports: c.transports })),
-            authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+            // A passkey can log in on its own, so it must be one that verifies its user (PIN / biometric).
+            authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
         });
 
         await storeChallenge(state, `reg:${user.id}`, options.challenge);
@@ -61,7 +62,7 @@ export async function verifyRegistrationHandler(req, res, next) {
 
         let result;
         try {
-            result = await verifyRegistrationResponse({ response, expectedChallenge, expectedOrigin: origin, expectedRPID: rpID });
+            result = await verifyRegistrationResponse({ response, expectedChallenge, expectedOrigin: origin, expectedRPID: rpID, requireUserVerification: true });
         } catch (cause) {
             throw new IdpError({ code: 'WEBAUTHN_VERIFICATION_FAILED', httpStatus: 400, message: 'WebAuthn registration verification failed', cause });
         }
@@ -85,6 +86,42 @@ export async function verifyRegistrationHandler(req, res, next) {
         await auditLog(state.logger, state.hooks, 'WEBAUTHN_CREDENTIAL_REGISTERED', { userId: req.auth.userId, credentialId: credential.id });
 
         res.status(201).json({ id: saved.id, credentialId: saved.credentialId, deviceType: saved.deviceType, backedUp: saved.backedUp, name: saved.name });
+    } catch (err) {
+        next(err);
+    }
+}
+
+/** GET /me/passkeys — the caller's registered passkeys (never the public keys or counters). */
+export async function listPasskeysHandler(req, res, next) {
+    try {
+        const state = getState();
+        if (!req.auth?.userId) throw new IdpError({ code: 'UNAUTHENTICATED', httpStatus: 401, message: 'Authentication required' });
+        const credentials = await state.storage.credentialRepository.findByUserId(req.auth.userId);
+        res.json(credentials.map((c) => ({
+            credentialId: c.credentialId, name: c.name ?? null, deviceType: c.deviceType, backedUp: c.backedUp,
+            createdAt: c.createdAt ?? null, lastUsedAt: c.lastUsedAt ?? null,
+        })));
+    } catch (err) {
+        next(err);
+    }
+}
+
+/**
+ * DELETE /me/passkeys/:credentialId — removes one of the caller's passkeys (scoped to the caller:
+ * someone else's credential id answers 404). Lets the owner evict a passkey they don't recognise.
+ */
+export async function deletePasskeyHandler(req, res, next) {
+    try {
+        const state = getState();
+        if (!req.auth?.userId) throw new IdpError({ code: 'UNAUTHENTICATED', httpStatus: 401, message: 'Authentication required' });
+        const { credentialId } = req.params;
+
+        const owned = (await state.storage.credentialRepository.findByUserId(req.auth.userId)).some((c) => c.credentialId === credentialId);
+        if (!owned) throw new IdpError({ code: 'CREDENTIAL_NOT_FOUND', httpStatus: 404, message: 'Passkey not found' });
+        await state.storage.credentialRepository.deleteByCredentialId(credentialId, req.auth.userId);
+
+        await auditLog(state.logger, state.hooks, 'WEBAUTHN_CREDENTIAL_DELETED', { userId: req.auth.userId, credentialId });
+        res.json({ status: 'ok' });
     } catch (err) {
         next(err);
     }

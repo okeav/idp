@@ -66,7 +66,7 @@ export function authContextMiddleware(opts = {}) {
                 claims: payload.claims || {},
                 tokenKind: kind,
                 ...(payload.client_id ? { clientId: payload.client_id, scopes: String(payload.scope || '').split(' ').filter(Boolean) } : {}),
-                tokenMeta: { issuedAt: payload.iat, expiresAt: payload.exp, jti: payload.jti },
+                tokenMeta: { issuedAt: payload.iat, expiresAt: payload.exp, jti: payload.jti, authTime: payload.auth_time ?? null },
             };
             next();
         } catch (err) {

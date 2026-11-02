@@ -38,6 +38,10 @@ export async function initIdentityProvider(config) {
     assertMfaSecretConfig(resolved.mfa, mfaCipher, logger);
     assertLockoutConfig('mfa.lockout', resolved.mfa.lockout);
     assertLockoutConfig('security.verificationCodeLockout', resolved.security.verificationCodeLockout);
+    const { recentAuthMaxAgeSeconds } = resolved.session;
+    if (!Number.isInteger(recentAuthMaxAgeSeconds) || recentAuthMaxAgeSeconds < 1) {
+        throw new Error(`config.session.recentAuthMaxAgeSeconds must be a positive integer (got ${recentAuthMaxAgeSeconds})`);
+    }
     const webhookDispatcher = new WebhookDispatcher(resolved.webhooks, logger);
     const hooks = wrapHooksWithWebhooks(mergeHooks(resolved.hooks), webhookDispatcher);
     const cache = await createCacheAdapter(resolved.cache);

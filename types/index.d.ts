@@ -102,6 +102,8 @@ export interface IdpConfig {
          * logout/revocation only takes effect on the instance that handled it.
          */
         verifyOnEachRequest?: boolean;
+        /** How recent (seconds) a login must be for `requireRecentAuth` — passkey/MFA enrolment, passkey and account deletion. Default 900. */
+        recentAuthMaxAgeSeconds?: number;
     };
     ttls?: Partial<{
         accessToken: number; idToken: number; refreshToken: number; internalToken: number;
@@ -146,7 +148,15 @@ export interface IdpConfig {
      * `initIdentityProvider()` startup. `rpID` must be the *frontend's*
      * registrable domain, not necessarily this API's own host.
      */
-    webauthn?: { rpID?: string; rpName?: string; origin?: string | string[] };
+    webauthn?: {
+        rpID?: string; rpName?: string; origin?: string | string[];
+        /**
+         * Default false: passkey-login options ignore `email` and always ask for a discoverable credential, because
+         * listing an address's credential ids reveals whether it has an account. Set true only if you rely on
+         * non-discoverable credentials (unknown addresses then get a stable decoy id).
+         */
+        allowCredentialsByEmail?: boolean;
+    };
     oauthProviders?: {
         google?: { clientId: string; clientSecret: string };
         github?: { clientId: string; clientSecret: string };
@@ -189,6 +199,8 @@ export interface IdpConfig {
         emailVerification?: RateLimitRule;
         /** Verification emails sent to one address (register, re-register, resend). Default 3/hour. */
         verificationEmailByEmail?: RateLimitRule;
+        /** POST /webauthn/authentication/options and /verify (unauthenticated passkey login), per IP. Default 60/5min. */
+        webauthnAuthentication?: RateLimitRule;
     };
     /**
      * Outbound webhook delivery — additive to `hooks` (in-process callbacks),
@@ -311,7 +323,8 @@ declare module 'express-serve-static-core' {
             clientId?: string;
             /** OAuth2 tokens only: the granted scopes. */
             scopes?: string[];
-            tokenMeta: { issuedAt: number; expiresAt: number; jti: string };
+            /** `authTime`: when the user last actually logged in (seconds), carried across refreshes; null if unknown. */
+            tokenMeta: { issuedAt: number; expiresAt: number; jti: string; authTime: number | null };
         };
         serviceCaller?: { name: string; scopes?: string[]; region?: string; source: 'token' | 'legacy-secret' };
         validatedQuery?: Record<string, unknown>;
@@ -342,7 +355,7 @@ export const ERROR_CODES: Record<string, string>;
  * Pass `sessionless: false` only if you created a session row with this
  * token's `jti` yourself.
  */
-export function issueAccessToken(input: { sub: string; email?: string; claims?: Record<string, unknown> }, opts?: { ttlSeconds?: number; audience?: string; sessionless?: boolean }): Promise<IssuedToken>;
+export function issueAccessToken(input: { sub: string; email?: string; claims?: Record<string, unknown> }, opts?: { ttlSeconds?: number; audience?: string; sessionless?: boolean; authTime?: number }): Promise<IssuedToken>;
 export function verifyAccessToken(token: string, opts?: VerifyAccessTokenOptions): Promise<AccessTokenClaims>;
 export function issueIdToken(user: IdentityUser, audience: string, nonce?: string): Promise<IssuedToken>;
 export function issueOAuth2AccessToken(subject: { id: string }, client: { clientId: string; accessTokenTTL?: number }, scopes: string[], opts?: { sessionless?: boolean }): Promise<IssuedToken>;
@@ -370,6 +383,8 @@ export function verifyServiceTokenRemote(token: string, opts: { expectedAud: str
 // ── Middleware ───────────────────────────────────────────────────────────
 
 export function authContextMiddleware(opts?: VerifyAccessTokenOptions & { optional?: boolean }): RequestHandler;
+/** Step-up gate: 401 REAUTHENTICATION_REQUIRED unless the user logged in within `maxAgeSeconds` (default `session.recentAuthMaxAgeSeconds`). Mount after authContextMiddleware. */
+export function requireRecentAuth(opts?: { maxAgeSeconds?: number }): RequestHandler;
 export function serviceContextMiddleware(opts?: { ownServiceName?: string }): RequestHandler;
 export function requireServiceCallerMiddleware(...allowedCallers: string[]): RequestHandler;
 export function validateBody(schema: { parse: (input: unknown) => unknown }): RequestHandler;
@@ -446,6 +461,9 @@ export const verifyMagicLinkHandler: RequestHandler;
 
 export const generateRegistrationOptionsHandler: RequestHandler;
 export const verifyRegistrationHandler: RequestHandler;
+/** GET /me/passkeys and DELETE /me/passkeys/:credentialId (owner-scoped). */
+export const listPasskeysHandler: RequestHandler;
+export const deletePasskeyHandler: RequestHandler;
 export const generateAuthenticationOptionsHandler: RequestHandler;
 export const verifyAuthenticationHandler: RequestHandler;
 export const generateMfaWebauthnChallengeOptionsHandler: RequestHandler;
@@ -475,6 +493,8 @@ export interface CacheAdapter {
     set(key: string, value: unknown, ttlSeconds?: number): Promise<void>;
     del(key: string): Promise<void>;
     expire(key: string, ttlSeconds: number): Promise<void>;
+    /** Atomic get-and-delete — of two concurrent callers, exactly one gets the value. */
+    take(key: string): Promise<unknown | null>;
 }
 export class MemoryCacheAdapter implements CacheAdapter {
     constructor(opts?: { sweepIntervalMs?: number });
@@ -482,6 +502,8 @@ export class MemoryCacheAdapter implements CacheAdapter {
     set(key: string, value: unknown, ttlSeconds?: number): Promise<void>;
     del(key: string): Promise<void>;
     expire(key: string, ttlSeconds: number): Promise<void>;
+    /** Atomic get-and-delete — of two concurrent callers, exactly one gets the value. */
+    take(key: string): Promise<unknown | null>;
     close(): void;
 }
 export class RedisCacheAdapter implements CacheAdapter {
@@ -490,6 +512,8 @@ export class RedisCacheAdapter implements CacheAdapter {
     set(key: string, value: unknown, ttlSeconds?: number): Promise<void>;
     del(key: string): Promise<void>;
     expire(key: string, ttlSeconds: number): Promise<void>;
+    /** Atomic get-and-delete — of two concurrent callers, exactly one gets the value. */
+    take(key: string): Promise<unknown | null>;
 }
 export function createRedisCacheAdapter(opts: { host: string; port: number; password?: string; db?: number; keepAliveMs?: number }): Promise<RedisCacheAdapter>;
 

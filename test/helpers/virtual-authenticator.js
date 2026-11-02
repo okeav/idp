@@ -55,8 +55,9 @@ export function createVirtualAuthenticator({ rpID }) {
     const rpIdHash = crypto.createHash('sha256').update(rpID).digest();
     const credentials = new Map(); // credentialId (base64url) -> { privateKey, publicKey, counter }
 
-    function buildAuthData({ counter, attestedCredentialData }) {
-        const flags = attestedCredentialData ? 0b01000101 : 0b00000101; // UP+UV(+AT)
+    function buildAuthData({ counter, attestedCredentialData, userVerified = true }) {
+        // UP (0x01) always; UV (0x04) unless simulating an authenticator without user verification; AT (0x40) at registration.
+        const flags = 0b00000001 | (userVerified ? 0b00000100 : 0) | (attestedCredentialData ? 0b01000000 : 0);
         const counterBuf = Buffer.alloc(4);
         counterBuf.writeUInt32BE(counter, 0);
         const parts = [rpIdHash, Buffer.from([flags]), counterBuf];
@@ -66,7 +67,7 @@ export function createVirtualAuthenticator({ rpID }) {
 
     return {
         /** Simulates navigator.credentials.create() against options from generateRegistrationOptions(). */
-        createCredential(options, { origin }) {
+        createCredential(options, { origin, userVerified = true }) {
             const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
             const jwk = publicKey.export({ format: 'jwk' });
             const publicKeyCose = encodeCoseEC2PublicKey(Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url'));
@@ -80,7 +81,7 @@ export function createVirtualAuthenticator({ rpID }) {
             const credIdLen = Buffer.alloc(2);
             credIdLen.writeUInt16BE(credentialId.length, 0);
             const attestedCredentialData = Buffer.concat([aaguid, credIdLen, credentialId, publicKeyCose]);
-            const authData = buildAuthData({ counter: 0, attestedCredentialData });
+            const authData = buildAuthData({ counter: 0, attestedCredentialData, userVerified });
             const attestationObject = encodeAttestationObjectNone(authData);
 
             credentials.set(credentialIdB64, { privateKey, publicKey, counter: 0 });
@@ -98,17 +99,22 @@ export function createVirtualAuthenticator({ rpID }) {
             };
         },
 
-        /** Simulates navigator.credentials.get() against options from generateAuthenticationOptions(). Defaults to the most recently registered credential. */
-        getAssertion(options, { origin, credentialId } = {}) {
+        /**
+         * Simulates navigator.credentials.get() against options from generateAuthenticationOptions(). Defaults to the most recently registered credential.
+         * Test knobs: `userVerified: false` (no UV flag), `userHandle` (base64url, as a discoverable credential reports it),
+         * `counter` (sign with this counter instead of the next one — a cloned authenticator).
+         */
+        getAssertion(options, { origin, credentialId, userVerified = true, userHandle, counter } = {}) {
             const id = credentialId || [...credentials.keys()].at(-1);
             const stored = credentials.get(id);
             if (!stored) throw new Error('virtual authenticator: unknown credential');
 
-            stored.counter += 1;
+            if (counter === undefined) stored.counter += 1;
+            const signCounter = counter ?? stored.counter;
 
             const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge: options.challenge, origin, crossOrigin: false }), 'utf8');
             const clientDataHash = crypto.createHash('sha256').update(clientDataJSON).digest();
-            const authData = buildAuthData({ counter: stored.counter, attestedCredentialData: null });
+            const authData = buildAuthData({ counter: signCounter, attestedCredentialData: null, userVerified });
             const signature = crypto.sign('sha256', Buffer.concat([authData, clientDataHash]), stored.privateKey);
 
             return {
@@ -120,6 +126,7 @@ export function createVirtualAuthenticator({ rpID }) {
                     clientDataJSON: b64url(clientDataJSON),
                     authenticatorData: b64url(authData),
                     signature: b64url(signature),
+                    ...(userHandle ? { userHandle } : {}),
                 },
             };
         },

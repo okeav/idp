@@ -40,6 +40,15 @@ export class MemoryCacheAdapter extends BaseCacheAdapter {
         this._store.delete(key);
     }
 
+    /** Get-and-delete with no `await` in between, so it is atomic on the single JS thread. */
+    async take(key) {
+        const entry = this._store.get(key);
+        if (!entry) return null;
+        this._store.delete(key);
+        if (entry.expiresAt !== null && entry.expiresAt <= Date.now()) return null;
+        return entry.value;
+    }
+
     async expire(key, ttlSeconds) {
         const entry = this._store.get(key);
         if (!entry) return;

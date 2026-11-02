@@ -25,6 +25,10 @@ export function defineSessionModel(connection) {
             // rows written before 0.4.0; see utils/session-kind.js for how those are classified.
             kind: { type: String, enum: ['first_party', 'oauth2', null], default: null },
 
+            // When the user authenticated to create this session chain (first-party only). Copied
+            // across refresh rotations; becomes the access token's `auth_time`.
+            authTime: { type: Date, default: null },
+
             // Opaque snapshot of whatever the consumer put in the access token's
             // `claims` at the time this session was created — carried here so a
             // refresh can re-mint an access token without an outbound call back
