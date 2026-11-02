@@ -63,6 +63,24 @@ A security release from a full audit of 0.3.0. **Breaking** — see the upgrade 
   still pending replaces its password and invalidates earlier codes before sending a fresh one;
   activation by magic link or SSO discards any password (and MFA state) set before the address was
   proven. SSO never attaches a login method to a locked/suspended/deleted account.
+- **SSO login CSRF, no PKCE, no nonce (Medium).** The SSO `state` was only a cache key, so an
+  attacker could start a login with their own provider account and have a victim's browser finish
+  it, signing the victim into the attacker's account. `GET /sso/:provider` now also sets a
+  per-attempt httpOnly binding cookie (SameSite=Lax; SameSite=None;Secure for Apple's form POST),
+  and the callback completes only with it. The state is consumed atomically and checked *before*
+  anything else, including a provider `error` (which is no longer reflected — the callback redirects
+  with `error=provider_error`). Google, Microsoft and GitHub exchanges use PKCE (S256); Apple's
+  `id_token` must carry this login's `nonce` and the right `iss`/`aud`/`exp`. **Upgrade:** mount
+  `cookie-parser` before the router (already needed for cookie sessions).
+- **SSO redirect allowlist was opt-in (open redirect).** With any provider configured,
+  `initIdentityProvider()` now requires `sso.allowedRedirectOrigins` (exact origins) and an absolute
+  `sso.baseCallbackUrl`; only `https` (or `http://localhost`) targets on the list are accepted.
+  **Upgrade:** set both.
+- **SSO robustness.** Provider calls time out (`sso.providerTimeoutMs`, default 10 s) and don't
+  follow redirects; Apple's generated client secret lives 5 minutes (was ~6 months); the
+  pass-through query params given to `resolveAuthContext` as `extra` are limited to 10 short string
+  values (they are attacker-controllable — never trust them); `GET /sso/:provider` is rate limited
+  per IP (`rateLimiting.ssoInitiate`).
 - **The 6-digit email-verification code could be brute-forced (High).** `/register/verify-email`
   had no rate limit and no attempt limit, against a code valid for 24 hours. Wrong codes/tokens now
   count per account (`security.verificationCodeLockout`, default 5 per hour); the attempt that

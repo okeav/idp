@@ -75,6 +75,7 @@ export function withDefaults(config = {}) {
             verificationEmailByEmail: { ...DEFAULT_RATE_LIMITS.verificationEmailPerEmail, ...config.rateLimiting?.verificationEmailByEmail },
             webauthnAuthentication: { ...DEFAULT_RATE_LIMITS.webauthnAuthenticationPerIp, ...config.rateLimiting?.webauthnAuthentication },
             oauth2Token: { ...DEFAULT_RATE_LIMITS.oauth2TokenPerIp, ...config.rateLimiting?.oauth2Token },
+            ssoInitiate: { ...DEFAULT_RATE_LIMITS.ssoInitiatePerIp, ...config.rateLimiting?.ssoInitiate },
         },
         hooks: config.hooks || {},
         webhooks: { ...DEFAULT_WEBHOOK_CONFIG, ...config.webhooks },

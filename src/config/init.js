@@ -38,6 +38,7 @@ export async function initIdentityProvider(config) {
     assertMfaSecretConfig(resolved.mfa, mfaCipher, logger);
     assertLockoutConfig('mfa.lockout', resolved.mfa.lockout);
     assertLockoutConfig('security.verificationCodeLockout', resolved.security.verificationCodeLockout);
+    assertSsoConfig(resolved);
     if (!['all', 'public'].includes(resolved.oauth2.requirePkce)) {
         throw new Error("config.oauth2.requirePkce must be 'all' or 'public'");
     }
@@ -85,6 +86,30 @@ export async function initIdentityProvider(config) {
     logger.info({ issuer: resolved.issuer }, '@okeav/idp-core initialized');
 
     return state;
+}
+
+/**
+ * With any SSO provider configured, the redirect allowlist and the absolute callback base URL are
+ * required: SSO without an allowlist is an open redirect at the end of a real provider login, and
+ * without baseCallbackUrl the provider is handed a relative redirect_uri it will reject.
+ */
+function assertSsoConfig(resolved) {
+    const configured = Object.entries(resolved.oauthProviders || {}).filter(([, v]) => v?.clientId).map(([k]) => k);
+    if (configured.length === 0) return;
+    const origins = resolved.sso?.allowedRedirectOrigins;
+    if (!Array.isArray(origins) || origins.length === 0) {
+        throw new Error(`config.sso.allowedRedirectOrigins is required when SSO providers are configured (${configured.join(', ')}) — list the origins SSO may redirect back to`);
+    }
+    for (const origin of origins) {
+        let url;
+        try { url = new URL(origin); } catch { url = null; }
+        if (!url || url.origin !== origin) throw new Error(`config.sso.allowedRedirectOrigins: "${origin}" is not an origin (scheme://host[:port], no path)`);
+    }
+    let base;
+    try { base = new URL(resolved.sso?.baseCallbackUrl); } catch { base = null; }
+    if (!base || !['https:', 'http:'].includes(base.protocol)) {
+        throw new Error('config.sso.baseCallbackUrl must be an absolute URL when SSO providers are configured');
+    }
 }
 
 function assertLockoutConfig(path, { maxFailedAttempts, windowSeconds, lockSeconds }) {

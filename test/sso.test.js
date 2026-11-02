@@ -41,7 +41,7 @@ const providersConfig = (microsoftTenant = 'common') => ({
         github: { clientId: 'gh-client', clientSecret: 'gh-secret' },
         microsoft: { clientId: 'ms-client', clientSecret: 'ms-secret', tenant: microsoftTenant },
     },
-    sso: { baseCallbackUrl: 'https://idp.test.local' },
+    sso: { baseCallbackUrl: 'https://idp.test.local', allowedRedirectOrigins: ['https://app.example.com'] },
 });
 
 let app;
@@ -62,10 +62,13 @@ async function sso(provider, profile, { baseUrl = app.baseUrl } = {}) {
     const init = await realFetch(`${baseUrl}/sso/${provider}?redirect_uri=${encodeURIComponent(redirectUri)}`, { redirect: 'manual' });
     assert.equal(init.status, 302, await init.text());
     const state = new URL(init.headers.get('location')).searchParams.get('state');
-    const cb = await realFetch(`${baseUrl}/sso/${provider}/callback?code=provider-code&state=${state}`, { redirect: 'manual' });
+    // The browser carries the binding cookie set at initiate back to the callback.
+    const cookie = init.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+    const cb = await realFetch(`${baseUrl}/sso/${provider}/callback?code=provider-code&state=${state}`, { redirect: 'manual', headers: { Cookie: cookie } });
     assert.equal(cb.status, 302, await cb.text());
     const location = new URL(cb.headers.get('location'));
-    return { location, cookies: cb.headers.getSetCookie(), query: location.searchParams, fragment: new URLSearchParams(location.hash.slice(1)) };
+    const cookies = cb.headers.getSetCookie().filter((c) => !c.startsWith('idp_sso_'));
+    return { location, cookies, query: location.searchParams, fragment: new URLSearchParams(location.hash.slice(1)) };
 }
 
 const post = (path, body, headers) => fetch(`${app.baseUrl}${path}`, json(body, headers));

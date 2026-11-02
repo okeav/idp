@@ -1,7 +1,9 @@
+import crypto from 'crypto';
 import { getState } from '../config/state.js';
 import { IdpError } from '../errors/idp-error.js';
 import { IDENTITY_STATUS, CACHE_KEY_PREFIXES } from '../config/constants.js';
-import { buildSsoProviders, normalizeUserInfo, exchangeCode, fetchUserInfo } from './providers.js';
+import { buildSsoProviders, normalizeUserInfo, exchangeCode, fetchUserInfo, assertAppleIdToken, decodeJwtPayload } from './providers.js';
+import { ssoBindingCookie } from './binding.js';
 import { auditLog } from '../hooks/index.js';
 import { issueSession, setSessionCookies, resolveClaims, mfaChallengeResponse } from '../password-auth/controllers.js';
 
@@ -25,38 +27,57 @@ export async function ssoCallbackHandler(req, res, next) {
         const state = getState();
         const { provider } = req.params;
 
-        const code = req.query.code ?? req.body?.code;
-        const csrfState = req.query.state ?? req.body?.state;
-        const providerError = req.query.error ?? req.body?.error;
-        const providerErrorDescription = req.query.error_description ?? req.body?.error_description;
+        const param = (name) => {
+            const v = req.query[name] ?? req.body?.[name];
+            return typeof v === 'string' ? v : undefined;
+        };
+        const code = param('code');
+        const csrfState = param('state');
 
-        if (providerError) {
-            return res.status(400).json({ error: providerError, error_description: providerErrorDescription });
-        }
+        // The state is checked (and consumed, atomically) before anything else — including a provider
+        // error — so nothing on this endpoint answers a request that this browser didn't start.
+        const INVALID_STATE = () => new IdpError({ code: 'INVALID_SSO_STATE', httpStatus: 400, message: 'Invalid or expired SSO state' });
+        if (!csrfState) throw INVALID_STATE();
+        const stateData = await state.cache.take(`${CACHE_KEY_PREFIXES.SSO_STATE}:${csrfState}`);
+        if (!stateData || stateData.provider !== provider) throw INVALID_STATE();
 
-        const stateKey = `${CACHE_KEY_PREFIXES.SSO_STATE}:${csrfState}`;
-        const stateData = await state.cache.get(stateKey);
-        if (!stateData || stateData.provider !== provider) {
-            throw new IdpError({ code: 'INVALID_SSO_STATE', httpStatus: 400, message: 'Invalid or expired SSO state' });
-        }
-        await state.cache.del(stateKey);
-
-        const { redirect_uri, extra } = stateData;
         const providers = buildSsoProviders(state.config);
         const providerConfig = providers[provider];
         if (!providerConfig) throw new IdpError({ code: 'INVALID_SSO_PROVIDER', httpStatus: 400, message: `Unknown SSO provider: ${provider}` });
 
-        const providerTokens = await exchangeCode(providerConfig, code);
+        const cookie = ssoBindingCookie(state, csrfState, providerConfig);
+        const binding = req.cookies?.[cookie.name];
+        res.clearCookie(cookie.name, { ...cookie.options, maxAge: undefined });
+        if (typeof binding !== 'string' || !stateData.bindingHash || !safeEqual(sha256b64url(binding), stateData.bindingHash)) {
+            state.logger?.warn?.({ provider }, 'SSO callback refused — not completed in the browser that started it');
+            throw INVALID_STATE();
+        }
+
+        const { redirect_uri, extra } = stateData;
+        const providerError = param('error');
+        if (providerError) {
+            // Only a sanitized error code travels back — never the provider's free-text description.
+            return res.redirect(withParams(redirect_uri, { error: 'provider_error', provider_error: providerError.replace(/[^a-z_]/gi, '').slice(0, 64) }));
+        }
+        if (!code) return res.redirect(withParams(redirect_uri, { error: 'provider_error' }));
+
+        const providerTokens = await exchangeCode(state.config, providerConfig, code, { codeVerifier: stateData.codeVerifier ?? undefined });
 
         let rawUserInfo;
         if (provider === 'apple') {
             let appleUser = null;
-            if (req.body?.user) {
-                try { appleUser = JSON.parse(req.body.user); } catch { /* name only sent on first authorization */ }
+            const userParam = param('user');
+            if (userParam) {
+                try { appleUser = JSON.parse(userParam); } catch { /* name only sent on first authorization */ }
+            }
+            try {
+                assertAppleIdToken(providerConfig, decodeJwtPayload(providerTokens.id_token), stateData.nonce);
+            } catch (cause) {
+                throw new IdpError({ code: 'SSO_PROVIDER_ERROR', httpStatus: 400, message: 'Apple id_token was not issued for this login', cause });
             }
             rawUserInfo = { id_token: providerTokens.id_token, appleUser };
         } else {
-            rawUserInfo = await fetchUserInfo(providerConfig, providerTokens.access_token);
+            rawUserInfo = await fetchUserInfo(state.config, providerConfig, providerTokens.access_token);
         }
 
         const userInfo = normalizeUserInfo(provider, rawUserInfo, providerConfig);
@@ -139,6 +160,14 @@ export async function ssoCallbackHandler(req, res, next) {
     } catch (err) {
         next(err);
     }
+}
+
+const sha256b64url = (s) => crypto.createHash('sha256').update(s).digest('base64url');
+
+function safeEqual(a, b) {
+    const x = Buffer.from(String(a));
+    const y = Buffer.from(String(b));
+    return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 
 /** Adds params to a URL that may already carry a query string (or, with `fragment`, to its fragment). */

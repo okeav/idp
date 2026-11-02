@@ -14,7 +14,9 @@ function generateAppleClientSecret(appleConfig) {
 
     const now = Math.floor(Date.now() / 1000);
     const header = Buffer.from(JSON.stringify({ alg: 'ES256', kid: keyId })).toString('base64url');
-    const payload = Buffer.from(JSON.stringify({ iss: teamId, iat: now, exp: now + 15_777_000, aud: 'https://appleid.apple.com', sub: clientId })).toString('base64url');
+    // Minted per exchange, so it only needs to outlive one request: 5 minutes, not Apple's 6-month
+    // maximum — a secret that leaks from a log is then useless almost immediately.
+    const payload = Buffer.from(JSON.stringify({ iss: teamId, iat: now, exp: now + 300, aud: APPLE_ISSUER, sub: clientId })).toString('base64url');
     const signingInput = `${header}.${payload}`;
     const sign = crypto.createSign('SHA256');
     sign.update(signingInput);
@@ -24,6 +26,8 @@ function generateAppleClientSecret(appleConfig) {
 }
 
 const MULTI_TENANT_AUTHORITIES = new Set(['common', 'organizations', 'consumers']);
+const APPLE_ISSUER = 'https://appleid.apple.com';
+const DEFAULT_PROVIDER_TIMEOUT_MS = 10_000;
 
 /** Builds the provider table from `config.oauthProviders` + `config.sso.baseCallbackUrl`. Providers with no clientId configured are omitted. */
 export function buildSsoProviders(config) {
@@ -41,6 +45,7 @@ export function buildSsoProviders(config) {
             clientId: p.google.clientId, clientSecret: p.google.clientSecret,
             scopes: ['openid', 'email', 'profile'],
             redirectUri: callbackFor('google'),
+            pkce: true,
         };
     }
 
@@ -54,6 +59,7 @@ export function buildSsoProviders(config) {
             clientId: p.github.clientId, clientSecret: p.github.clientSecret,
             scopes: ['read:user', 'user:email'],
             redirectUri: callbackFor('github'),
+            pkce: true,
         };
     }
 
@@ -76,6 +82,7 @@ export function buildSsoProviders(config) {
             clientId: p.microsoft.clientId, clientSecret: p.microsoft.clientSecret,
             scopes: ['openid', 'email', 'profile', 'User.Read'],
             redirectUri: callbackFor('microsoft'),
+            pkce: true,
         };
     }
 
@@ -88,6 +95,8 @@ export function buildSsoProviders(config) {
             scopes: ['openid', 'email', 'name'],
             redirectUri: callbackFor('apple'),
             responseMode: 'form_post',
+            // The identity comes from Apple's id_token, so it is bound to this login with a nonce.
+            nonce: true,
             getClientSecret: () => generateAppleClientSecret(p.apple),
         };
     }
@@ -107,14 +116,47 @@ export function buildSsoProviders(config) {
     return providers;
 }
 
+/**
+ * Whether SSO may send the browser back to `uri`. Fails closed: without a non-empty
+ * `config.sso.allowedRedirectOrigins` nothing is allowed (initIdentityProvider refuses to start with
+ * SSO providers but no allowlist) — an open redirect at the end of a real provider login is a
+ * convincing phishing step. Only https (or http to localhost) origins on the list pass.
+ */
 export function isAllowedRedirectUri(config, uri) {
     const allowed = config.sso?.allowedRedirectOrigins;
-    if (!allowed || allowed.length === 0) return true; // no allowlist configured — consumer opted out of this check
+    if (!Array.isArray(allowed) || allowed.length === 0) return false;
+    let url;
     try {
-        return allowed.includes(new URL(uri).origin);
+        url = new URL(uri);
     } catch {
         return false;
     }
+    const schemeOk = url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname));
+    return schemeOk && !url.username && !url.password && allowed.includes(url.origin);
+}
+
+/**
+ * Checks Apple's id_token. It arrives over TLS straight from Apple's token endpoint in exchange for
+ * our client-authenticated code request, which OIDC Core §3.1.3.7 accepts in place of a signature
+ * check — but the claims must still be ours: issuer, audience (our client id), expiry, and the
+ * nonce this login sent.
+ */
+export function assertAppleIdToken(providerConfig, idTokenPayload, expectedNonce) {
+    const now = Math.floor(Date.now() / 1000);
+    const aud = Array.isArray(idTokenPayload?.aud) ? idTokenPayload.aud : [idTokenPayload?.aud];
+    if (idTokenPayload?.iss !== APPLE_ISSUER) throw new Error('Apple id_token: unexpected issuer');
+    if (!aud.includes(providerConfig.clientId)) throw new Error('Apple id_token: unexpected audience');
+    if (!(typeof idTokenPayload.exp === 'number' && idTokenPayload.exp > now - 60)) throw new Error('Apple id_token: expired');
+    if (!expectedNonce || idTokenPayload.nonce !== expectedNonce) throw new Error('Apple id_token: nonce mismatch');
+}
+
+export function decodeJwtPayload(token) {
+    const [, payload] = String(token).split('.');
+    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+}
+
+function providerFetch(config, url, init) {
+    return fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(config.sso?.providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS) });
 }
 
 // Apple sends email_verified as the string "true"; the others as a boolean.
@@ -156,24 +198,22 @@ export function normalizeUserInfo(provider, raw, providerConfig = {}) {
     }
 }
 
-function decodeJwtPayload(token) {
-    const [, payload] = token.split('.');
-    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-}
-
-export async function exchangeCode(providerConfig, code) {
+export async function exchangeCode(config, providerConfig, code, { codeVerifier } = {}) {
     const clientSecret = providerConfig.getClientSecret ? providerConfig.getClientSecret() : providerConfig.clientSecret;
-    const params = new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: providerConfig.redirectUri, client_id: providerConfig.clientId, client_secret: clientSecret });
+    const params = new URLSearchParams({
+        grant_type: 'authorization_code', code, redirect_uri: providerConfig.redirectUri, client_id: providerConfig.clientId, client_secret: clientSecret,
+        ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
+    });
 
-    const response = await fetch(providerConfig.tokenUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body: params.toString() });
+    const response = await providerFetch(config, providerConfig.tokenUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body: params.toString() });
     if (!response.ok) {
         throw new Error(`SSO provider ${providerConfig.name} returned ${response.status} during code exchange`);
     }
     return response.json();
 }
 
-export async function fetchUserInfo(providerConfig, accessToken) {
-    const response = await fetch(providerConfig.userInfoUrl, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
+export async function fetchUserInfo(config, providerConfig, accessToken) {
+    const response = await providerFetch(config, providerConfig.userInfoUrl, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
     if (!response.ok) throw new Error(`SSO provider ${providerConfig.name} returned ${response.status} fetching user info`);
     const info = await response.json();
 
@@ -183,7 +223,7 @@ export async function fetchUserInfo(providerConfig, accessToken) {
     if (providerConfig.name === 'github' && providerConfig.userEmailsUrl) {
         info.email = null;
         info.email_verified = false;
-        const emailRes = await fetch(providerConfig.userEmailsUrl, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
+        const emailRes = await providerFetch(config, providerConfig.userEmailsUrl, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
         if (emailRes.ok) {
             const emails = await emailRes.json();
             const primary = Array.isArray(emails) ? emails.find((e) => e.primary && e.verified) : null;

@@ -182,9 +182,14 @@ export interface IdpConfig {
          */
         requirePkce?: 'all' | 'public';
     };
+    /** Required (startup fails otherwise) as soon as any `oauthProviders` entry has a `clientId`. */
     sso?: {
+        /** Absolute base URL providers redirect back to (`<base>/sso/<provider>/callback`). */
         baseCallbackUrl?: string;
+        /** Origins (scheme://host[:port]) SSO may send the browser back to. https, or http only for localhost. */
         allowedRedirectOrigins?: string[];
+        /** Timeout for each call to a provider (token exchange, userinfo). Default 10000. */
+        providerTimeoutMs?: number;
     };
     serviceMesh?: {
         bootstrapSecret?: string;
@@ -217,6 +222,8 @@ export interface IdpConfig {
         webauthnAuthentication?: RateLimitRule;
         /** /oauth2/token, /oauth2/token/revoke and /oauth2/token/introspect, per IP. Default 120/min. */
         oauth2Token?: RateLimitRule;
+        /** GET /sso/:provider, per IP. Default 30/5min. */
+        ssoInitiate?: RateLimitRule;
     };
     /**
      * Outbound webhook delivery — additive to `hooks` (in-process callbacks),

@@ -125,6 +125,8 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
     webauthnAuthenticationPerIp: { max: 60, windowSeconds: 5 * 60 },
     // /oauth2/token, /token/revoke, /token/introspect — client authentication is attempted on each.
     oauth2TokenPerIp: { max: 120, windowSeconds: 60 },
+    // GET /sso/:provider — each call parks a state entry in the cache for ssoState seconds.
+    ssoInitiatePerIp: { max: 30, windowSeconds: 5 * 60 },
 });
 
 // Per-ACCOUNT limit on wrong email-verification codes/tokens. When it is used
