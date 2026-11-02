@@ -55,7 +55,9 @@ export async function safeInvokeHook(logger, hooks, hookName, payload) {
         });
         await Promise.race([Promise.resolve(fn(payload)), timeout]);
     } catch (err) {
-        logger?.warn?.({ err, hook: hookName }, `Hook "${hookName}" threw — ignoring`);
+        // Name and message only: a consumer's error (an HTTP client's, say) often embeds the request it
+        // made — here, the reset token or magic link being mailed.
+        logger?.warn?.({ err: { name: err?.name, message: err?.message }, hook: hookName }, `Hook "${hookName}" threw — ignoring`);
     } finally {
         clearTimeout(timer);
     }

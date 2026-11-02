@@ -5,10 +5,12 @@ import { initIdentityProvider, buildRouter, cookieParser, idpErrorHandler } from
 // This quickstart falls back to throwaway dev values for anything not set in the environment.
 // Those values are public (they're in this file), so outside development every one of them must
 // be set — refuse to start rather than run with known keys.
-const isProduction = process.env.NODE_ENV === 'production';
+// Dev fallbacks only with NODE_ENV=development, said explicitly: an unset NODE_ENV (common in containers)
+// is treated as production — by this file and by idp-core's cookie defaults alike.
+const isDevelopment = process.env.NODE_ENV === 'development';
 function devFallback(name, value) {
     if (process.env[name]) return process.env[name];
-    if (isProduction) throw new Error(`[quickstart] ${name} must be set when NODE_ENV=production — the dev fallback is public`);
+    if (!isDevelopment) throw new Error(`[quickstart] ${name} must be set unless NODE_ENV=development — the dev fallback is public`);
     console.warn(`[quickstart] ${name} not set — using a DEV-ONLY value`);
     return value;
 }
@@ -23,7 +25,7 @@ let signingKey;
 if (process.env.IDP_SIGNING_KEY_PRIVATE && process.env.IDP_SIGNING_KEY_PUBLIC) {
     signingKey = { privateKey: process.env.IDP_SIGNING_KEY_PRIVATE, publicKey: process.env.IDP_SIGNING_KEY_PUBLIC };
 } else {
-    if (isProduction) throw new Error('[quickstart] IDP_SIGNING_KEY_PRIVATE/PUBLIC must be set when NODE_ENV=production');
+    if (!isDevelopment) throw new Error('[quickstart] IDP_SIGNING_KEY_PRIVATE/PUBLIC must be set unless NODE_ENV=development');
     console.warn('[quickstart] No IDP_SIGNING_KEY_PRIVATE/PUBLIC set — generating an ephemeral RSA keypair for this run only.');
     const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
         modulusLength: 2048,

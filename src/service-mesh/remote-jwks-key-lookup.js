@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { IdpError } from '../errors/idp-error.js';
+import { isSecureUrl } from '../utils/url.js';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 // A forced refresh (unknown kid) happens at most this often: otherwise every request carrying a junk
@@ -17,6 +18,8 @@ const FAILURE_BACKOFF_MS = 30 * 1000;
  * limited, with a timeout, and keeping the last good keys if a refresh fails.
  */
 export function remoteJwksKeyLookup(idpBaseUrl, { timeoutMs = FETCH_TIMEOUT_MS } = {}) {
+    // Over plain http anyone on the path could substitute the key set — and so every service's identity.
+    if (!isSecureUrl(idpBaseUrl)) throw new Error('remoteJwksKeyLookup: idpBaseUrl must be https (http only for localhost)');
     const jwksUrl = `${idpBaseUrl.replace(/\/$/, '')}/.well-known/services-jwks.json`;
     let cache = new Map();
     let fetchedAt = 0;

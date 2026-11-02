@@ -703,15 +703,16 @@ export async function getMeHandler(req, res, next) {
         const state = getState();
         if (!req.auth?.userId) throw new IdpError({ code: 'UNAUTHENTICATED', httpStatus: 401, message: 'Authentication required' });
 
-        const user = await state.storage.userRepository.findById(req.auth.userId, { select: 'email status mfaEnabled profile createdAt updatedAt' });
+        const user = await state.storage.userRepository.findById(req.auth.userId, { select: 'email status lockUntil mfaEnabled profile createdAt updatedAt' });
         if (!user) throw new IdpError({ code: 'USER_NOT_FOUND', httpStatus: 404, message: 'User not found' });
 
         res.json({
             userId: String(user.id),
             email: user.email,
             emailVerified: user.status !== IDENTITY_STATUS.PENDING_VERIFICATION,
-            isActive: user.status === IDENTITY_STATUS.ACTIVE,
-            status: user.status,
+            // (A pre-0.4.0 automatic lock reads as ACTIVE — see account-status.js.)
+            isActive: isActiveAccount(user),
+            status: effectiveStatus(user),
             mfaEnabled: user.mfaEnabled,
             profile: user.profile,
             createdAt: user.createdAt,

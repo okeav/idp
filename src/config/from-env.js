@@ -94,7 +94,7 @@ export function configFromEnv(env = process.env) {
             google: env.IDP_SSO_GOOGLE_CLIENT_ID ? { clientId: env.IDP_SSO_GOOGLE_CLIENT_ID, clientSecret: env.IDP_SSO_GOOGLE_CLIENT_SECRET } : undefined,
             microsoft: env.IDP_SSO_MICROSOFT_CLIENT_ID ? { clientId: env.IDP_SSO_MICROSOFT_CLIENT_ID, clientSecret: env.IDP_SSO_MICROSOFT_CLIENT_SECRET, tenant: env.IDP_SSO_MICROSOFT_TENANT || 'common', trustEmail: bool('IDP_SSO_MICROSOFT_TRUST_EMAIL', false) } : undefined,
             github: env.IDP_SSO_GITHUB_CLIENT_ID ? { clientId: env.IDP_SSO_GITHUB_CLIENT_ID, clientSecret: env.IDP_SSO_GITHUB_CLIENT_SECRET } : undefined,
-            apple: env.IDP_SSO_APPLE_CLIENT_ID ? { clientId: env.IDP_SSO_APPLE_CLIENT_ID, teamId: env.IDP_SSO_APPLE_TEAM_ID, keyId: env.IDP_SSO_APPLE_KEY_ID, privateKeyPem: env.IDP_SSO_APPLE_PRIVATE_KEY_B64 } : undefined,
+            apple: env.IDP_SSO_APPLE_CLIENT_ID ? { clientId: env.IDP_SSO_APPLE_CLIENT_ID, teamId: env.IDP_SSO_APPLE_TEAM_ID, keyId: env.IDP_SSO_APPLE_KEY_ID, privateKeyPem: env.IDP_SSO_APPLE_PRIVATE_KEY_B64 ? Buffer.from(env.IDP_SSO_APPLE_PRIVATE_KEY_B64, 'base64').toString('utf8') : undefined } : undefined,
             linkedin: env.IDP_SSO_LINKEDIN_CLIENT_ID ? { clientId: env.IDP_SSO_LINKEDIN_CLIENT_ID, clientSecret: env.IDP_SSO_LINKEDIN_CLIENT_SECRET } : undefined,
         },
         sso: {

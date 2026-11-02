@@ -291,11 +291,18 @@ test('end-session: only a real ID token is a hint, and it ends only that client\
         assert.equal(res.status, 400);
     }
 
-    const res = await fetch(`${app.baseUrl}/oidc/end-session?id_token_hint=${ta.id_token}`);
+    // A hint alone (ID tokens end up in URLs and logs) signs nobody out of anything.
+    const hintOnly = await fetch(`${app.baseUrl}/oidc/end-session?id_token_hint=${ta.id_token}`);
+    assert.equal(hintOnly.status, 200);
+    assert.equal((await fetch(`${app.baseUrl}/userinfo`, { headers: bearer(ta.access_token) })).status, 200, 'a bare hint ends nothing');
+
+    // From the user's own browser (their IdP session cookie comes along), it ends the hinted client's sessions.
+    const own = await (await post('/login', { email: u.email, password })).json();
+    const res = await fetch(`${app.baseUrl}/oidc/end-session?id_token_hint=${ta.id_token}`, { headers: { Cookie: `__Host-access_token=${own.accessToken}` } });
     assert.equal(res.status, 200);
     assert.equal((await fetch(`${app.baseUrl}/userinfo`, { headers: bearer(ta.access_token) })).status, 401, 'the hinted client\'s session ended');
     assert.equal((await fetch(`${app.baseUrl}/userinfo`, { headers: bearer(tb.access_token) })).status, 200, 'another client\'s session did not');
-    assert.equal((await fetch(`${app.baseUrl}/me`, { headers: bearer(u.accessToken) })).status, 200, 'nor did the user\'s IdP session (no cookie was sent)');
+    assert.equal((await fetch(`${app.baseUrl}/me`, { headers: bearer(u.accessToken) })).status, 200, 'nor did the user\'s other IdP session');
 
     // A hint for one user while signed in as another is refused.
     const other = await user();

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { deriveKid, verifyServiceTokenWith } from './verify-service-token.js';
 import { remoteJwksKeyLookup } from './remote-jwks-key-lookup.js';
+import { isSecureUrl } from '../utils/url.js';
 
 const TOKEN_TTL_SECONDS = 60;
 
@@ -29,6 +30,8 @@ export async function initServiceIdentity(opts = {}) {
     if (!privateKeyPem) throw new Error('initServiceIdentity: privateKeyPem is required');
     if (!idpBaseUrl) throw new Error('initServiceIdentity: idpBaseUrl is required');
     if (!bootstrapSecret) throw new Error('initServiceIdentity: bootstrapSecret is required');
+    // The bootstrap secret is sent to it, and its key set decides whose tokens are trusted.
+    if (!isSecureUrl(idpBaseUrl)) throw new Error('initServiceIdentity: idpBaseUrl must be https (http only for localhost)');
 
     const publicKeyPem = crypto.createPublicKey(privateKeyPem).export({ format: 'pem', type: 'spki' }).toString('utf8');
     const kid = deriveKid(serviceName, publicKeyPem);

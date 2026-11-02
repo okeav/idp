@@ -10,7 +10,9 @@ import { clearSessionCookies } from '../password-auth/controllers.js';
  *
  * What it ends is deliberately narrow, because the request is a plain GET any site can trigger:
  * - the browser's own IdP session (the first-party session whose cookie came with the request), and
- * - with an `id_token_hint`, the hinted relying party's sessions for that user.
+ * - with an `id_token_hint` AND the browser signed in as that same user, the hinted relying party's
+ *   sessions for that user. A hint alone ends nothing: ID tokens travel through URLs and logs, and
+ *   whoever holds one must not be able to sign its user out of the relying party.
  * It never signs the user out of every device: an ID token is handed to every relying party, so
  * possessing one — or tricking a browser into this URL — must not be a kill switch for all of the
  * user's sessions. "Log out everywhere" remains `POST /logout/all`.
@@ -59,8 +61,8 @@ export async function endSessionHandler(req, res, next) {
             if (own && !own.revokedAt && (await sessions.revokeById(own.id, req.auth.userId))) revokedJtis.push(req.auth.tokenMeta.jti);
             clearSessionCookies(res, state);
         }
-        // The hinted relying party's sessions for this user.
-        if (hint && typeof sessions.revokeForClient === 'function') {
+        // The hinted relying party's sessions for this user — only on the user's own browser session.
+        if (hint && req.auth?.userId && typeof sessions.revokeForClient === 'function') {
             const { jtis } = await sessions.revokeForClient(hint.aud, { userId: hint.sub });
             revokedJtis.push(...jtis);
         }

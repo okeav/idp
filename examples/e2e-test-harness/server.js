@@ -23,13 +23,16 @@ const IDP_BASE_URL = `${BASE_URL}${AUTH_PREFIX}`;
 const WEBHOOK_SECRET = 'harness-webhook-secret-do-not-use-in-prod'; // >= 16 chars (checked at startup)
 // Service mesh (flow 11): one bootstrap secret PER SERVICE — each proves which
 // service is registering, and lets that service rotate its own key. The
-// shared secret is kept only so flow 11 can demonstrate that it can NOT
-// replace an existing service's key (409 SERVICE_NAME_TAKEN).
+// shared secret is kept only so flow 11 can demonstrate its limits: it can
+// NOT register a name that has its own secret (403 FORBIDDEN), and for a
+// name without one (LEGACY_SERVICE_NAME) it can claim the name once but
+// never replace that key (409 SERVICE_NAME_TAKEN).
 const SERVICE_BOOTSTRAP_SECRETS = {
     'harness-service-a': 'harness-s2s-bootstrap-secret-service-a-dev-only',
     'harness-service-b': 'harness-s2s-bootstrap-secret-service-b-dev-only',
 };
 const SHARED_BOOTSTRAP_SECRET = 'harness-s2s-shared-bootstrap-secret-do-not-use-in-prod';
+const LEGACY_SERVICE_NAME = 'harness-legacy-service'; // allowed, but has no per-service secret
 // TOTP secrets are encrypted at rest and idp-core refuses to boot without a
 // key while MFA is enabled. Fixed (not regenerated per boot like the signing
 // key below) because enrolled users' secrets live in the persistent Mongo
@@ -69,7 +72,7 @@ await initIdentityProvider({
         allowWeakBcryptRounds: true, // required for anything under 10 rounds (tests/harnesses only)
         // Deliberately very high: flow #12 exists specifically to demonstrate
         // *rate limiting* (request-rate throttling) as a distinct mechanism
-        // from account lockout (failed-attempt counting) — raising this out
+        // from the password-login lockout (failed-attempt counting) — raising this out
         // of the way keeps the two from being conflated on screen.
         maxFailedLoginAttempts: 1000,
     },
@@ -85,7 +88,7 @@ await initIdentityProvider({
     serviceMesh: {
         bootstrapSecrets: SERVICE_BOOTSTRAP_SECRETS,
         bootstrapSecret: SHARED_BOOTSTRAP_SECRET,
-        allowedServiceNames: Object.keys(SERVICE_BOOTSTRAP_SECRETS),
+        allowedServiceNames: [...Object.keys(SERVICE_BOOTSTRAP_SECRETS), LEGACY_SERVICE_NAME],
         tokenMode: 'token', // the default since 0.4.0 — signed S2S tokens only
         ownServiceName: 'harness-service-a', // the `aud` serviceContextMiddleware expects (flow 11, step 6)
     },
@@ -208,6 +211,7 @@ mountFlowRoutes(app, {
     IDP_BASE_URL,
     SERVICE_BOOTSTRAP_SECRETS,
     SHARED_BOOTSTRAP_SECRET,
+    LEGACY_SERVICE_NAME,
     WEBHOOK_SECRET,
     googleConfigured: Boolean(googleClientId),
 });
@@ -222,7 +226,9 @@ app.use((err, _req, _res, next) => {
 });
 app.use(idpErrorHandler({ logger: console }));
 
-app.listen(PORT, () => {
+// Loopback only: this harness hands out any user's reset / verification tokens (/api/dev-token) and every
+// hook payload (/api/activity) to whoever asks — never expose it to the network.
+app.listen(PORT, '127.0.0.1', () => {
     console.log(`\nidp-core test harness listening on ${BASE_URL}`);
     console.log(`Open ${BASE_URL} in a browser and click through README.md's checklist.\n`);
 });

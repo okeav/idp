@@ -24,6 +24,9 @@ npm start
 ```
 
 `npm start` runs `node --env-file=.env server.js`, which requires **Node 20.6+**.
+The copied `.env` sets `NODE_ENV=development`, which is what lets the quickstart
+fall back to its public DEV-ONLY secrets; without it (unset counts as production)
+it refuses to start until every secret is set.
 On an older Node, either upgrade, or export the `.env` values into your shell
 yourself and run `node server.js` directly.
 

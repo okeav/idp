@@ -12,6 +12,7 @@ import { makeHashEmail, normalizeEmail } from '../utils/email-hash.js';
 import { createMfaSecretCipher, assertMfaSecretConfig } from '../mfa/secrets.js';
 import { MemoryAttemptCounterRepository } from '../mfa/memory-attempt-counter.js';
 import { prepareDummyHash } from '../utils/password.js';
+import { isSecureUrl, isLoopbackHost } from '../utils/url.js';
 
 /**
  * Wires storage, cache, signing keys, hooks, and logger, and stores the
@@ -48,6 +49,7 @@ export async function initIdentityProvider(config) {
         throw new Error("config.oauth2.requirePkce must be 'all' or 'public'");
     }
     assertCookieConfig(resolved.cookies);
+    assertIssuerAndTtls(resolved, logger);
     assertServiceMeshSecrets(resolved.serviceMesh);
     const grace = resolved.serviceMesh.rotationGraceSeconds;
     if (!Number.isInteger(grace) || grace < 0) throw new Error(`config.serviceMesh.rotationGraceSeconds must be an integer >= 0 (got ${grace})`);
@@ -120,6 +122,9 @@ function assertSsoConfig(resolved) {
     if (!base || !['https:', 'http:'].includes(base.protocol)) {
         throw new Error('config.sso.baseCallbackUrl must be an absolute URL when SSO providers are configured');
     }
+    if (!isSecureUrl(resolved.sso.baseCallbackUrl)) {
+        throw new Error('config.sso.baseCallbackUrl must be https (http only for localhost) — provider codes are returned to it');
+    }
 }
 
 const MIN_SECRET_LENGTH = 32;
@@ -172,6 +177,31 @@ function assertServiceMeshSecrets(mesh = {}) {
     for (const [name, secret] of Object.entries(mesh.bootstrapSecrets ?? {})) {
         if (weak(secret)) throw new Error(`config.serviceMesh.bootstrapSecrets.${name} must be at least ${MIN} characters`);
         if (secret === mesh.bootstrapSecret) throw new Error(`config.serviceMesh.bootstrapSecrets.${name} must differ from the shared bootstrapSecret`);
+    }
+}
+
+
+/**
+ * The issuer is every token's `iss` and the default trusted origin for the CSRF check (a non-URL issuer
+ * silently contributed none). Lifetimes must be positive whole seconds, and the two keyed-hash secrets
+ * distinct. In cache-only revocation mode (`session.verifyOnEachRequest: false`) a revocation marker
+ * must outlive the access token it revokes, or the token comes back to life.
+ */
+function assertIssuerAndTtls(resolved, logger) {
+    if (!isSecureUrl(resolved.issuer)) throw new Error(`config.issuer must be an https URL (http only for localhost) — got ${JSON.stringify(resolved.issuer)}`);
+    for (const [name, value] of Object.entries(resolved.ttls ?? {})) {
+        if (!Number.isInteger(value) || value < 1) throw new Error(`config.ttls.${name} must be a positive integer of seconds (got ${value})`);
+    }
+    const { tokenHashSecret, emailHashPepper } = resolved.security;
+    if (tokenHashSecret && tokenHashSecret === emailHashPepper) throw new Error('config.security.tokenHashSecret and emailHashPepper must be different secrets');
+    if (resolved.session?.verifyOnEachRequest === false && resolved.ttls.revocationCache < resolved.ttls.accessToken) {
+        throw new Error('config.ttls.revocationCache must be at least ttls.accessToken when session.verifyOnEachRequest is false (revocation would expire before the token)');
+    }
+    for (const [what, cfg] of [['cache', resolved.cache], ['rateLimiting', resolved.rateLimiting]]) {
+        const redis = cfg?.redis;
+        if (cfg?.adapter === 'redis' && redis?.host && !isLoopbackHost(redis.host) && !redis.tls) {
+            logger?.warn?.({ host: redis.host }, `config.${what}: Redis at a remote host without TLS — revocation markers, challenges and limits travel in clear`);
+        }
     }
 }
 

@@ -141,7 +141,8 @@ async function assertSessionLive(state, payload) {
 
 function logRejection(req, err) {
     try {
-        getState().logger?.warn?.({ err, path: req.originalUrl }, 'authContextMiddleware rejected request');
+        // The path only — a query string can carry tokens (end-session's id_token_hint, an SSO code).
+        getState().logger?.warn?.({ err, path: req.path }, 'authContextMiddleware rejected request');
     } catch {
         // state not initialized — nothing to log through
     }

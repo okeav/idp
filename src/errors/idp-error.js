@@ -1,3 +1,4 @@
+import { getState } from '../config/state.js';
 /**
  * The package's only error type. Handlers throw this (or let it propagate
  * from `next(err)` in middleware) and never shape an HTTP response body
@@ -40,6 +41,10 @@ export function isIdpError(err) {
  *
  * @param {{ logger?: { error?: Function } }} [opts]
  */
+/**
+ * `logger`: where unexpected (5xx) errors are logged — by default the logger given to
+ * initIdentityProvider, so they are never silently dropped.
+ */
 export function idpErrorHandler({ logger } = {}) {
     // eslint-disable-next-line no-unused-vars
     return function (err, req, res, _next) {
@@ -53,8 +58,18 @@ export function idpErrorHandler({ logger } = {}) {
         if (err?.type === 'entity.parse.failed' || (err instanceof SyntaxError && err?.status === 400)) {
             return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Malformed request body' });
         }
-        logger?.error?.({ err, path: req?.originalUrl }, 'Unhandled error');
+        // The path only — a query string can carry tokens (end-session's id_token_hint, an SSO code).
+        (logger ?? stateLogger())?.error?.({ err, path: req?.path }, 'Unhandled error');
         const status = isIdpError(err) ? err.httpStatus : 500;
         res.status(status).json({ error: isIdpError(err) ? err.code : 'INTERNAL_ERROR' });
     };
+}
+
+/** The configured logger, if the IdP is initialized (the error handler may run before init). */
+function stateLogger() {
+    try {
+        return getState().logger;
+    } catch {
+        return null;
+    }
 }
