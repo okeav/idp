@@ -25,7 +25,7 @@ export class MongoSessionRepository {
      */
     async findByJti(jti) {
         if (!jti) return null;
-        const doc = await this.model.findOne({ jti }).select('user expiresAt revokedAt jti').lean();
+        const doc = await this.model.findOne({ jti }).select('user expiresAt revokedAt jti familyId createdAt').lean();
         return doc ? withId(doc) : null;
     }
 
@@ -37,13 +37,25 @@ export class MongoSessionRepository {
         return this.model.findOneAndUpdate(filter, { revokedAt: new Date(), revokeReason: reason }, { returnDocument: 'before' });
     }
 
-    /** Revokes every live row of a refresh-token family. Returns the revoked jtis. */
+    /**
+     * Revokes every live row of a refresh-token family, and tombstones the whole family (`familyRevokedAt`
+     * on every row, live or not) so a refresh already in flight — whose successor isn't inserted yet —
+     * still finds out (isFamilyRevoked). Returns the revoked jtis.
+     */
     async revokeFamily(familyId, { reason = 'family_revoked' } = {}) {
         if (!familyId) return { revokedCount: 0, jtis: [] };
+        const now = new Date();
+        await this.model.updateMany({ familyId, familyRevokedAt: null }, { $set: { familyRevokedAt: now } });
         const filter = { familyId, revokedAt: null };
         const jtis = (await this.model.find(filter).select('jti').lean()).map((d) => d.jti).filter(Boolean);
-        const result = await this.model.updateMany(filter, { revokedAt: new Date(), revokeReason: reason });
+        const result = await this.model.updateMany(filter, { revokedAt: now, revokeReason: reason });
         return { revokedCount: result.modifiedCount ?? 0, jtis };
+    }
+
+    /** Whether the family was revoked as a whole (see revokeFamily). */
+    async isFamilyRevoked(familyId) {
+        if (!familyId) return false;
+        return Boolean(await this.model.exists({ familyId, familyRevokedAt: { $ne: null } }));
     }
 
     async revokeById(id, userId) {

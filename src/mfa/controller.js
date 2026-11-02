@@ -13,6 +13,7 @@ import { ipKey } from '../rate-limit/keys.js';
 import { sealMfaSecret, openMfaSecret } from './secrets.js';
 import { guardMfaAttempt } from './attempt-guard.js';
 import { claimTotpStep, consumeRecoveryCode, claimMfaChallenge } from './factor-store.js';
+import { revokeOtherUserSessions } from '../utils/session-family.js';
 
 // otplib v13's functional API takes `strategy` (default 'totp', so this is
 // actually redundant but kept for clarity) and `epochTolerance` — a seconds-
@@ -168,8 +169,9 @@ export async function confirmMfaHandler(req, res, next) {
         });
 
         // Any other session may predate the account being secured (or be an attacker's): end them, keep this one.
-        // (Not revokeAllUserSessions — its watermark would also end this session at its next refresh.)
-        const { revokedCount } = await state.storage.sessionRepository.revokeAllForUser(userId, { exceptJti: req.auth.tokenMeta?.jti });
+        // With the same watermark as "sign out everywhere", minus this session's family — so a refresh of
+        // another session that was already in flight is caught as well.
+        const { revokedCount } = await revokeOtherUserSessions(state, userId, { exceptJti: req.auth.tokenMeta?.jti });
         await auditLog(state.logger, state.hooks, 'MFA_ENABLED', { userId: req.auth.userId, revokedOtherSessions: revokedCount });
         res.set('Cache-Control', 'no-store');
         res.json({ mfaEnabled: true, recoveryCodes: rawCodes }); // shown once — caller must save these

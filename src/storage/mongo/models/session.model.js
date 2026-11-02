@@ -16,6 +16,9 @@ export function defineSessionModel(connection) {
             jti: { type: String, required: true },
             revokedAt: { type: Date, default: null },
             revokeReason: { type: String },
+            // Set on EVERY row of a family revoked as a whole (reuse detected) — a tombstone a refresh that
+            // was already in flight checks after inserting its successor (see assertFamilyNotRevoked).
+            familyRevokedAt: { type: Date, default: null },
             deviceInfo: { type: String },
             deviceFingerprint: { type: String, default: null, index: true },
             ipAddress: { type: String },

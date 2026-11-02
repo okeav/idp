@@ -266,10 +266,11 @@ test('enforceRateLimit: failMode closed rejects on backend error; the default st
 
 test('an attempt-counter backend error fails closed — no tokens issued', async () => {
     const { email, secret } = await userWithMfa('lock-backend');
+    const mfaChallengeToken = await challenge(email); // (password login uses the counters too — get past it first)
     const saved = app.state.attemptCounters;
     app.state.attemptCounters = { get: async () => { throw new Error('db down'); }, recordFailure: async () => { throw new Error('db down'); }, reset: async () => {} };
     try {
-        const res = await post('/mfa/verify', { mfaChallengeToken: await challenge(email), code: await generateTotp({ secret }) });
+        const res = await post('/mfa/verify', { mfaChallengeToken, code: await generateTotp({ secret }) });
         assert.equal(res.status, 500);
         assert.equal((await res.json()).accessToken, undefined);
     } finally {

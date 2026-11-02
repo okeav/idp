@@ -18,6 +18,10 @@ export function defineAuthorizationCodeModel(connection) {
             expiresAt: { type: Date, required: true, index: { expireAfterSeconds: 0 } },
             used: { type: Boolean, default: false },
             usedAt: { type: Date, default: null },
+            // The access-token session (jti) that authorized the code: if it is revoked before redemption, so is the code.
+            sessionJti: { type: String, default: null },
+            // Set when the code is presented again after redemption — everything it produced is then revoked.
+            reuseDetectedAt: { type: Date, default: null },
         },
         { timestamps: true }
     );

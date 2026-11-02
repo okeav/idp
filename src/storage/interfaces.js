@@ -45,6 +45,8 @@
  * @property {(hash: string, opts?: {onlyIfActive?: boolean, reason?: string}) => Promise<object|null>} revokeByRefreshTokenHash -
  *   ATOMIC consume; resolves the row as it was BEFORE revocation. Must persist `reason` as `revokeReason`
  *   ('rotated' on refresh) — that is how a replayed rotated token is recognised.
+ * @property {(familyId: string) => Promise<boolean>} isFamilyRevoked - whether revokeFamily ran for this family
+ *   (it must tombstone every row of the family, `familyRevokedAt`, not only revoke the live ones)
  * @property {(familyId: string, opts?: {reason?: string}) => Promise<{revokedCount: number, jtis: string[]}>} [revokeFamily] -
  *   revokes every live row with this `familyId` (refresh-token reuse / authorization-code reuse). Optional for now:
  *   without it, reuse is only refused, not punished.

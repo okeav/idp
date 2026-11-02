@@ -72,7 +72,7 @@ test('five wrong passwords lock PASSWORD login only — the account, its session
     assert.equal((await post('/login', { email: u.email, password })).status, 401, 'password login is locked');
     const stored = await users().findByEmail(u.email);
     assert.equal(stored.status, 'ACTIVE', 'the lock is not an account status');
-    assert.ok(new Date(stored.lockUntil) > new Date());
+    assert.equal(stored.lockUntil, null, 'nor written on the account — it lives in the password-login attempt budget');
 
     assert.equal((await fetch(`${app.baseUrl}/me`, { headers: bearer(u.accessToken) })).status, 200, 'the session lives on');
     const refreshed = await post('/refresh', { refreshToken: u.refreshToken });

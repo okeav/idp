@@ -9,7 +9,7 @@ import { authenticateClient } from './client-auth.js';
 import { auditLog } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey } from '../rate-limit/keys.js';
-import { familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeFamily, assertChainNotRevoked, peekRefreshRow } from '../utils/session-family.js';
+import { familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeFamily, assertChainNotRevoked, assertFamilyNotRevoked, peekRefreshRow } from '../utils/session-family.js';
 
 const INVALID_GRANT = (message) => new IdpError({ code: 'INVALID_GRANT', httpStatus: 400, message });
 
@@ -41,6 +41,8 @@ async function handleCodeReuse(state, codeHash) {
     if (typeof repo.findUsedByCodeHash !== 'function') return;
     const used = await repo.findUsedByCodeHash(codeHash);
     if (!used) return;
+    // Flag first: a redemption still in flight checks it after creating its session (assertCodeNotReused).
+    if (typeof repo.markReused === 'function') await repo.markReused(codeHash);
     const revokedSessions = await revokeFamily(state, codeFamilyId(used), 'code_reuse_detected');
     await auditLog(state.logger, state.hooks, 'OAUTH2_CODE_REUSE_DETECTED', { userId: String(used.userId), clientId: used.clientId, revokedSessions });
 }
@@ -53,6 +55,13 @@ async function handleCodeReuse(state, codeHash) {
  * shortly before the victim reset their password still turns into a fresh, long-lived session.
  */
 async function assertCodeStillAuthorized(state, user, authCode) {
+    // The session that authorized the code must still be live — it may have been signed out while the
+    // authorize request was in flight, after the code's other checks could see it.
+    const sessions = state.storage.sessionRepository;
+    if (authCode.sessionJti && typeof sessions.findByJti === 'function') {
+        const authorizing = await sessions.findByJti(authCode.sessionJti);
+        if (!authorizing || authorizing.revokedAt) throw INVALID_GRANT('Authorization code was revoked');
+    }
     const issuedAt = authCode.createdAt ? new Date(authCode.createdAt) : null;
     const revokedAt = user.sessionsRevokedAt ? new Date(user.sessionsRevokedAt) : null;
     if (issuedAt && revokedAt && revokedAt >= issuedAt) throw INVALID_GRANT('Authorization code was revoked');
@@ -62,6 +71,20 @@ async function assertCodeStillAuthorized(state, user, authCode) {
     const covered = live && (authCode.scopes || []).every((s) => (consent.scopes || []).includes(s));
     const grantedAt = consent?.grantedAt ? new Date(consent.grantedAt) : null;
     if (!covered || (issuedAt && grantedAt && grantedAt > issuedAt)) throw INVALID_GRANT('Authorization code was revoked');
+}
+
+/**
+ * After the code's session row exists: a replay of the same code that raced this redemption flags the
+ * code (handleCodeReuse) and revokes its family — possibly before this row was inserted, so it must be
+ * checked here too.
+ */
+async function assertCodeNotReused(state, codeHash, familyId, newTokenHash) {
+    const repo = state.storage.authorizationCodeRepository;
+    const flagged = typeof repo.findUsedByCodeHash === 'function' && (await repo.findUsedByCodeHash(codeHash))?.reuseDetectedAt;
+    if (flagged || await state.storage.sessionRepository.isFamilyRevoked(familyId)) {
+        await state.storage.sessionRepository.revokeByRefreshTokenHash(newTokenHash, { onlyIfActive: false });
+        throw INVALID_GRANT('Authorization code was already used');
+    }
 }
 
 /** A client must be explicitly registered for the grant it's trying to use — `allowedGrants` isn't decorative. */
@@ -126,13 +149,17 @@ async function handleAuthorizationCodeGrant(req, res) {
     const familyCreatedAt = new Date();
     const refreshExpiresAt = cappedExpiry(state, familyCreatedAt, client.refreshTokenTTL || state.config.ttls.refreshToken);
 
+    const refreshTokenHash = hashOpaqueToken(state, refreshTokenValue);
     await state.storage.sessionRepository.createSession({
-        user: user.id, tokenHash: hashOpaqueToken(state, refreshTokenValue), expiresAt: refreshExpiresAt,
+        user: user.id, tokenHash: refreshTokenHash, expiresAt: refreshExpiresAt,
         kid: accessTokenResult.kid, jti: accessTokenResult.jti, ipAddress: req.ip, deviceInfo: req.headers['user-agent'],
         kind: SESSION_KINDS.OAUTH2, claims: { clientId: client.clientId, scopes },
         // The code is the family root: if it is ever presented again, everything it produced is revoked.
         familyId: codeFamilyId(authCode), familyCreatedAt,
     });
+    await assertCodeNotReused(state, codeHash, codeFamilyId(authCode), refreshTokenHash);
+    // A sign-out-everywhere that landed while this redemption was running ends it too.
+    await assertChainNotRevoked(state, user.id, authCode.createdAt ?? familyCreatedAt, refreshTokenHash, codeFamilyId(authCode));
 
     const idToken = scopes.includes('openid')
         ? await issueIdToken(state, user, client.clientId, authCode.nonce || undefined, {
@@ -204,7 +231,8 @@ async function handleRefreshTokenGrant(req, res) {
         kid: accessTokenResult.kid, jti: accessTokenResult.jti, ipAddress: req.ip, deviceInfo: req.headers['user-agent'],
         kind: SESSION_KINDS.OAUTH2, claims: { clientId: client.clientId, scopes }, familyId, familyCreatedAt,
     });
-    await assertChainNotRevoked(state, user.id, existing.createdAt, newTokenHash);
+    await assertChainNotRevoked(state, user.id, existing.createdAt, newTokenHash, familyId);
+    await assertFamilyNotRevoked(state, familyId, newTokenHash);
 
     if (existing.jti) await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${existing.jti}`, '1', state.config.ttls.revocationCache);
 

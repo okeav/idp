@@ -6,7 +6,7 @@ import { sessionKindOf } from '../utils/session-kind.js';
 import { issueAccessToken, issueMfaChallengeToken, hashOpaqueToken, generateOpaqueToken } from '../signing/token.service.js';
 import { hashPassword, verifyPassword, compareDummyPassword } from '../utils/password.js';
 import { buildDeviceFingerprint, notifyNewDevice } from '../utils/device-fingerprint.js';
-import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked, peekRefreshRow } from '../utils/session-family.js';
+import { newFamilyId, familyOf, familyEndsAt, cappedExpiry, handleRefreshReuse, revokeAllUserSessions, assertChainNotRevoked, assertFamilyNotRevoked, peekRefreshRow } from '../utils/session-family.js';
 import { auditLog, auditLogDetached, safeInvokeHook, invokeHookDetached } from '../hooks/index.js';
 import { enforceRateLimit } from '../rate-limit/enforce.js';
 import { ipKey, emailKey } from '../rate-limit/keys.js';
@@ -33,7 +33,12 @@ async function resolveClaims(state, user, ctx) {
 }
 
 /** Builds and persists one full login session (access + refresh token pair) — shared by login, MFA-verify-challenge, and SSO callback. */
-async function issueSession(state, { user, claims, req }) {
+/**
+ * `authStartedAt`: when this sign-in began checking credentials (default: now). A "sign out everywhere"
+ * at or after it — e.g. a password reset that landed while the old password was being checked — ends
+ * the session this call creates.
+ */
+async function issueSession(state, { user, claims, req, authStartedAt = new Date() }) {
     const wasFirstLogin = !user.lastLoginAt;
     const deviceInfo = req.headers['user-agent'] || '';
     const deviceFingerprint = buildDeviceFingerprint(deviceInfo);
@@ -56,6 +61,7 @@ async function issueSession(state, { user, claims, req }) {
         await state.storage.userRepository.updateById(user.id, { status: IDENTITY_STATUS.ACTIVE });
     }
 
+    const familyId = newFamilyId();
     await state.storage.sessionRepository.createSessionForLogin({
         accessTokenAudit: { user: user.id, tokenHash: hashOpaqueToken(state, accessToken.token), expiresAt: accessToken.expiresAt, kid: accessToken.kid, jti: accessToken.jti, ipAddress: req.ip, deviceInfo },
         session: {
@@ -73,13 +79,14 @@ async function issueSession(state, { user, claims, req }) {
             deviceFingerprint,
             kind: SESSION_KINDS.FIRST_PARTY,
             authTime: familyCreatedAt,
-            familyId: newFamilyId(),
+            familyId,
             familyCreatedAt,
             claims,
         },
         userId: user.id,
         lastLoginAt: new Date(),
     });
+    await assertChainNotRevoked(state, user.id, authStartedAt, refreshTokenHash, familyId);
 
     if (isNewDevice) {
         notifyNewDevice({ hooks: state.hooks, logger: state.logger, req, user }).catch((err) => {
@@ -323,16 +330,17 @@ export async function loginHandler(req, res, next) {
         await enforceRateLimit(state, `login:ip:${ipKey(req.ip)}`, state.config.rateLimiting.login, { failMode: 'closed' });
         await enforceRateLimit(state, `login:email:${emailKey(state, email)}`, state.config.rateLimiting.loginByEmail, { failMode: 'closed' });
 
+        const authStartedAt = new Date();
         const user = await state.storage.userRepository.findByEmail(email, { select: '+passwordHash' });
 
         if (user?.lockUntil && new Date(user.lockUntil) <= new Date()) {
-            // The lock has run out. (A pre-0.4.0 row also recorded it as a LOCKED status.)
+            // A lock recorded on the account before 0.4.0 has run out (it was also a LOCKED status then).
             const statusFix = user.status === IDENTITY_STATUS.LOCKED ? { status: IDENTITY_STATUS.ACTIVE } : {};
             await state.storage.userRepository.updateById(user.id, { failedLoginAttempts: 0, lockUntil: null, ...statusFix });
             Object.assign(user, { failedLoginAttempts: 0, lockUntil: null, ...statusFix });
         }
 
-        const passwordValid = user ? await verifyPassword(password, user.passwordHash) : (await compareDummyPassword(password), false);
+        const passwordValid = user ? await checkPasswordWithBudget(state, user, password) : (await compareDummyPassword(password), false);
 
         // While password login is locked, the right password and a wrong one get the same answer —
         // otherwise the lock becomes a password oracle: guessing continues, and the one guess answered
@@ -344,7 +352,6 @@ export async function loginHandler(req, res, next) {
         // distinct "pending" answer for the right one tells whoever registered it whether their password
         // is still the current one — i.e. exactly when someone else registered the same address.
         if (!user || !passwordValid || isPasswordLocked(user) || effectiveStatus(user) === IDENTITY_STATUS.PENDING_VERIFICATION) {
-            if (user && !passwordValid && !isPasswordLocked(user)) await handleFailedLogin(state, user);
             throw new IdpError({ code: 'INVALID_CREDENTIALS', httpStatus: 401, message: 'Invalid email or password' });
         }
 
@@ -353,7 +360,7 @@ export async function loginHandler(req, res, next) {
         if (user.mfaEnabled) return res.json(await mfaChallengeResponse(state, user));
 
         const claims = await resolveClaims(state, user, { isNewUser: false, method: 'password' });
-        const session = await issueSession(state, { user, claims, req });
+        const session = await issueSession(state, { user, claims, req, authStartedAt });
 
         await auditLog(state.logger, state.hooks, 'LOGIN', { userId: String(user.id), email });
 
@@ -370,24 +377,50 @@ export async function loginHandler(req, res, next) {
     }
 }
 
+const passwordLoginKey = (userId) => `password-login:${userId}`;
+const WRONG_PASSWORD = 'WRONG_PASSWORD';
+
 /**
- * Counts a wrong password and, at `maxFailedLoginAttempts`, locks PASSWORD login (`lockUntil`) — never
- * the account. Only an active account with a password counts: an account with no password has nothing
- * to guess, and locking anything for it would only hand an attacker a switch to flip.
+ * Checks the password inside the per-account attempt budget (`maxFailedLoginAttempts` per
+ * `accountLockDurationMs`, then locked as long) — PASSWORD login only, never the account. The attempt
+ * is counted BEFORE bcrypt runs, so a concurrent burst gets no more guesses than the budget (counting
+ * after a failure let every request of a burst be checked). A success resets the count; other sign-in
+ * methods don't touch it, so the owner signing in by magic link doesn't hand a guesser a fresh budget.
+ * Returns whether the password is right; false while locked. A locked attempt still spends a bcrypt
+ * compare, so its timing doesn't stand out.
  */
-async function handleFailedLogin(state, user) {
-    if (!user.passwordHash || !isActiveAccount(user)) return;
-    const updated = await state.storage.userRepository.incrementFailedLoginAttempts(user.id);
-    const failedAttempts = updated?.failedLoginAttempts ?? (user.failedLoginAttempts ?? 0) + 1;
-    if (failedAttempts >= state.config.security.maxFailedLoginAttempts) {
-        const unlocksAt = new Date(Date.now() + state.config.security.accountLockDurationMs);
-        await state.storage.userRepository.updateById(user.id, { lockUntil: unlocksAt });
-        await auditLog(state.logger, state.hooks, 'ACCOUNT_LOCKED', { userId: String(user.id), failedAttempts });
-        await safeInvokeHook(state.logger, state.hooks, 'onSuspiciousActivityDetected', {
-            userId: String(user.id), email: user.email, firstName: user.profile?.firstName || '', lastName: user.profile?.lastName || '',
-            locale: user.profile?.locale || 'en', when: new Date().toISOString(), failedAttempts, unlocksAt: unlocksAt.toISOString(),
+async function checkPasswordWithBudget(state, user, password) {
+    const { maxFailedLoginAttempts, accountLockDurationMs } = state.config.security;
+    const seconds = Math.ceil(accountLockDurationMs / 1000);
+    let checked = false;
+    try {
+        return await withAttemptBudget(state, passwordLoginKey(user.id), { maxFailedAttempts: maxFailedLoginAttempts, windowSeconds: seconds, lockSeconds: seconds }, {
+            lockedError: () => Object.assign(new Error('password login locked'), { code: 'PASSWORD_LOGIN_LOCKED' }),
+            isFailure: (err) => err?.code === WRONG_PASSWORD,
+            onLocked: (entry) => onPasswordLoginLocked(state, user, entry),
+        }, async () => {
+            checked = true;
+            if (!(await verifyPassword(password, user.passwordHash))) throw Object.assign(new Error('wrong password'), { code: WRONG_PASSWORD });
+            return true;
         });
+    } catch (err) {
+        if (err?.code === WRONG_PASSWORD) return false;
+        if (err?.code === 'PASSWORD_LOGIN_LOCKED') {
+            if (!checked) await compareDummyPassword(password);
+            return false;
+        }
+        throw err;
     }
+}
+
+async function onPasswordLoginLocked(state, user, entry) {
+    const failedAttempts = entry?.count ?? state.config.security.maxFailedLoginAttempts;
+    const unlocksAt = new Date(Date.now() + state.config.security.accountLockDurationMs);
+    await auditLog(state.logger, state.hooks, 'ACCOUNT_LOCKED', { userId: String(user.id), failedAttempts });
+    await safeInvokeHook(state.logger, state.hooks, 'onSuspiciousActivityDetected', {
+        userId: String(user.id), email: user.email, firstName: user.profile?.firstName || '', lastName: user.profile?.lastName || '',
+        locale: user.profile?.locale || 'en', when: new Date().toISOString(), failedAttempts, unlocksAt: unlocksAt.toISOString(),
+    });
 }
 
 /**
@@ -497,7 +530,8 @@ export async function refreshTokenHandler(req, res, next) {
             familyCreatedAt,
             claims,
         });
-        await assertChainNotRevoked(state, user.id, existing.createdAt, newRefreshTokenHash);
+        await assertChainNotRevoked(state, user.id, existing.createdAt, newRefreshTokenHash, familyId);
+        await assertFamilyNotRevoked(state, familyId, newRefreshTokenHash);
 
         await state.cache.set(`${CACHE_KEY_PREFIXES.REVOKED_REFRESH_TOKEN}:${existing.jti}`, '1', state.config.ttls.revocationCache);
 
@@ -602,6 +636,7 @@ export async function resetPasswordHandler(req, res, next) {
             && await state.storage.userRepository.updateByIdIfStatus(record.user, IDENTITY_STATUS.PENDING_VERIFICATION, {
                 ...changes, status: IDENTITY_STATUS.ACTIVE, registrationContested: false,
             });
+        await state.attemptCounters.reset(passwordLoginKey(record.user));
         if (activated) {
             await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', record.user);
         } else {

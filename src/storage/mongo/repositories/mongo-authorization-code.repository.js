@@ -22,6 +22,11 @@ export class MongoAuthorizationCodeRepository {
         return this.model.findOne({ code: hash, used: true });
     }
 
+    /** Flags a redeemed code as presented again (reuse) — read back by the redemption still in flight. */
+    async markReused(hash) {
+        await this.model.updateOne({ code: hash, used: true }, { $set: { reuseDetectedAt: new Date() } });
+    }
+
     async pruneExpired() {
         return { deletedCount: 0 }; // native TTL index handles cleanup
     }

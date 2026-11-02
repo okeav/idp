@@ -39,7 +39,7 @@ function assertPkce(state, client, codeChallenge) {
     }
 }
 
-async function issueAuthorizationCode(state, { clientId, userId, redirectUri, scopes, codeChallenge, nonce, authTime }) {
+async function issueAuthorizationCode(state, { clientId, userId, redirectUri, scopes, codeChallenge, nonce, authTime, sessionJti }) {
     const code = crypto.randomBytes(32).toString('hex');
     await state.storage.authorizationCodeRepository.create({
         code: hashOpaqueToken(state, code),
@@ -51,6 +51,9 @@ async function issueAuthorizationCode(state, { clientId, userId, redirectUri, sc
         codeChallengeMethod: codeChallenge ? 'S256' : null,
         nonce: nonce || null,
         authTime: authTime ? new Date(authTime * 1000) : null,
+        // The session that authorized it — revoked before redemption (a sign-out landing while this
+        // request was in flight), the code is refused.
+        sessionJti: sessionJti ?? null,
         expiresAt: new Date(Date.now() + state.config.ttls.authCode * 1000),
         used: false,
     });
@@ -123,7 +126,7 @@ export async function authorizeHandler(req, res, next) {
             });
         }
 
-        const code = await issueAuthorizationCode(state, pending);
+        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: req.auth.tokenMeta?.jti });
         await auditLog(state.logger, state.hooks, 'OAUTH2_AUTHORIZE', { userId: req.auth.userId, clientId: client_id, scopes: requestedScopes });
         redirectToClient(res, state, redirect_uri, { code, state: oauthState });
     } catch (err) {
@@ -150,7 +153,7 @@ export async function confirmConsentHandler(req, res, next) {
         const pending = await takePendingAuthorization(state, req);
 
         await state.storage.consentRepository.upsert(req.auth.userId, pending.clientId, pending.scopes);
-        const code = await issueAuthorizationCode(state, pending);
+        const code = await issueAuthorizationCode(state, { ...pending, sessionJti: req.auth.tokenMeta?.jti });
 
         await auditLog(state.logger, state.hooks, 'OAUTH2_CONSENT_GRANTED', { userId: req.auth.userId, clientId: pending.clientId, scopes: pending.scopes });
         redirectToClient(res, state, pending.redirectUri, { code, state: pending.state });

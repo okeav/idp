@@ -84,19 +84,47 @@ export async function revokeFamily(state, familyId, reason) {
  * alive. `assertChainNotRevoked` is the refresh-side half of that.
  */
 export async function revokeAllUserSessions(state, userId, opts) {
-    await state.storage.userRepository.updateById(userId, { sessionsRevokedAt: new Date() });
+    await state.storage.userRepository.updateById(userId, { sessionsRevokedAt: new Date(), sessionsRevokedExceptFamily: null });
     return state.storage.sessionRepository.revokeAllForUser(userId, opts);
 }
 
 /**
- * After a refresh has written its new row: if every session of the user was revoked after the
- * redeemed row was created, the new row belongs to a revoked chain — revoke it and refuse.
+ * "Sign out every OTHER session" (MFA enrolment): the same watermark as revokeAllUserSessions, with the
+ * current session's family exempt — so a refresh of another session that was already in flight is
+ * still caught by assertChainNotRevoked, while the current session carries on.
  */
-export async function assertChainNotRevoked(state, userId, redeemedRowCreatedAt, newTokenHash) {
-    const user = await state.storage.userRepository.findById(userId, { select: 'sessionsRevokedAt' });
+export async function revokeOtherUserSessions(state, userId, { exceptJti }) {
+    const current = exceptJti && typeof state.storage.sessionRepository.findByJti === 'function'
+        ? await state.storage.sessionRepository.findByJti(exceptJti)
+        : null;
+    const exceptFamily = current ? familyOf(current).familyId : null;
+    await state.storage.userRepository.updateById(userId, { sessionsRevokedAt: new Date(), sessionsRevokedExceptFamily: exceptFamily });
+    return state.storage.sessionRepository.revokeAllForUser(userId, { exceptJti });
+}
+
+/**
+ * After a session row has been written (login, refresh): if every session of the user was revoked at
+ * or after `since` — when the redeemed row was created, or when the login began checking credentials —
+ * the new row belongs to a revoked chain: revoke it and refuse. `familyId` is spared only when it is
+ * the family exempted by revokeOtherUserSessions.
+ */
+export async function assertChainNotRevoked(state, userId, since, newTokenHash, familyId) {
+    const user = await state.storage.userRepository.findById(userId, { select: 'sessionsRevokedAt sessionsRevokedExceptFamily' });
     const revokedAt = user?.sessionsRevokedAt ? new Date(user.sessionsRevokedAt) : null;
-    if (revokedAt && redeemedRowCreatedAt && revokedAt >= new Date(redeemedRowCreatedAt)) {
+    const exempt = familyId && user?.sessionsRevokedExceptFamily && user.sessionsRevokedExceptFamily === familyId;
+    if (revokedAt && since && revokedAt >= new Date(since) && !exempt) {
         await state.storage.sessionRepository.revokeByRefreshTokenHash(newTokenHash, { onlyIfActive: false });
         throw new IdpError({ code: 'TOKEN_REVOKED', httpStatus: 401, message: 'Session has been revoked' });
     }
+}
+
+/**
+ * After a refresh has written its successor: if reuse detection revoked the family meanwhile (it ran
+ * while this refresh was between consuming its token and inserting the successor, so it couldn't see
+ * the successor), revoke the successor and refuse.
+ */
+export async function assertFamilyNotRevoked(state, familyId, newTokenHash) {
+    if (!(await state.storage.sessionRepository.isFamilyRevoked(familyId))) return;
+    await state.storage.sessionRepository.revokeByRefreshTokenHash(newTokenHash, { onlyIfActive: false });
+    throw new IdpError({ code: 'TOKEN_REVOKED', httpStatus: 401, message: 'Session has been revoked' });
 }
