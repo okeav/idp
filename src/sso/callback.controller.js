@@ -5,6 +5,7 @@ import { IDENTITY_STATUS, CACHE_KEY_PREFIXES } from '../config/constants.js';
 import { isActiveAccount } from '../utils/account-status.js';
 import { buildSsoProviders, normalizeUserInfo, exchangeCode, fetchUserInfo, assertAppleIdToken, decodeJwtPayload } from './providers.js';
 import { ssoBindingCookie } from './binding.js';
+import { readCookie } from '../utils/cookies.js';
 import { auditLog } from '../hooks/index.js';
 import { issueSession, setSessionCookies, resolveClaims, mfaChallengeResponse } from '../password-auth/controllers.js';
 
@@ -47,7 +48,7 @@ export async function ssoCallbackHandler(req, res, next) {
         if (!providerConfig) throw new IdpError({ code: 'INVALID_SSO_PROVIDER', httpStatus: 400, message: `Unknown SSO provider: ${provider}` });
 
         const cookie = ssoBindingCookie(state, csrfState, providerConfig);
-        const binding = req.cookies?.[cookie.name];
+        const binding = readCookie(req, cookie.name);
         res.clearCookie(cookie.name, { ...cookie.options, maxAge: undefined });
         if (typeof binding !== 'string' || !stateData.bindingHash || !safeEqual(sha256b64url(binding), stateData.bindingHash)) {
             state.logger?.warn?.({ provider }, 'SSO callback refused — not completed in the browser that started it');

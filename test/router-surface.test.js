@@ -134,7 +134,7 @@ test('POST /logout accepts the refresh token from the httpOnly cookie alone (no 
     await fetch(`${app.baseUrl}/register/verify-email`, json({ email, code }));
     const { refreshToken } = await (await fetch(`${app.baseUrl}/login`, json({ email, password }))).json();
 
-    const res = await fetch(`${app.baseUrl}/logout`, { method: 'POST', headers: { Cookie: `refresh_token=${refreshToken}` } });
+    const res = await fetch(`${app.baseUrl}/logout`, { method: 'POST', headers: { Cookie: `__Host-refresh_token=${refreshToken}` } });
     assert.equal(res.status, 200, await res.text());
 
     const reuse = await fetch(`${app.baseUrl}/refresh`, json({ refreshToken }));
@@ -142,7 +142,7 @@ test('POST /logout accepts the refresh token from the httpOnly cookie alone (no 
 
     // An empty JSON body with the cookie works too, and a body token still works.
     const { refreshToken: second } = await (await fetch(`${app.baseUrl}/login`, json({ email, password }))).json();
-    assert.equal((await fetch(`${app.baseUrl}/logout`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: `refresh_token=${second}` }, body: '{}' })).status, 200);
+    assert.equal((await fetch(`${app.baseUrl}/logout`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: `__Host-refresh_token=${second}` }, body: '{}' })).status, 200);
     const { refreshToken: third } = await (await fetch(`${app.baseUrl}/login`, json({ email, password }))).json();
     assert.equal((await fetch(`${app.baseUrl}/logout`, json({ refreshToken: third }))).status, 200);
 

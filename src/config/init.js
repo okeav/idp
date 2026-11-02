@@ -47,6 +47,7 @@ export async function initIdentityProvider(config) {
     if (!['all', 'public'].includes(resolved.oauth2.requirePkce)) {
         throw new Error("config.oauth2.requirePkce must be 'all' or 'public'");
     }
+    assertCookieConfig(resolved.cookies);
     const grace = resolved.serviceMesh.rotationGraceSeconds;
     if (!Number.isInteger(grace) || grace < 0) throw new Error(`config.serviceMesh.rotationGraceSeconds must be an integer >= 0 (got ${grace})`);
     for (const [name, min] of [['recentAuthMaxAgeSeconds', 1], ['absoluteLifetimeSeconds', 1], ['refreshReuseGraceSeconds', 0]]) {
@@ -154,6 +155,25 @@ function assertRateLimitRules(rateLimiting) {
         if (!Number.isInteger(rule.max) || rule.max < 1 || !Number.isInteger(rule.windowSeconds) || rule.windowSeconds < 1) {
             throw new Error(`config.rateLimiting.${name} needs positive integer max and windowSeconds (got ${JSON.stringify(rule)})`);
         }
+    }
+}
+
+/** A typo in sameSite used to surface as a 500 on every login; SameSite=None without Secure is dropped by browsers. */
+function assertCookieConfig(cookies = {}) {
+    if (cookies.sameSite !== undefined && !['lax', 'strict', 'none'].includes(cookies.sameSite)) {
+        throw new Error(`config.cookies.sameSite must be 'lax', 'strict' or 'none' (got ${JSON.stringify(cookies.sameSite)})`);
+    }
+    if (cookies.sameSite === 'none' && cookies.secure === false) throw new Error("config.cookies.sameSite 'none' requires secure cookies (browsers drop SameSite=None without Secure)");
+    if (cookies.trustedOrigins !== undefined && (!Array.isArray(cookies.trustedOrigins) || cookies.trustedOrigins.some((o) => typeof o !== 'string' || o !== safeOrigin(o)))) {
+        throw new Error('config.cookies.trustedOrigins must be an array of exact origins, e.g. https://app.example.com (no path, no trailing slash)');
+    }
+}
+
+function safeOrigin(value) {
+    try {
+        return new URL(value).origin;
+    } catch {
+        return null;
     }
 }
 

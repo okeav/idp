@@ -67,7 +67,7 @@ async function sso(provider, profile, { baseUrl = app.baseUrl } = {}) {
     const cb = await realFetch(`${baseUrl}/sso/${provider}/callback?code=provider-code&state=${state}`, { redirect: 'manual', headers: { Cookie: cookie } });
     assert.equal(cb.status, 302, await cb.text());
     const location = new URL(cb.headers.get('location'));
-    const cookies = cb.headers.getSetCookie().filter((c) => !c.startsWith('idp_sso_'));
+    const cookies = cb.headers.getSetCookie().filter((c) => !c.startsWith('__Host-idp_sso_'));
     return { location, cookies, query: location.searchParams, fragment: new URLSearchParams(location.hash.slice(1)) };
 }
 
@@ -107,7 +107,7 @@ test('a verified provider email links to the active account and logs in', async 
 
     const r = await sso('google', google(email, { sub: 'g-owner-1' }));
     assert.equal(r.query.get('ssoLogin'), 'success');
-    assert.ok(r.cookies.some((c) => c.startsWith('access_token=')));
+    assert.ok(r.cookies.some((c) => c.startsWith('__Host-access_token=')));
     assert.equal(String((await linkedTo('google', 'g-owner-1')).id), String(user.id));
 
     // Once linked, the identity keeps working by its provider id.

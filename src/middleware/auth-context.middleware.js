@@ -3,6 +3,7 @@ import { verifyAccessToken, classifyAccessToken } from '../signing/token.service
 import { isRevoked } from '../cache/index.js';
 import { IdpError } from '../errors/idp-error.js';
 import { CACHE_KEY_PREFIXES, COOKIE_NAMES, ACCESS_TOKEN_KINDS } from '../config/constants.js';
+import { readSessionCookie } from '../utils/cookies.js';
 import { assertTrustedOrigin } from './csrf.js';
 
 function parseBearer(header) {
@@ -46,10 +47,11 @@ export function authContextMiddleware(opts = {}) {
     return async function (req, _res, next) {
         try {
             const state = getState();
-            const rawCookie = req.cookies?.[COOKIE_NAMES.ACCESS_TOKEN];
-            const cookieToken = typeof rawCookie === 'string' ? rawCookie : undefined;
+            // An explicit Authorization header wins: the cookie is whatever the browser holds, which a
+            // sibling subdomain may have planted.
             const bearerToken = parseBearer(req.headers.authorization);
-            const token = cookieToken || bearerToken;
+            const cookieToken = bearerToken ? undefined : readSessionCookie(state, req, COOKIE_NAMES.ACCESS_TOKEN);
+            const token = bearerToken || cookieToken;
 
             if (!token) {
                 if (opts.optional) return next();

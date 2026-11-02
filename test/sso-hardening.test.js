@@ -99,7 +99,7 @@ test('login CSRF: the callback completes only in the browser that started the lo
 
 test('the binding cookie is httpOnly and short-lived', async () => {
     const { setCookie } = await initiate('google');
-    const binding = setCookie.find((c) => c.startsWith('idp_sso_'));
+    const binding = setCookie.find((c) => c.startsWith('__Host-idp_sso_'));
     assert.match(binding, /HttpOnly/i);
     assert.match(binding, /SameSite=Lax/i);
     assert.match(binding, new RegExp(`Max-Age=${app.state.config.ttls.ssoState}`));
@@ -178,7 +178,7 @@ test('Apple: the id_token must be for this client, from Apple, unexpired, and ca
 
 test('Apple: the binding cookie survives Apple\'s cross-site form POST (SameSite=None; Secure)', async () => {
     const { setCookie } = await initiate('apple');
-    const binding = setCookie.find((c) => c.startsWith('idp_sso_'));
+    const binding = setCookie.find((c) => c.startsWith('__Host-idp_sso_'));
     assert.match(binding, /SameSite=None/i);
     assert.match(binding, /Secure/i);
 });

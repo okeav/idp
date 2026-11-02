@@ -13,12 +13,13 @@ import { ipKey, emailKey } from '../rate-limit/keys.js';
 import { withAttemptBudget } from '../security/attempt-budget.js';
 import { assertTrustedOrigin } from '../middleware/csrf.js';
 import { effectiveStatus, isActiveAccount, isPasswordLocked } from '../utils/account-status.js';
+import { sessionCookieName, readSessionCookie, cookiesAreSecure } from '../utils/cookies.js';
 
 function cookieOptions(state) {
     const c = state.config.cookies || {};
     return {
         httpOnly: true,
-        secure: c.secure ?? process.env.NODE_ENV !== 'development',
+        secure: cookiesAreSecure(state),
         sameSite: c.sameSite || 'lax',
         path: '/',
         ...(c.domain ? { domain: c.domain } : {}),
@@ -111,8 +112,8 @@ async function isNewDeviceForUser(state, { user, deviceInfo, deviceFingerprint, 
 function clearSessionCookies(res, state) {
     const { httpOnly, secure, sameSite, path, domain } = cookieOptions(state);
     const opts = { httpOnly, secure, sameSite, path, ...(domain ? { domain } : {}) };
-    res.clearCookie(COOKIE_NAMES.ACCESS_TOKEN, opts);
-    res.clearCookie(COOKIE_NAMES.REFRESH_TOKEN, opts);
+    res.clearCookie(sessionCookieName(state, COOKIE_NAMES.ACCESS_TOKEN), opts);
+    res.clearCookie(sessionCookieName(state, COOKIE_NAMES.REFRESH_TOKEN), opts);
 }
 
 /**
@@ -126,8 +127,8 @@ function refreshTokenInBody(state, value) {
 
 function setSessionCookies(res, state, { accessToken, refreshTokenValue, refreshExpiresAt }) {
     const opts = cookieOptions(state);
-    res.cookie(COOKIE_NAMES.ACCESS_TOKEN, accessToken.token, { ...opts, expires: accessToken.expiresAt });
-    res.cookie(COOKIE_NAMES.REFRESH_TOKEN, refreshTokenValue, { ...opts, expires: refreshExpiresAt });
+    res.cookie(sessionCookieName(state, COOKIE_NAMES.ACCESS_TOKEN), accessToken.token, { ...opts, expires: accessToken.expiresAt });
+    res.cookie(sessionCookieName(state, COOKIE_NAMES.REFRESH_TOKEN), refreshTokenValue, { ...opts, expires: refreshExpiresAt });
 }
 
 // ── Register ────────────────────────────────────────────────────────────────
@@ -459,9 +460,8 @@ export async function refreshTokenHandler(req, res, next) {
         const state = getState();
         await enforceRateLimit(state, `refresh:ip:${ipKey(req.ip)}`, state.config.rateLimiting.refreshToken);
 
-        const rawCookie = req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN];
-        const cookieValue = typeof rawCookie === 'string' ? rawCookie : undefined;
-        const refreshTokenValue = cookieValue || req.body?.refreshToken;
+        // A token in the body is explicit and wins over the cookie.
+        const refreshTokenValue = req.body?.refreshToken || readSessionCookie(state, req, COOKIE_NAMES.REFRESH_TOKEN);
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required' });
         // Checked for a body token too: /refresh sets session cookies, so a form posting the ATTACKER's
         // refresh token from a sibling origin would sign the victim's browser into the attacker's account.
@@ -547,10 +547,11 @@ export async function refreshTokenHandler(req, res, next) {
 export async function logoutHandler(req, res, next) {
     try {
         const state = getState();
-        const rawCookie = req.cookies?.[COOKIE_NAMES.REFRESH_TOKEN];
-        const refreshTokenValue = req.body?.refreshToken || (typeof rawCookie === 'string' ? rawCookie : undefined);
+        // Every browser request, body token or not: logout clears the session cookies, so a cross-site
+        // form posting any token would otherwise sign the victim out (logout CSRF).
+        assertTrustedOrigin(state, req);
+        const refreshTokenValue = req.body?.refreshToken || readSessionCookie(state, req, COOKIE_NAMES.REFRESH_TOKEN);
         if (!refreshTokenValue) throw new IdpError({ code: 'REFRESH_TOKEN_REQUIRED', httpStatus: 400, message: 'Refresh token is required to log out' });
-        if (!req.body?.refreshToken) assertTrustedOrigin(state, req);
 
         const tokenHash = hashOpaqueToken(state, refreshTokenValue);
         const existing = await state.storage.sessionRepository.revokeByRefreshTokenHash(tokenHash, { onlyIfActive: false });

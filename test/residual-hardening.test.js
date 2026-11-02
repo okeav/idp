@@ -89,9 +89,9 @@ test('a malformed session id is a 404, and a JSON-typed cookie is no token (both
     assert.equal(res.status, 404);
 
     // cookie-parser turns `j:{...}` into an object.
-    const jsonCookie = `refresh_token=${encodeURIComponent('j:{"$ne":null}')}`;
+    const jsonCookie = `__Host-refresh_token=${encodeURIComponent('j:{"$ne":null}')}`;
     assert.equal((await fetch(`${app.baseUrl}/refresh`, { method: 'POST', headers: { Cookie: jsonCookie } })).status, 400);
-    assert.equal((await fetch(`${app.baseUrl}/me`, { headers: { Cookie: `access_token=${encodeURIComponent('j:{"a":1}')}` } })).status, 401);
+    assert.equal((await fetch(`${app.baseUrl}/me`, { headers: { Cookie: `__Host-access_token=${encodeURIComponent('j:{"a":1}')}` } })).status, 401);
 });
 
 test('by default /refresh re-derives claims, so a role change takes effect within one access-token lifetime', async () => {
