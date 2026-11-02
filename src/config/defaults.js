@@ -60,6 +60,10 @@ export function withDefaults(config = {}) {
         webauthn: config.webauthn || {},
         oauthProviders: config.oauthProviders || {},
         sso: config.sso || {},
+        // endSessionConfirmationUrl: the IdP page that asks "sign out?" — see oidc/end-session.controller.js.
+        oidc: { endSessionConfirmationUrl: undefined, ...config.oidc },
+        // Bounds on this server's clock vs the database's — see security/clock-skew.js.
+        clock: { maxSkewSeconds: 30, warnSkewSeconds: 2, checkIntervalSeconds: 600, ...config.clock },
         // requirePkce: 'all' (default) or 'public' — see oauth2/authorize.controller.js.
         oauth2: { requirePkce: 'all', ...config.oauth2 },
         // rotationGraceSeconds: how long a replaced (ROTATING) service key still verifies — see service-mesh/key-status.js.

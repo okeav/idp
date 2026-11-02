@@ -1,6 +1,7 @@
 import { getState } from './config/state.js';
 import * as tokenService from './signing/token.service.js';
 import { currentSessionEpoch } from './utils/session-family.js';
+import { checkSkew } from './security/clock-skew.js';
 
 // ── Bootstrap ────────────────────────────────────────────────────────────
 export { initIdentityProvider } from './config/init.js';
@@ -33,6 +34,14 @@ export async function issueMfaChallengeToken(subjectId) {
     const state = getState();
     // Bound to the user's current session epoch, like the challenges the IdP issues itself.
     return tokenService.issueMfaChallengeToken(state, subjectId, { sessionEpoch: await currentSessionEpoch(state, subjectId) });
+}
+/**
+ * For health checks: this server's clock vs the database's — `{ skewMs, ok, level }` (level 'ok',
+ * 'warn', 'error', or 'unknown' when the storage adapter can't tell the time).
+ */
+export async function checkClockSkew() {
+    const state = getState();
+    return checkSkew(state.storage, state.config.clock);
 }
 export function verifyMfaChallengeToken(token) {
     return tokenService.verifyMfaChallengeToken(getState(), token);

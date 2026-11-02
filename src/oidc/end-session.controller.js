@@ -82,9 +82,17 @@ export async function endSessionHandler(req, res, next) {
             }
         }
 
-        // Signed in, and nothing shows the user asked for this: ask them first.
+        // Signed in, and nothing shows the user asked for this: ask them first — on the IdP's
+        // confirmation page when one is configured (the browser was sent here by a relying party), with
+        // the request's parameters so the page can POST them back.
         if (signedInUserId && !hint && !confirmed) {
             res.set('Cache-Control', 'no-store');
+            const page = state.config.oidc?.endSessionConfirmationUrl;
+            if (page) {
+                const url = new URL(page);
+                for (const [k, v] of Object.entries(q)) if (typeof v === 'string') url.searchParams.set(k, v);
+                return res.redirect(url.toString());
+            }
             return res.status(200).json({ action: 'logout_confirmation_required' });
         }
 

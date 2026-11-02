@@ -91,6 +91,14 @@ export function configFromEnv(env = process.env) {
         session: {
             verifyOnEachRequest: bool('IDP_SESSION_VERIFY_ON_EACH_REQUEST', true),
         },
+        oidc: {
+            endSessionConfirmationUrl: env.IDP_OIDC_END_SESSION_CONFIRMATION_URL || undefined,
+        },
+        clock: {
+            maxSkewSeconds: int('IDP_CLOCK_MAX_SKEW_SECONDS', 30, { min: 1 }),
+            warnSkewSeconds: int('IDP_CLOCK_WARN_SKEW_SECONDS', 2, { min: 0 }),
+            checkIntervalSeconds: int('IDP_CLOCK_CHECK_INTERVAL_SECONDS', 600, { min: 10 }),
+        },
         oauthProviders: {
             google: env.IDP_SSO_GOOGLE_CLIENT_ID ? { clientId: env.IDP_SSO_GOOGLE_CLIENT_ID, clientSecret: env.IDP_SSO_GOOGLE_CLIENT_SECRET } : undefined,
             microsoft: env.IDP_SSO_MICROSOFT_CLIENT_ID ? { clientId: env.IDP_SSO_MICROSOFT_CLIENT_ID, clientSecret: env.IDP_SSO_MICROSOFT_CLIENT_SECRET, tenant: env.IDP_SSO_MICROSOFT_TENANT || 'common', trustEmail: bool('IDP_SSO_MICROSOFT_TRUST_EMAIL', false) } : undefined,

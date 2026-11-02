@@ -11,6 +11,7 @@ import { createMongoStorage } from '../storage/mongo/index.js';
 import { makeHashEmail, normalizeEmail } from '../utils/email-hash.js';
 import { createMfaSecretCipher, assertMfaSecretConfig } from '../mfa/secrets.js';
 import { assertStorageContract } from '../storage/interfaces.js';
+import { startClockSkewGuard } from '../security/clock-skew.js';
 import { MemoryAttemptCounterRepository } from '../mfa/memory-attempt-counter.js';
 import { prepareDummyHash } from '../utils/password.js';
 import { isSecureUrl, isLoopbackHost } from '../utils/url.js';
@@ -54,6 +55,8 @@ export async function initIdentityProvider(config) {
     }
     assertCookieConfig(resolved.cookies);
     assertIssuerAndTtls(resolved, logger);
+    assertOidcConfig(resolved);
+    assertClockConfig(resolved.clock);
     assertServiceMeshSecrets(resolved.serviceMesh);
     const grace = resolved.serviceMesh.rotationGraceSeconds;
     if (!Number.isInteger(grace) || grace < 0) throw new Error(`config.serviceMesh.rotationGraceSeconds must be an integer >= 0 (got ${grace})`);
@@ -79,12 +82,20 @@ export async function initIdentityProvider(config) {
         ? await resolved.storage.factory(resolved, { hashEmail, normalizeEmail })
         : await createMongoStorage(resolved.mongo, { hashEmail, normalizeEmail });
 
+    let stopClockGuard;
     try {
         assertStorageContract(storage);
+        stopClockGuard = await startClockSkewGuard(storage, resolved.clock, logger);
     } catch (err) {
         await storage?.close?.().catch(() => {});
         throw err;
     }
+    // Closing the storage also ends the periodic clock check.
+    const closeStorage = storage.close.bind(storage);
+    storage.close = async () => {
+        stopClockGuard();
+        return closeStorage();
+    };
 
     // Adapters that predate 0.3.0 (or haven't caught up yet) keep working:
     // the MFA lockout falls back to an in-process counter, and per-request
@@ -240,6 +251,27 @@ function assertCookieConfig(cookies = {}) {
     if (cookies.sameSite === 'none' && cookies.secure === false) throw new Error("config.cookies.sameSite 'none' requires secure cookies (browsers drop SameSite=None without Secure)");
     if (cookies.trustedOrigins !== undefined && (!Array.isArray(cookies.trustedOrigins) || cookies.trustedOrigins.some((o) => typeof o !== 'string' || o !== safeOrigin(o)))) {
         throw new Error('config.cookies.trustedOrigins must be an array of exact origins, e.g. https://app.example.com (no path, no trailing slash)');
+    }
+}
+
+/**
+ * The end-session confirmation page POSTs back to /oidc/end-session, which only accepts that from a
+ * trusted origin — so the page must be on one (and https, like every other URL the IdP sends users to).
+ */
+function assertClockConfig(clock) {
+    for (const [name, min] of [['maxSkewSeconds', 1], ['warnSkewSeconds', 0], ['checkIntervalSeconds', 10]]) {
+        if (!Number.isInteger(clock[name]) || clock[name] < min) throw new Error(`config.clock.${name} must be an integer >= ${min} (got ${clock[name]})`);
+    }
+    if (clock.warnSkewSeconds > clock.maxSkewSeconds) throw new Error('config.clock.warnSkewSeconds must not exceed maxSkewSeconds');
+}
+
+function assertOidcConfig(resolved) {
+    const url = resolved.oidc?.endSessionConfirmationUrl;
+    if (url === undefined) return;
+    if (typeof url !== 'string' || !isSecureUrl(url)) throw new Error('config.oidc.endSessionConfirmationUrl must be an https URL (http only for localhost)');
+    const trusted = new Set([safeOrigin(resolved.issuer), ...(resolved.cookies?.trustedOrigins ?? [])]);
+    if (!trusted.has(safeOrigin(url))) {
+        throw new Error('config.oidc.endSessionConfirmationUrl must be on the issuer\'s origin or one of cookies.trustedOrigins (its confirmation POST is refused from anywhere else)');
     }
 }
 

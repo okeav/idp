@@ -76,6 +76,11 @@ export async function createMongoStorage(mongoConfig, emailDeps) {
     return {
         connection,
         close: () => connection.close(),
+        // The database server's clock — the reference every app server's clock is checked against.
+        async databaseTime() {
+            const hello = await connection.db.admin().command({ hello: 1 });
+            return { time: hello.localTime };
+        },
         userRepository: new MongoUserRepository(userModel, emailDeps),
         sessionRepository,
         authorizationCodeRepository: new MongoAuthorizationCodeRepository(authorizationCodeModel),
