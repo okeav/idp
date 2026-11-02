@@ -13,6 +13,13 @@ Time-based one-time password (TOTP) second factor, via `otplib`. All six handler
 30-second clock-skew tolerance either side of the current step. A submitted code that isn't
 exactly 6 digits is simply not a TOTP match (it never reaches `otplib`, which would throw on it).
 
+**Every TOTP code is single-use.** Each account records the last accepted TOTP time step
+(`mfaLastTotpStep`, claimed atomically through `userRepository.claimTotpStep`) and refuses that
+step or an earlier one — at login, enrolment, disable and recovery-code regeneration alike. The
+code that confirmed enrolment can't then complete a login, and a user who just used a code waits
+for the next one before using TOTP again. A replayed step is answered like any wrong code
+(`INVALID_MFA_CODE`) and counts toward the lockout.
+
 Secrets are encrypted at rest and failed codes count toward a per-account lockout — see
 [Secret encryption at rest](#secret-encryption-at-rest) and
 [Per-account lockout](#per-account-lockout) below. With `config.mfa.enabled: false`, setup and
@@ -22,7 +29,14 @@ confirm respond 404 `FEATURE_DISABLED`.
 > explicit `UNAUTHENTICATED` guard — they rely on `authContextMiddleware()` being mounted in front
 > of them (as `buildRouter()` does). If you wire these handlers individually, mount
 > `authContextMiddleware()` first or a raw `TypeError` will propagate instead of a structured
-> `IdpError`.
+> `IdpError`. `buildRouter()` also mounts `requireRecentAuth()` in front of `POST /me/mfa/setup`
+> and `POST /me/mfa/confirm` — do the same:
+>
+> ```js
+> router.post('/me/mfa/setup', authContextMiddleware(), requireRecentAuth(), setupMfaHandler);
+> router.post('/me/mfa/confirm', authContextMiddleware(), requireRecentAuth(),
+>     validateBody(schemas.confirmMfaSchema), confirmMfaHandler);
+> ```
 
 ## `GET /me/mfa` — `getMfaStatusHandler`
 
@@ -30,22 +44,31 @@ No body. → `{ mfaEnabled: boolean }`. `USER_NOT_FOUND` (404).
 
 ## `POST /me/mfa/setup` — `setupMfaHandler`
 
+**Requires a recent login** (`requireRecentAuth()`): the access token's `auth_time` must be within
+`config.session.recentAuthMaxAgeSeconds` (default 900 s), otherwise 401
+`REAUTHENTICATION_REQUIRED` — send the user through a login (password + MFA, magic link, SSO or
+passkey; a token refresh doesn't count) and retry with the new token. This stops a stolen session
+from enrolling a second factor of its own.
+
 No body. Generates a new TOTP secret and stores it, encrypted, in `mfaTempSecret` **only** — `mfaEnabled`
 stays `false` and the confirmed `mfaSecret` is untouched until `confirmMfaHandler` succeeds.
 Calling setup again before confirming simply overwrites `mfaTempSecret` (no error on repeat calls
 while `mfaEnabled` is still false).
 
-→ `{ secret, otpauthUrl }` — `otpauthUrl` is a raw `otplib`-generated `otpauth://` URI
+→ `{ secret, otpauthUrl }` (sent with `Cache-Control: no-store`) — `otpauthUrl` is a raw `otplib`-generated `otpauth://` URI
 (`label: user.email, issuer: config.mfa.issuerLabel, strategy: 'totp'`). **This package does not
 render a QR code** — render one client-side from `otpauthUrl`.
 
-Errors: `FEATURE_DISABLED` (404, `mfa.enabled: false`); `USER_NOT_FOUND` (404);
-`MFA_ALREADY_ENABLED` (400).
+Errors: `REAUTHENTICATION_REQUIRED` (401); `FEATURE_DISABLED` (404, `mfa.enabled: false`);
+`USER_NOT_FOUND` (404); `MFA_ALREADY_ENABLED` (400).
 
 ## `POST /me/mfa/confirm` — `confirmMfaHandler`
 
+**Requires a recent login** (`requireRecentAuth()`, as for setup).
+
 Body: `{ code: string (6-10 chars) }`. Verifies `code` against `mfaTempSecret`, under the
-[per-account lockout](#per-account-lockout) (`method: 'totp-enrolment'`). On success: re-encrypts
+[per-account lockout](#per-account-lockout) (`method: 'totp-enrolment'`), claiming its time step
+(so the same code can't then complete a login). On success: re-encrypts
 the temp secret into `mfaSecret` (a legacy plain-text temp secret is sealed here), nulls
 `mfaTempSecret`, sets `mfaEnabled: true`, and
 **generates recovery codes at this point** (not at setup time) — count from
@@ -53,21 +76,29 @@ the temp secret into `mfaSecret` (a legacy plain-text temp secret is sealed here
 (`XXXXXX-XXXXXX`). Stored server-side only as `{ codeHash: HMAC-SHA256(code), usedAt: null }` —
 raw codes are never persisted.
 
-→ `{ mfaEnabled: true, recoveryCodes: [...] }` — **shown once, in plaintext.** Your UI must prompt
+**Enabling MFA signs out the account's other sessions.** Every other session row is revoked
+(`sessionRepository.revokeAllForUser(userId, { exceptJti })`), keeping only the session that
+enrolled — any of them could be the reason the user is securing the account. The `MFA_ENABLED`
+audit event carries `revokedOtherSessions` (the count).
+
+→ `{ mfaEnabled: true, recoveryCodes: [...] }` (`Cache-Control: no-store`) — **shown once, in plaintext.** Your UI must prompt
 the user to save these; there's no way to retrieve them again short of regenerating (which
 invalidates the old set).
 
-Errors: `FEATURE_DISABLED` (404); `USER_NOT_FOUND` (404); `MFA_ALREADY_ENABLED` (400);
-`MFA_SETUP_REQUIRED` (400, no `mfaTempSecret` present — call setup first); `INVALID_MFA_CODE`
+Errors: `REAUTHENTICATION_REQUIRED` (401); `FEATURE_DISABLED` (404); `USER_NOT_FOUND` (404);
+`MFA_ALREADY_ENABLED` (400); `MFA_SETUP_REQUIRED` (400, no `mfaTempSecret` present — call setup first); `INVALID_MFA_CODE`
 (400); `MFA_LOCKED` (429); the [secret-read errors](#secret-encryption-at-rest) (500).
 
 ## `DELETE /me/mfa` — `disableMfaHandler`
 
-Body: `{ password: string, code: string (6-10 chars) }`. Runs under the
-[per-account lockout](#per-account-lockout) (`method: 'totp-disable'`): the lock is checked
-**before** the password, so a locked account can't be used as a password oracle; then the
-password, then the TOTP code. Only a wrong code counts as a failure, not a wrong password. Fully resets MFA state: `mfaEnabled: false, mfaSecret: null, mfaTempSecret: null,
-mfaRecoveryCodes: []` — all recovery codes are discarded too, not just the submitted TOTP.
+Body: `{ password?: string, code: string (6-10 chars) }`. `password` is required when the account
+has one; a passwordless account (SSO / magic-link only) re-authenticates with the TOTP code alone.
+Runs under the [per-account lockout](#per-account-lockout) (`method: 'totp-disable'`): the attempt
+is counted **before** the password is checked, so this route is no password oracle, locked or
+not; then the password, then the TOTP code. A wrong password and a wrong code both count as
+failures. Fully resets MFA state: `mfaEnabled: false, mfaSecret: null, mfaTempSecret: null,
+mfaRecoveryCodes: [], mfaLastTotpStep: null` — all recovery codes are discarded too, not just the
+submitted TOTP.
 
 → `{ mfaEnabled: false }`.
 
@@ -77,12 +108,19 @@ Errors: `USER_NOT_FOUND` (404); `MFA_NOT_ENABLED` (400); `CURRENT_PASSWORD_INCOR
 
 ## `POST /me/mfa/recovery-codes` — `regenerateRecoveryCodesHandler`
 
-Body: `{ password: string }` — **no TOTP code required**, password alone. Fully replaces
+Body: `{ password?: string, code: string (6-10 chars) }` — **a current TOTP code is required as
+well as the password** (since 0.4.0: whoever holds only a session, or only the password, must not
+be able to mint a fresh set of second factors). As for disable, `password` is required only when
+the account has one. Runs under the [per-account lockout](#per-account-lockout)
+(`method: 'recovery-codes'`); a wrong password or code counts as a failure. Fully replaces
 `mfaRecoveryCodes` (old codes, used or unused, are invalidated wholesale).
 
-→ `{ recoveryCodes: [...] }` (plaintext, shown once, same generation scheme as confirm).
+→ `{ recoveryCodes: [...] }` (plaintext, shown once, same generation scheme as confirm;
+`Cache-Control: no-store`).
 
-Errors: `USER_NOT_FOUND` (404); `MFA_NOT_ENABLED` (400); `CURRENT_PASSWORD_INCORRECT` (400).
+Errors: `USER_NOT_FOUND` (404); `MFA_NOT_ENABLED` (400); `CURRENT_PASSWORD_INCORRECT` (400);
+`INVALID_MFA_CODE` (400); `MFA_LOCKED` (429); the [secret-read errors](#secret-encryption-at-rest)
+(500).
 
 ## `POST /mfa/verify` — `verifyMfaChallengeHandler`
 
@@ -92,25 +130,35 @@ Errors: `USER_NOT_FOUND` (404); `MFA_NOT_ENABLED` (400); `CURRENT_PASSWORD_INCOR
 (`XXXXXX-XXXXXX`, 13 chars). Rate limited, fail-closed: `mfa-challenge:ip:<req.ip>` against
 `config.rateLimiting.mfaChallenge` (5/15min default).
 
-**Verification order**: [lockout](#per-account-lockout) check (`method: 'totp'`); TOTP against
-`mfaSecret`; **only if that fails**, a scan of `mfaRecoveryCodes` for an unused entry (`usedAt`
-falsy) whose hash (`crypto.timingSafeEqual`, length-checked first) matches the submitted code. A
-matched recovery code is marked `usedAt: <now>` but **not removed** from the array (kept for audit
-history). TOTP and recovery codes count against the same per-account limit. On success, a
-plain-text `mfaSecret` (or one under a retired key) is re-encrypted under the current key.
+**Verification order**: the challenge token is verified; the user must be `ACTIVE` with MFA still
+enabled; and a challenge issued **before the account's last password change is void** (it was
+earned with the old password). Then, under the [lockout](#per-account-lockout) (`method: 'totp'`,
+counted before the code is checked): TOTP against `mfaSecret`, claiming its time step (single-use,
+see above); **only if that fails**, the code is treated as a recovery code — trimmed and
+upper-cased (so case and surrounding spaces don't matter), HMAC'd, and spent with one atomic
+conditional update (`userRepository.consumeRecoveryCode(userId, codeHash)`), so two concurrent
+requests can't both spend it. A spent recovery code is marked `usedAt: <now>` but **not removed**
+from the array (kept for audit history). TOTP and recovery codes count against the same
+per-account limit. On success, a plain-text `mfaSecret` (or one under a retired key) is
+re-encrypted under the current key.
 
-On **total failure** (neither TOTP nor any recovery code matched), the handler also calls
-`incrementFailedLoginAttempts` — but never checks the result against `maxFailedLoginAttempts`, so
-this endpoint never triggers password login's `ACCOUNT_LOCKED`/`onSuspiciousActivityDetected`.
-Brute force here is stopped by the per-account MFA lockout instead.
+**A challenge token completes one login only.** Once the factor checks out, the token's `jti` is
+claimed in the shared attempt-counter store (atomic, visible to every instance); presenting the
+same token again — here or at `POST /webauthn/mfa/verify` — answers `INVALID_MFA_CHALLENGE_TOKEN`.
+
+Wrong MFA codes do **not** count toward the password lockout (`failedLoginAttempts`), so this
+endpoint never triggers password login's `ACCOUNT_LOCKED`/`onSuspiciousActivityDetected`. Brute
+force here is stopped by the per-account MFA lockout, which has its own counter.
 
 **Success**: sets session cookies + `200 { accessToken, accessTokenExpiresAt, refreshToken,
-refreshTokenExpiresAt, userId }` — same shape as password login's non-MFA success.
+refreshTokenExpiresAt, userId }` — same shape as password login's non-MFA success (`refreshToken`
+is left out of the body under `cookies.refreshTokenInBody: false`). The new session's `auth_time`
+is now, so it counts as a recent login for `requireRecentAuth()`.
 
 Errors:
-- `INVALID_MFA_CHALLENGE_TOKEN` (401) — thrown for two different conditions that surface
-  identically: the JWT itself is invalid/expired, **or** it verifies fine but `mfaEnabled` has
-  since been turned off (e.g. disabled between challenge issuance and this call).
+- `INVALID_MFA_CHALLENGE_TOKEN` (401) — thrown for several conditions that surface identically:
+  the JWT itself is invalid/expired; it verifies but `mfaEnabled` has since been turned off; it
+  was issued before the account's last password change; or it has already completed a login.
 - `USER_NOT_ACTIVE` (403) — user not found, or not `ACTIVE`.
 - `INVALID_MFA_CODE` (400) — neither TOTP nor recovery code matched.
 - `MFA_LOCKED` (429) — see [Per-account lockout](#per-account-lockout).
@@ -118,16 +166,16 @@ Errors:
 - `MFA_SECRET_UNREADABLE` / `MFA_SECRET_NOT_ENCRYPTED` / `MFA_ENCRYPTION_NOT_CONFIGURED` (500) —
   see [Secret encryption at rest](#secret-encryption-at-rest). No tokens are issued.
 
-Hooks: `auditLog('MFA_VERIFIED', { userId })`; `resolveAuthContext(user, { isNewUser: false,
+Hooks: `auditLog('MFA_VERIFIED', { userId, method })` (`method`: `'totp'` or `'recovery-code'`); `resolveAuthContext(user, { isNewUser: false,
 method: 'mfa' })`; `onNewDeviceLogin` via `issueSession` if applicable.
 
 ## Per-account lockout
 
 A per-**account** limit on failed second-factor attempts, shared by every place a code or assertion
 is checked: TOTP and recovery codes at `POST /mfa/verify` (`method: 'totp'`), passkey-as-MFA at
-`POST /webauthn/mfa/verify` (`'webauthn'` — a failed or unknown-credential assertion counts; an
-expired/missing challenge doesn't), the code at `POST /me/mfa/confirm` (`'totp-enrolment'`), and
-the code at `DELETE /me/mfa` (`'totp-disable'`). All count against one key per user
+`POST /webauthn/mfa/verify` (`'webauthn'`), the code at `POST /me/mfa/confirm`
+(`'totp-enrolment'`), the password and code at `DELETE /me/mfa` (`'totp-disable'`), and the
+password and code at `POST /me/mfa/recovery-codes` (`'recovery-codes'`). All count against one key per user
 (`mfa:<userId>`), so guesses can't be spread across factors — or across IPs, which is all the
 per-IP `rateLimiting.mfaChallenge` limit sees. Independent of `rateLimiting.enabled`.
 
@@ -135,13 +183,19 @@ per-IP `rateLimiting.mfaChallenge` limit sees. Independent of `rateLimiting.enab
 config.mfa.lockout = { maxFailedAttempts: 5, windowSeconds: 900, lockSeconds: 900 } // defaults
 ```
 
-- The failure that reaches `maxFailedAttempts` within `windowSeconds` locks the account's
+- **Attempts are counted before the code is checked**, not after a failure: the counter's atomic
+  increment is the gate, so a burst of concurrent requests gets exactly `maxFailedAttempts`
+  guesses evaluated (0.3.0 checked first and counted after, so a parallel burst had every guess
+  evaluated). A successful verify resets the count, so its reservation costs nothing; an attempt
+  that fails for another reason (e.g. an expired WebAuthn challenge) keeps its reservation — when
+  in doubt, it counts.
+- The wrong guess that uses up the budget within `windowSeconds` locks the account's
   second-factor step for `lockSeconds`, and itself returns 429 `MFA_LOCKED` instead of the usual
   error. Failures older than the window don't accumulate.
 - While locked, **every** attempt — including one with the correct code — gets 429 `MFA_LOCKED`
-  with an identical body. The lock is checked before the code is evaluated, so the response says
-  nothing about whether it was right, and a recovery code submitted while locked isn't consumed.
-- A successful verify resets the counter. The lock lifts on its own after `lockSeconds`.
+  with an identical body, before its code is looked at, so the response says nothing about whether
+  it was right, and a recovery code submitted while locked isn't consumed.
+- The lock lifts on its own after `lockSeconds`.
 - On lockout, `onAuditLog` receives (once per lock, even under a concurrent burst)
   `{ action: 'MFA_LOCKED', userId, method, failedAttempts, lockedUntil, timestamp }` —
   `lockedUntil` is an ISO string. With webhooks configured it's also delivered as event
@@ -169,8 +223,9 @@ additional authenticated data, so a ciphertext copied onto another user's row fa
 | `allowPlaintext` | `false` | Development only: boot with MFA enabled and no key, storing secrets unencrypted; logs a loud warning. Env: `IDP_MFA_ALLOW_PLAINTEXT`. |
 
 `initIdentityProvider()` throws if MFA is enabled with neither `encryptionKey` nor `secretCipher`
-(unless `allowPlaintext`), if `requireEncrypted` is set without one, if a key doesn't decode to 32
-bytes, or if `secretCipher` lacks `encrypt`/`decrypt` — see
+(unless `allowPlaintext`), if `requireEncrypted` is set without one, if a key isn't **exactly** the
+base64 (or base64url) of 32 bytes (trailing garbage used to be ignored silently), or if
+`secretCipher` lacks `encrypt`/`decrypt` — see
 [Bootstrap & Configuration](bootstrap-config.md).
 
 **Fails closed.** A secret that won't decrypt (tampered, wrong key, unknown key id) → 500
@@ -218,8 +273,24 @@ interface SecretCipher {
 
 `context` is the owning user's id — bind it to the ciphertext (e.g. as KMS encryption context).
 `encrypt`'s output is stored verbatim and **must not look like bare base32** — that shape marks a
-legacy plain-text secret. A prefix such as `kms:` is enough. The built-in cipher is exported as
+legacy plain-text secret. A prefix such as `kms:` is enough. An `encrypt` result that is empty or
+looks like bare base32 is refused (500 `MFA_SECRET_UNREADABLE`) rather than stored. The built-in cipher is exported as
 `AesGcmSecretCipher({ currentKey, previousKeys? })` for advanced use.
+
+## Storage methods
+
+Two optional, atomic `UserRepository` methods back the single-use guarantees above (the built-in
+Mongo adapter implements both, and users gain an `mfaLastTotpStep` field):
+
+- `claimTotpStep(userId, step)` → `boolean` — records `step` as the last accepted TOTP step only if
+  it's later than the stored one; false otherwise.
+- `consumeRecoveryCode(userId, codeHash)` → `boolean` — marks the unused recovery code with this
+  hash `usedAt: now` in one conditional update; false if there is none.
+
+An adapter without them still works: a non-atomic read-then-write fallback is used (correct for
+sequential requests, racy under concurrency) and `initIdentityProvider()` logs a startup warning.
+Challenge-token single use is recorded through the `attemptCounterRepository` (or its in-process
+fallback). See [Repository Adapters](repository-adapters.md).
 
 ## Related
 

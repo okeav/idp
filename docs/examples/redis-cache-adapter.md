@@ -27,7 +27,10 @@ await initIdentityProvider({
   issuer: 'https://idp.example.com',
   mongo: { uri: process.env.MONGO_URI },
   signingKeys: { keys: { /* ... */ } },
-  security: { emailHashPepper: '...', tokenHashSecret: '...' },
+  security: {
+    emailHashPepper: process.env.IDP_EMAIL_HASH_PEPPER, // random, ≥ 32 characters
+    tokenHashSecret: process.env.IDP_TOKEN_HASH_SECRET, // random, ≥ 32 characters
+  },
   mfa: { encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY },
 
   cache: {
@@ -36,8 +39,10 @@ await initIdentityProvider({
     redis: {
       host: process.env.REDIS_HOST || '127.0.0.1',
       port: Number(process.env.REDIS_PORT) || 6379,
+      username: process.env.REDIS_USERNAME || undefined, // Redis 6 ACL user, if any
       password: process.env.REDIS_PASSWORD || undefined,
       db: 0,
+      tls: process.env.REDIS_TLS === 'true', // true (or ioredis TLS options) for managed Redis / anything off the local network
       keepAliveMs: 10_000, // default
     },
   },
@@ -45,8 +50,14 @@ await initIdentityProvider({
 ```
 
 That's the entire change — every handler that reads `state.cache` internally (revocation checks,
-SSO state, WebAuthn challenges, OIDC discovery caching) picks up the Redis-backed adapter
-automatically; no other config or route wiring changes.
+SSO state, WebAuthn challenges, OAuth2 consent challenges, OIDC discovery caching) picks up the
+Redis-backed adapter automatically; no other config or route wiring changes. With
+`configFromEnv()`, the same settings come from `IDP_CACHE_ADAPTER=redis`, `IDP_REDIS_HOST`,
+`IDP_REDIS_PORT`, `IDP_REDIS_USERNAME`, `IDP_REDIS_PASSWORD` and `IDP_REDIS_TLS`.
+
+The package repo's `docker-compose.yml` Redis has no authentication and is bound to `127.0.0.1` —
+fine for local development only. Anything reachable from elsewhere needs a password (or ACL user)
+and TLS.
 
 ## Sharing the connection with the rate limiter
 
@@ -80,6 +91,23 @@ const adapter = new RedisCacheAdapter({ redis: existingClient });
 // adapter satisfies the CacheAdapter contract directly — useful for testing
 // your own code against the same adapter shape idp-core uses internally.
 ```
+
+If you write your own adapter instead (another backend, or a wrapper around your own Redis
+client), it must implement all five methods — including `take(key)`, an **atomic** get-and-delete
+added in 0.4.0. The built-in one runs `GET` + `DEL` in a single `MULTI`/`EXEC`:
+
+```js
+async take(key) {
+  const [[err, raw]] = await this.redis.multi().get(key).del(key).exec();
+  if (err) throw err;
+  if (raw === null) return null;
+  try { return JSON.parse(raw); } catch { return raw; } // set() stores plain strings as-is
+}
+```
+
+A `get` followed by a separate `del` is not enough: two concurrent requests could both read the
+value, and `take()` is what keeps SSO state, WebAuthn challenges and OAuth2 consent challenges
+single-use.
 
 ## Related
 

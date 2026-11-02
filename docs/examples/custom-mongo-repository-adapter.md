@@ -106,6 +106,21 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
       user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
       return user;
     },
+    // Optional but recommended (0.4.0): single-use TOTP steps and recovery codes. In a real
+    // database each is ONE conditional update (e.g. UPDATE ... WHERE mfa_last_totp_step IS NULL
+    // OR mfa_last_totp_step < $step), never read-then-write. A single-threaded Map is atomic enough.
+    async claimTotpStep(id, step) {
+      const user = users.get(id);
+      if (!user || (user.mfaLastTotpStep != null && user.mfaLastTotpStep >= step)) return false;
+      user.mfaLastTotpStep = step;
+      return true;
+    },
+    async consumeRecoveryCode(id, codeHash) {
+      const code = users.get(id)?.mfaRecoveryCodes?.find((rc) => rc.codeHash === codeHash && !rc.usedAt);
+      if (!code) return false;
+      code.usedAt = new Date();
+      return true;
+    },
     async linkExternalProvider(id, link) {
       const user = users.get(id);
       user.externalProviders = [...(user.externalProviders || []), link];
@@ -129,9 +144,20 @@ function createInMemoryStorage(config, { hashEmail, normalizeEmail }) {
   // runs on every authenticated request (session.verifyOnEachRequest), so back
   // it with an index on the session's jti, e.g.
   //   async findByJti(jti) { return sessionsByJti.get(jti) ?? null; } // → { user, expiresAt, revokedAt } | null
+  //
+  // Since 0.4.0, session rows also carry kind ('first_party' | 'oauth2'), authTime,
+  // familyId and familyCreatedAt — store them as given. revokeByRefreshTokenHash must
+  // persist opts.reason as revokeReason (and findByRefreshTokenHash return it), and
+  // revokeAllForUser must honour opts.exceptJti. Implement revokeFamily(familyId) and
+  // revokeForClient(clientId, { userId }) (both → { revokedCount, jtis }) so refresh-token
+  // reuse, consent revocation and client deactivation actually revoke tokens.
+  // credentialRepository.updateCounter / deleteByCredentialId resolve a boolean
+  // (conditional writes), and a custom cache adapter needs an atomic take().
 
-  // Optional: the per-account MFA lockout's counter. recordFailure must be
-  // atomic — in a real database, one conditional upsert, not read-then-write.
+  // Optional: attempt counters — the per-account MFA lockout, the email-verification
+  // code budget, and single-use MFA challenge tokens. recordFailure is called BEFORE
+  // the secret is checked and must be atomic — in a real database, one conditional
+  // upsert, not read-then-write.
   const counters = new Map();
   const attemptCounterRepository = {
     async get(key) { return counters.get(key) ?? null; },
@@ -162,15 +188,21 @@ await initIdentityProvider({
   issuer: 'http://localhost:3000',
   storage: { factory: createInMemoryStorage }, // no config.mongo needed at all
   signingKeys: { keys: { k1: { privateKey, publicKey, status: 'ACTIVE' } } },
-  security: { emailHashPepper: '...', tokenHashSecret: '...' },
+  // Both random, at least 32 characters (checked at startup).
+  security: { emailHashPepper: process.env.IDP_EMAIL_HASH_PEPPER, tokenHashSecret: process.env.IDP_TOKEN_HASH_SECRET },
   mfa: { encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY }, // required while MFA is enabled (the default)
 });
 ```
 
-Leave out `findByJti` or `attemptCounterRepository` and `initIdentityProvider()` still boots, but
-logs a warning and falls back to process-local state: access tokens survive logout-all/password
-reset until they expire, and the MFA lockout is counted per instance. Fine for a single-process
-test store; implement both for anything scaled.
+Leave out `findByJti`, `attemptCounterRepository`, or `claimTotpStep`/`consumeRecoveryCode` and
+`initIdentityProvider()` still boots, but logs a warning and falls back: access tokens survive
+logout-all/password reset until they expire, the MFA lockout (and the record of spent MFA challenge
+tokens) is counted per instance, and TOTP/recovery-code reuse is checked with a racy
+read-then-write. Leave out `revokeFamily`, `revokeForClient` or
+`authorizationCodeRepository.findUsedByCodeHash` and token reuse is refused but not punished, and
+revoking consent or deactivating a client leaves its tokens working. Fine for a single-process
+test store; implement all of them for anything real — the full table is in
+[Repository Adapters](../api/repository-adapters.md#optional-methods-and-their-fallbacks).
 
 Note `mongo.skipTransactionCheck` and the whole Mongo-transaction-support startup probe (see
 [Repository Adapters](../api/repository-adapters.md#transactions-are-required)) only apply to the
@@ -180,8 +212,10 @@ adapter is responsible for whatever atomicity guarantees it needs on its own.
 ## Related
 
 - [Repository Adapters](../api/repository-adapters.md) — the full eight-interface contract, plus
-  the optional `findByJti` and `AttemptCounterRepository`.
+  the optional methods (`findByJti`, `AttemptCounterRepository`, `claimTotpStep`,
+  `revokeFamily`, ...) and what happens without each.
 - [Bootstrap & Config](../api/bootstrap-config.md) — `config.storage`/`config.mongo`.
 - [Storing App-Specific User Data](consumer-managed-app-data.md) — the default pattern for a
-  `role`/`capabilities`/profile field (a separate consumer-owned collection). Reach for Pattern 1
-  on this page only when the field genuinely needs to live on idp-core's own user document.
+  `role`/`capabilities`/profile field (a separate consumer-owned collection), and when the user's
+  built-in `metadata` object is enough. Reach for Pattern 1 on this page only when the field
+  genuinely needs to live on idp-core's own user document.

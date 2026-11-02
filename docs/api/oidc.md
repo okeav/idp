@@ -2,53 +2,75 @@
 title: "OpenID Connect (OIDC)"
 package: "@okeav/idp-core"
 category: "api-reference"
-tags: ["oidc", "userinfo", "logout"]
-description: "userinfoHandler and endSessionHandler — the OIDC layer built on top of the OAuth2 authorization server. Discovery is covered separately."
+tags: ["oidc", "userinfo", "logout", "id-token"]
+description: "ID-token claims, userinfoHandler and endSessionHandler — the OIDC layer built on top of the OAuth2 authorization server. Discovery is covered separately."
 ---
 
 # OpenID Connect (OIDC)
 
 The OIDC layer on top of the [OAuth2 authorization server](oauth2-authorization-server.md):
-UserInfo and RP-initiated logout. ID-token issuance is covered in
+ID tokens, UserInfo and RP-initiated logout. ID-token signing is covered in
 [Tokens & Signing](tokens-rs256.md); the discovery document in
 [JWKS & OIDC Discovery](jwks-oidc-discovery.md).
 
+## ID tokens
+
+Issued by the `authorization_code` grant when the granted scopes include `openid` (never on
+refresh). `openid` must be in the client's `allowedScopes` like any other scope. Claims:
+
+| Claim | When |
+|---|---|
+| `sub`, `aud` (= `client_id`), `azp` (= `client_id`), `iss`, `jti`, `iat`, `exp` | always |
+| `nonce` | when the **`/oauth2/authorize`** request carried one (it is stored with the code; a `nonce` sent to the token endpoint is ignored) |
+| `auth_time` | when the user's last real login time is known — taken from the `auth_time` of the first-party access token presented at `/oauth2/authorize` (which first-party refreshes carry forward unchanged; sessions from before 0.4.0 have none) |
+| `email`, `email_verified` | `email` scope granted |
+| `name`, `given_name`, `family_name`, `picture`, `locale`, `zoneinfo` | `profile` scope granted (each only if set on the user) |
+
+Lifetime is the client's `idTokenTTL` if set, else `config.ttls.idToken`. `email_verified` is
+derived as `status !== 'PENDING_VERIFICATION'`. Relying parties must check `nonce` against the
+value they sent, and `iss` on the authorization response (RFC 9207) as well as in the token.
+
+The exported `issueIdToken(user, audience, nonce?, { scopes?, authTime?, ttlSeconds? })` releases
+`openid email profile` claims when `scopes` is omitted.
+
 ## `GET /userinfo` — `userinfoHandler`
 
-Requires an authenticated caller. The handler itself has its own `!req.auth?.userId` guard that
-writes the OAuth 2.0 Bearer Token error format directly (RFC 6750) instead of using the
-`IdpError`/`next(err)` pattern every other handler uses:
+Mounted as `authContextMiddleware({ accept: ['oauth2-user'] })` → `userinfoHandler`. It accepts
+**only an OAuth2 access token issued to a client on behalf of a user**: a first-party token (from
+`/login`), a `client_credentials` token, or a missing/invalid/expired/revoked token is refused by
+the middleware (`AUTH_REQUIRED` / `INVALID_TOKEN` / `TOKEN_REVOKED`, 401) before the handler runs.
+Note the middleware prefers the `access_token` cookie over an `Authorization` header — call
+`/userinfo` with the Bearer token and no first-party cookie (i.e. server-side, or cross-site
+without credentials).
 
-```
-401
-WWW-Authenticate: Bearer error="invalid_token"
-{ "error": "invalid_token", "error_description": "The access token is missing or invalid" }
-```
+The handler then applies its own checks, answering in the OAuth 2.0 Bearer Token error format
+(RFC 6750) rather than via `IdpError`:
 
-**In practice, through `buildRouter()`, that specific branch is unreachable.** The route is mounted
-as `router.get('/userinfo', authContextMiddleware(), userinfoHandler)` — `authContextMiddleware()`
-is called *without* `{ optional: true }`, so a missing/invalid/expired token is already rejected by
-the middleware itself (the standard `IdpError` → `next(err)` path) before `userinfoHandler` ever
-runs. The handler's own RFC 6750 branch only matters if you mount `userinfoHandler` yourself behind
-different (or no) auth middleware.
+- Without `openid` in the token's granted scopes →
+  ```
+  403
+  WWW-Authenticate: Bearer error="insufficient_scope", scope="openid"
+  { "error": "insufficient_scope", "error_description": "The openid scope is required" }
+  ```
+- The user no longer exists or isn't `ACTIVE` (suspended, locked, deleted, pending verification…) →
+  ```
+  401
+  WWW-Authenticate: Bearer error="invalid_token"
+  { "error": "invalid_token", "error_description": "User not found" }
+  ```
+  (The same 401 shape with `"The access token is missing or invalid"` is returned if you mount
+  `userinfoHandler` yourself behind no auth middleware.)
 
-The one branch that *is* reachable via the default router: a **valid** token whose user was deleted
-after the token was issued still hits the handler's second guard, giving the same RFC 6750 shape
-with `error_description: "User not found"`. This handler is also not wrapped in try/catch with a
-`next` fallback for unexpected exceptions — an unhandled storage error here would need to be caught
-by generic Express error-handling middleware rather than surfacing as a structured `IdpError`.
+Unexpected errors go to `next(err)`. Successful responses carry `Cache-Control: no-store`.
 
-Claims returned are gated by `req.auth.claims.scope` (space-delimited string set at token issuance
-— see [OAuth2](oauth2-authorization-server.md#token-endpoint--post-oauth2token)):
+Claims are released **per granted scope only** (OIDC Core §5.4), read from `req.auth.scopes`:
 
 - Always: `sub`.
-- Scope includes `email` **or** `openid`: `email`, `email_verified`.
-  > `email_verified` is derived as `status !== 'PENDING_VERIFICATION'` — **any** status other than
-  > pending-verification (including `SUSPENDED`, `LOCKED`, `DISABLED`) reads as `true`. This
-  > conflates "verified" with "not currently pending verification," not a true independently-
-  > tracked verification flag.
-- Scope includes `profile`: `name` (falls back through `displayName` → `"firstName
-  lastName"`.trim() → omitted), `given_name`, `family_name`, `picture` (from `avatarUrl`),
+- `email` scope: `email`, `email_verified`.
+  > `email_verified` is derived as `status !== 'PENDING_VERIFICATION'`. Since inactive users are
+  > refused outright, in practice it is `true` for every user `/userinfo` answers for.
+- `profile` scope: `name` (falls back through `displayName` → `"firstName lastName"`.trim() →
+  omitted), `given_name`, `family_name`, `picture` (from `avatarUrl`, which must be `https`),
   `locale`, `zoneinfo`, `updated_at` (Unix seconds).
 
 Undefined fields are stripped before the response — absent profile data simply doesn't appear in
@@ -56,38 +78,43 @@ the JSON (never sent as `null`).
 
 ## `GET /oidc/end-session` — `endSessionHandler`
 
-RP-initiated logout. `authContextMiddleware({ optional: true })` — works with or without a
-session cookie, since a client-side logout may present only an `id_token_hint`.
+RP-initiated logout (OIDC RP-Initiated Logout 1.0). Mounted behind `authContextMiddleware({
+optional: true })` — works with or without the browser's first-party session cookie.
 
-Query: `post_logout_redirect_uri?, state?, id_token_hint?`.
+Query: `id_token_hint?, post_logout_redirect_uri?, state?`.
 
-1. `userId = req.auth?.userId || null`.
-2. If `id_token_hint` present, verifies it via `verifyIssuedToken` (returns `null` rather than
-   throwing on failure) — invalid hint → `INVALID_REQUEST` (400, `'Invalid id_token_hint'`).
-   `userId = userId || hintClaims.sub` (an active session takes precedence over the hint's `sub`
-   if both are present).
-3. **If `post_logout_redirect_uri` is supplied, `id_token_hint` becomes mandatory** — the handler
-   needs the hint's `aud` claim to know which client's redirect-URI allowlist to check, even if
-   the caller is already authenticated via cookie. No hint (or no `aud`) →
-   `INVALID_REQUEST` (400, `'id_token_hint is required when post_logout_redirect_uri is supplied'`).
-   The client (`hintClaims.aud`) must exist and be `ACTIVE` → `OAUTH_CLIENT_NOT_FOUND` (400)
-   otherwise. `post_logout_redirect_uri` is validated against `client.postLogoutRedirectUris` if
-   configured, **falling back to the client's regular `redirectUris` list** if no dedicated
-   post-logout list is set → `INVALID_REDIRECT_URI` (400) otherwise.
-4. If a `userId` was resolved (from session or hint), calls `sessionRepository.revokeAllForUser` —
-   **this is a global logout, revoking every session for the user, not just the one tied to the
-   presented `id_token_hint`'s client.** Its access tokens stop working on the next request under
-   `session.verifyOnEachRequest` (default — see [Middleware](middleware.md)). Fires
-   `auditLog('END_SESSION', { userId, revokedSessions })`.
-5. Redirects to `post_logout_redirect_uri?state=...` if supplied; otherwise `200 { status: 'ok' }`.
+Because this is a plain GET any site can trigger, what it ends is deliberately narrow — **it never
+signs the user out of every device** (that's `POST /logout/all`):
 
-**No cookies are read or cleared by this handler** — it's purely token/session-store based. If
-your app stores tokens in cookies, clearing them client-side (or via your own `/logout` call —
-see [Password & Email Auth](password-email-auth.md)) is a separate step.
+1. **`id_token_hint`**, if present, must be an **ID token** this IdP issued — an access token or
+   MFA-challenge token is refused. Its signature and issuer are verified, but an **expired hint is
+   accepted**, as the spec recommends. Invalid → `INVALID_REQUEST` (400, `'Invalid
+   id_token_hint'`). If the request also carries a first-party session for a different user →
+   `INVALID_REQUEST` (400).
+2. **If `post_logout_redirect_uri` is supplied, `id_token_hint` is mandatory** — the hint's `aud`
+   says which client's allowlist to check → `INVALID_REQUEST` (400, `'id_token_hint is required
+   when post_logout_redirect_uri is supplied'`). That client must exist and be `ACTIVE`
+   (`OAUTH_CLIENT_NOT_FOUND`, 400), and the URI must be in its `postLogoutRedirectUris` — **falling
+   back to its regular `redirectUris`** when no dedicated post-logout list is set
+   (`INVALID_REDIRECT_URI`, 400 otherwise).
+3. **The browser's own IdP session** — if a first-party session came with the request, that one
+   session is revoked and the session cookies are cleared.
+4. **The hinted client's sessions for that user** — with a valid hint, every session issued to
+   the hint's client (`aud`) for the hint's `sub` is revoked (`SessionRepository.revokeForClient`).
+   The user's other clients and devices are untouched.
+5. Revoked sessions' access tokens are marked revoked in the cache as well; with
+   `session.verifyOnEachRequest` (default — see [Middleware](middleware.md)) they stop working on
+   every instance at the next request.
+6. Fires `auditLog('END_SESSION', { userId, clientId, revokedSessions })` when a user was
+   identified.
+7. Redirects to `post_logout_redirect_uri?state=...` if supplied; otherwise `200 { status: 'ok' }`.
+
+A call with neither a hint nor a session is a no-op `200`.
 
 ## Related
 
 - [JWKS & OIDC Discovery](jwks-oidc-discovery.md) — the `/.well-known/openid-configuration`
   document pointing at these endpoints.
-- [OAuth2 Authorization Server](oauth2-authorization-server.md)
+- [OAuth2 Authorization Server](oauth2-authorization-server.md) — `nonce`, PKCE, consent, token
+  kinds.
 - [Tokens & Signing (RS256)](tokens-rs256.md) — `issueIdToken`, `verifyIssuedToken`.

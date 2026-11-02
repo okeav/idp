@@ -3,7 +3,7 @@ title: "OAuth2 Authorization Code Flow (with PKCE)"
 package: "@okeav/idp-core"
 category: "example"
 tags: ["oauth2", "pkce", "authorization-server"]
-description: "Register a client, run the full authorize -> consent -> token exchange, then use and refresh the resulting access token."
+description: "Register a client, run the full authorize -> consent -> token exchange with PKCE (S256) and an OIDC nonce, then use and refresh the resulting access token."
 ---
 
 # OAuth2 Authorization Code Flow (with PKCE)
@@ -20,12 +20,21 @@ reference.
   [Router & Schemas](../api/router-and-schemas.md)).
 - **Register and approve a client first** — new clients start `PENDING_APPROVAL` and can't
   complete an authorize/token exchange until approved.
+- Your consent page runs on the IdP's origin, or on an origin listed in
+  `cookies.trustedOrigins` — `POST /oauth2/authorize/confirm` and `/deny` are cookie-authenticated
+  and refuse other origins (403 `CSRF_ORIGIN_REJECTED`).
 
 Server side, for this example — admin auth is yours to define; here, any caller whose access
 token carries an `admin` role claim (set by your `resolveAuthContext`):
 
 ```js
-import { buildRouter, authContextMiddleware } from '@okeav/idp-core';
+import express from 'express';
+import { buildRouter, authContextMiddleware, cookieParser, idpErrorHandler } from '@okeav/idp-core';
+
+const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // form-encoded token requests (the OAuth2 norm)
+app.use(cookieParser());
 
 const requireAdmin = [
   authContextMiddleware(),
@@ -35,12 +44,13 @@ const requireAdmin = [
 ];
 
 app.use('/auth', buildRouter({ clientManagement: { middleware: requireAdmin } }));
+app.use(idpErrorHandler()); // { error, message } for client errors; no internals on 500s
 ```
 
 ## 1. Register a client
 
 ```js
-const BASE = 'http://localhost:3000/auth';
+const BASE = 'https://idp.example.com/auth';
 const adminHeaders = { Authorization: `Bearer ${adminAccessToken}` }; // an admin's access token
 
 const registerRes = await fetch(`${BASE}/oauth2/clients`, {
@@ -49,9 +59,9 @@ const registerRes = await fetch(`${BASE}/oauth2/clients`, {
   body: JSON.stringify({
     name: 'My Relying App',
     slug: 'my-relying-app',
-    clientType: 'public', // no client_secret needed — this app can't keep one confidential
-    redirectUris: ['https://app.example.com/callback'],
-    allowedScopes: ['openid', 'email', 'profile'],
+    clientType: 'public', // no client_secret — this app can't keep one confidential
+    redirectUris: ['https://app.example.com/callback'], // https (http only for loopback)
+    allowedScopes: ['openid', 'email', 'profile'],       // openid must be listed explicitly
     allowedGrants: ['authorization_code', 'refresh_token'],
   }),
 });
@@ -61,16 +71,26 @@ const { clientId, status } = await registerRes.json(); // status: 'PENDING_APPRO
 await fetch(`${BASE}/oauth2/clients/${clientId}/approve`, { method: 'POST', headers: adminHeaders });
 ```
 
-## 2. Generate a PKCE pair (public client)
+For a confidential client (a server-side app), omit `clientType` and keep the `clientSecret` from
+the registration response — it is never shown again (only replaced by rotate-secret).
+
+## 2. Generate a PKCE pair, `state` and `nonce`
+
+PKCE with `S256` is required for public clients and, by default (`oauth2.requirePkce: 'all'`),
+for confidential clients too. `plain` is refused.
 
 ```js
 import crypto from 'crypto';
 
-const codeVerifier = crypto.randomBytes(32).toString('base64url');
+const codeVerifier = crypto.randomBytes(32).toString('base64url'); // 43 chars
 const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+const oauthState = crypto.randomBytes(16).toString('hex'); // your own CSRF token, echoed back
+const nonce = crypto.randomBytes(16).toString('hex');      // echoed into the ID token
+
+// Keep codeVerifier, oauthState and nonce with the user's pending login (e.g. your own session).
 ```
 
-## 3. Redirect the user to `/oauth2/authorize`
+## 3. Send the user to `/oauth2/authorize`
 
 ```js
 const authorizeUrl = new URL(`${BASE}/oauth2/authorize`);
@@ -79,46 +99,102 @@ authorizeUrl.search = new URLSearchParams({
   redirect_uri: 'https://app.example.com/callback',
   response_type: 'code',
   scope: 'openid email profile',
-  state: crypto.randomBytes(16).toString('hex'), // your own CSRF token, echoed back
+  state: oauthState,
+  nonce,
   code_challenge: codeChallenge,
-  code_challenge_method: 'S256',
+  code_challenge_method: 'S256', // required with a code_challenge
 }).toString();
-
-// window.location = authorizeUrl.toString();
 ```
 
-If the browser isn't authenticated (no valid `access_token` cookie), the endpoint responds
-`401 { action: 'login_required', ... }` instead of proceeding — redirect to your own login UI and
-retry this same authorize URL after login. If the user hasn't consented to these scopes yet, it
-responds `200 { action: 'consent_required', client, scopes, missingScopes, ... }` — show a consent
-screen and POST the same params to `/oauth2/authorize/confirm` to proceed, or
-`/oauth2/authorize/deny` to reject.
+`GET /oauth2/authorize` answers JSON (or a redirect), so the IdP's own frontend calls it with the
+user's session and acts on the result:
 
-Once authenticated **and** consented, the endpoint redirects directly to
-`https://app.example.com/callback?code=...&state=...`.
+- `401 { action: 'login_required' }` — not logged in at the IdP: show your login UI, then retry the
+  same URL.
+- `200 { action: 'consent_required', consent_challenge, client, scopes, missingScopes }` — show a
+  consent screen (step 3a).
+- `302` to `https://app.example.com/callback?code=...&state=...&iss=...` — the user already
+  consented to these scopes.
+
+### 3a. The consent page
+
+The consent page posts **only** the `consent_challenge` it received — the server stored the
+validated request (client, scopes, redirect URI, state, nonce, PKCE challenge) and acts on exactly
+that. The challenge is single-use, bound to this user, and expires after `ttls.authCode` (10
+minutes by default).
+
+```js
+// Running on the IdP's origin (or a cookies.trustedOrigins origin), with the user's session cookie.
+const res = await fetch(authorizeUrl, { credentials: 'include' }); // follows a 302 if already consented
+const body = res.redirected ? null : await res.json();
+
+if (body?.action === 'login_required') {
+  // send the user to your login page, then come back to this URL
+} else if (body?.action === 'consent_required') {
+  // render body.client.name, body.missingScopes … and a form carrying only the challenge:
+  renderConsent(body);
+}
+```
+
+```html
+<!-- The response to either button is a 302 to the client's redirect_uri, which the browser
+     follows as a normal navigation. Form posts need express.urlencoded() mounted, as above. -->
+<form method="post">
+  <input type="hidden" name="consent_challenge" value="<consent_challenge from the response>">
+  <button formaction="/auth/oauth2/authorize/confirm">Allow</button>
+  <button formaction="/auth/oauth2/authorize/deny">Deny</button>
+</form>
+```
+
+(A `fetch()` POST with `{ consent_challenge }` as JSON works too, but `fetch` can't follow a
+cross-origin redirect to the client for you — navigate the browser instead.)
+
+A deny redirects to `redirect_uri?error=access_denied&error_description=...&state=...&iss=...`.
+An unknown, expired or reused challenge is `400 INVALID_CONSENT_CHALLENGE` — restart from the
+authorize URL.
 
 ## 4. Exchange the code for tokens
 
-Your callback route (`https://app.example.com/callback`) extracts `code`/`state`, verifies `state`
-matches what you generated, then exchanges the code server-side (never in the browser, to keep
-`code_verifier` off the client for a confidential setup — for a public client like this one it's
-fine client-side too, since there's no secret to protect):
+Your callback route (`https://app.example.com/callback`) checks that `state` matches what you
+generated and that `iss` equals the IdP's issuer, then exchanges the code. The code is single-use:
+presenting it a second time revokes everything the first exchange issued.
 
 ```js
 const tokenRes = await fetch(`${BASE}/oauth2/token`, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({
     grant_type: 'authorization_code',
     code,
     redirect_uri: 'https://app.example.com/callback', // must match exactly
-    client_id: clientId,
+    client_id: clientId, // public client: client_id alone authenticates it
     code_verifier: codeVerifier,
   }),
 });
 const tokens = await tokenRes.json();
 // { access_token, refresh_token, id_token, token_type: 'Bearer', expires_in, scope }
+// On failure: 400 { error: 'INVALID_GRANT', message } (bad/used code, redirect_uri or PKCE
+// mismatch), 401 { error: 'INVALID_CLIENT', ... }, etc.
 ```
+
+A **confidential** client authenticates with HTTP Basic (`client_secret_basic`) — or with
+`client_id` + `client_secret` in the body, but never both:
+
+```js
+const basic = Buffer.from(
+  `${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`,
+).toString('base64');
+
+const tokenRes = await fetch(`${BASE}/oauth2/token`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: `Basic ${basic}` },
+  body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri, code_verifier: codeVerifier }),
+});
+```
+
+Then validate the ID token: signature against the IdP's JWKS, `iss`, `aud` (= your `client_id`),
+`exp`, and **`nonce` equal to the one you generated in step 2**. Its email/profile claims follow
+the granted scopes.
 
 ## 5. Use the access token
 
@@ -126,7 +202,21 @@ const tokens = await tokenRes.json();
 const userinfoRes = await fetch(`${BASE}/userinfo`, {
   headers: { Authorization: `Bearer ${tokens.access_token}` },
 });
-const profile = await userinfoRes.json(); // fields gated by `scope` — see oidc.md
+const profile = await userinfoRes.json(); // claims gated by the granted scopes — see oidc.md
+```
+
+The access token is an `oauth2-user` token (`aud` = your `client_id`). It is **not** accepted by
+the IdP's first-party routes (`/me`, `/password/change`, …). Your own API accepts it by opting in
+and checking scopes:
+
+```js
+app.get('/api/profile',
+  authContextMiddleware({ accept: ['oauth2-user'] }),
+  (req, res) => {
+    if (!req.auth.scopes.includes('profile')) return res.status(403).json({ error: 'INSUFFICIENT_SCOPE' });
+    res.json({ userId: req.auth.userId, clientId: req.auth.clientId });
+  },
+);
 ```
 
 ## 6. Refresh
@@ -134,18 +224,32 @@ const profile = await userinfoRes.json(); // fields gated by `scope` — see oid
 ```js
 const refreshRes = await fetch(`${BASE}/oauth2/token`, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientId }),
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientId }),
 });
-// Note: no id_token on refresh. Scope is the originally-consented scope from
-// step 4, narrowed against the client's CURRENT allowedScopes — it can only
-// hold steady or shrink on refresh, never widen. See
-// oauth2-authorization-server.md's refresh_token grant section for detail.
+const rotated = await refreshRes.json(); // store rotated.refresh_token — the old one is now spent
+// Notes:
+// - no id_token on refresh;
+// - scope is the originally consented scope narrowed against the client's CURRENT
+//   allowedScopes — it can only hold steady or shrink, never widen;
+// - the refresh token only works for the client it was issued to;
+// - replaying a spent refresh token (after a 10 s grace) revokes the whole token family;
+// - the family ends session.absoluteLifetimeSeconds (90 days) after the code exchange.
+```
+
+## 7. Revoke on logout
+
+```js
+await fetch(`${BASE}/oauth2/token/revoke`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ token: rotated.refresh_token, client_id: clientId }), // client auth required
+}); // always 200 { status: 'ok' }
 ```
 
 ## Related
 
 - [OAuth2 Authorization Server](../api/oauth2-authorization-server.md) — full endpoint reference,
   including the client-credentials grant and revocation/introspection.
-- [OIDC](../api/oidc.md) — `/userinfo` scope-gated claims, RP-initiated logout.
+- [OIDC](../api/oidc.md) — ID-token claims, `/userinfo` scope-gated claims, RP-initiated logout.
 - [Errors](../api/errors.md)

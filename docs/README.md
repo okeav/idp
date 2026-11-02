@@ -31,23 +31,23 @@ relative path.
 
 | File | Covers |
 |---|---|
-| [bootstrap-config.md](api/bootstrap-config.md) | `initIdentityProvider`, `configFromEnv`, full `IdpConfig` shape, event hooks |
-| [errors.md](api/errors.md) | `IdpError`, `isIdpError`, the `ERROR_CODES` catalogue |
+| [bootstrap-config.md](api/bootstrap-config.md) | `initIdentityProvider` (incl. every startup check), `configFromEnv` (strict parsing, every env var), full `IdpConfig` shape, CSRF trusted origins, `trust proxy`, event hooks |
+| [errors.md](api/errors.md) | `IdpError`, `isIdpError`, `idpErrorHandler()`, the `ERROR_CODES` catalogue, enumeration-safe responses |
 | [tokens-rs256.md](api/tokens-rs256.md) | RS256 token issuance/verification, opaque-token hashing |
 | [jwks-oidc-discovery.md](api/jwks-oidc-discovery.md) | User-token JWKS, OIDC discovery document |
-| [middleware.md](api/middleware.md) | `authContextMiddleware` (incl. the per-request session check), `serviceContextMiddleware`, `validateBody`/`validateQuery`, `cookieParser` |
-| [password-email-auth.md](api/password-email-auth.md) | Register, login, refresh/logout, password reset/change, self-service profile & sessions |
+| [middleware.md](api/middleware.md) | `authContextMiddleware` (token kinds, the per-request session check, CSRF), `requireRecentAuth`, `serviceContextMiddleware`, `validateBody`/`validateQuery`, `cookieParser` |
+| [password-email-auth.md](api/password-email-auth.md) | Register, email verification, login, refresh/logout (refresh-token families, reuse detection), password reset/change, self-service profile & sessions |
 | [mfa.md](api/mfa.md) | TOTP setup, confirm, disable, recovery codes, challenge verification, per-account lockout, secret encryption at rest + `migrateMfaSecrets()` |
 | [magic-link.md](api/magic-link.md) | Passwordless email login |
-| [webauthn.md](api/webauthn.md) | Passkey registration, passwordless login, passkey-as-MFA |
-| [oauth2-authorization-server.md](api/oauth2-authorization-server.md) | Authorization code + PKCE, client credentials, refresh grants, client lifecycle, consent, revocation/introspection |
+| [webauthn.md](api/webauthn.md) | Passkey registration and management, passwordless login, passkey-as-MFA |
+| [oauth2-authorization-server.md](api/oauth2-authorization-server.md) | Authorization code + PKCE (S256), client credentials, refresh grants, client authentication, client lifecycle, consent challenges, revocation/introspection |
 | [oidc.md](api/oidc.md) | UserInfo, RP-initiated logout |
 | [sso-social-login.md](api/sso-social-login.md) | Google/GitHub/Microsoft/Apple/LinkedIn social login |
 | [service-mesh.md](api/service-mesh.md) | Service-to-service JWKS trust and token minting/verification |
-| [repository-adapters.md](api/repository-adapters.md) | The eight storage interfaces (plus optional `findByJti`/`AttemptCounterRepository`), built-in Mongo adapter, `storage.factory` pluggability |
-| [cache-interface.md](api/cache-interface.md) | `CacheAdapter` contract, memory/Redis adapters, fail-closed revocation checks |
-| [rate-limiter-interface.md](api/rate-limiter-interface.md) | `RateLimiter` contract, memory/Redis/noop adapters, default per-endpoint rules, fail-closed/fail-open backend errors |
-| [webhooks.md](api/webhooks.md) | `WebhookDispatcher`, `verifyWebhookSignature`, HMAC signature scheme |
+| [repository-adapters.md](api/repository-adapters.md) | The eight storage interfaces (plus the optional methods and `AttemptCounterRepository`), built-in Mongo adapter, `storage.factory` pluggability |
+| [cache-interface.md](api/cache-interface.md) | `CacheAdapter` contract (incl. atomic `take()`), memory/Redis adapters, fail-closed revocation checks |
+| [rate-limiter-interface.md](api/rate-limiter-interface.md) | `RateLimiter` contract, memory/Redis/noop adapters, default per-endpoint rules, key construction, fail-closed/fail-open backend errors |
+| [webhooks.md](api/webhooks.md) | `WebhookDispatcher`, per-endpoint filters and credential stripping, `verifyWebhookSignature`, HMAC signature scheme |
 | [router-and-schemas.md](api/router-and-schemas.md) | `buildRouter()` (`clientManagement`, `features`), the full mounted route table, exported zod `schemas` |
 
 ## Examples (`examples/`)
@@ -67,15 +67,15 @@ relative path.
 | [sso-google-login.md](examples/sso-google-login.md) | Google social login, redirect-URI allowlisting |
 | [service-mesh-s2s-tokens.md](examples/service-mesh-s2s-tokens.md) | Registering service identities, minting/verifying S2S tokens |
 | [session-management.md](examples/session-management.md) | Listing/revoking sessions ("devices logged in" UI) |
-| [consumer-managed-app-data.md](examples/consumer-managed-app-data.md) | Attaching role/capabilities/profile data via a consumer-owned collection |
+| [consumer-managed-app-data.md](examples/consumer-managed-app-data.md) | Attaching role/capabilities/profile data via a consumer-owned collection (and how that relates to the user `metadata` field) |
 
 ## Source of truth
 
 Written directly against the `@okeav/idp-core` source (README, `types/index.d.ts`, and every
 handler/schema/config module), kept in sync as the package evolves. Where the source itself has a
-notable asymmetry, gap, or non-obvious default (e.g. the SSO redirect-URI allowlist being opt-in,
-or `/oauth2/token/revoke`/`/introspect` only ever operating on refresh tokens regardless of
-`token_type_hint`), it's called out explicitly in the relevant file rather than silently smoothed
-over — these are documented package behaviors, not documentation bugs. (As of v0.2.0: the
-`/oauth2/authorize/deny` open-redirect gap and the refresh-grant scope-recompute issue that were
-previously called out here have been fixed in source — see CHANGELOG.md.)
+notable asymmetry, gap, or non-obvious default, it's called out explicitly in the relevant file
+rather than silently smoothed over — these are documented package behaviors, not documentation
+bugs. Behaviour that changed in a release is described as it is now, with a short note on what
+changed where an upgrade needs action (as of 0.4.0, for example, the SSO redirect allowlist is
+required rather than opt-in, and `/oauth2/token/revoke`/`/introspect` require client
+authentication and handle access tokens as well as refresh tokens — see CHANGELOG.md.)

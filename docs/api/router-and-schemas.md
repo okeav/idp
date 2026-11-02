@@ -43,6 +43,35 @@ mounted.
 `serviceContextMiddleware` is also re-exported alongside `buildRouter` for building your own
 protected internal routes alongside it.
 
+### What the router does for every route
+
+- **`Cache-Control: no-store`** on every response (they may carry tokens, codes or account data).
+  The JWKS handlers (`/.well-known/jwks.json`, `/keys/:kid`) override it with
+  `public, max-age=300`, and the discovery document with `public, max-age=<ttls.discoveryCache>`
+  (default 3600). The OAuth2 token, revoke and introspect responses also send `Pragma: no-cache`.
+- **No error responses of its own.** Handlers call `next(err)` with an `IdpError`; mount
+  [`idpErrorHandler()`](middleware.md#idperrorhandleropts) (or your own handler that shows a
+  message only when `err.expose`) after the router:
+
+  ```js
+  import express from 'express';
+  import { buildRouter, cookieParser, idpErrorHandler } from '@okeav/idp-core';
+
+  app.use(cookieParser());   // session cookies, and the SSO binding cookie
+  app.use(express.json());
+  app.use('/auth', buildRouter());
+  app.use(idpErrorHandler({ logger }));
+  ```
+
+- **`authContextMiddleware()` accepts first-party tokens only** on every IdP route below, except
+  `/userinfo`, which accepts only OAuth2 user tokens (`accept: ['oauth2-user']`). Cookie-authenticated
+  state-changing requests pass the [CSRF origin check](middleware.md#csrf-origin-check)
+  (`cookies.trustedOrigins`).
+- **Rate limits** are applied inside the handlers (listed in the *Rate limit* column — the
+  `config.rateLimiting` key, then the default). All of them fail **closed** (a limiter backend
+  error → 503 `RATE_LIMITER_UNAVAILABLE`) except `refreshToken`. See
+  [Rate Limiter Interface](rate-limiter-interface.md).
+
 ## Full route table
 
 Mount `buildRouter()` under a prefix, e.g. `app.use('/auth', buildRouter())` — paths below are
@@ -50,32 +79,32 @@ relative to that prefix (except the two `/.well-known/*` routes, which are conve
 at the application root regardless of prefix — see note below).
 
 ### Password / email identity
-| Method | Path | Middleware |
-|---|---|---|
-| POST | `/register` | `validateBody(registerSchema)` |
-| POST | `/register/verify-email` | `validateBody(verifyEmailSchema)` |
-| POST | `/register/resend-verification` | `validateBody(resendVerificationSchema)` |
-| POST | `/login` | `validateBody(loginSchema)` |
-| POST | `/mfa/verify` | `validateBody(verifyMfaChallengeSchema)` |
-| POST | `/refresh` | — |
-| POST | `/logout` | `validateBody(logoutSchema)` — `refreshToken` in the body is optional; the `refresh_token` cookie is read when it's omitted |
-| POST | `/logout/all` | `authContextMiddleware()` |
-| POST | `/password/forgot` | `validateBody(forgotPasswordSchema)` |
-| POST | `/password/reset` | `validateBody(resetPasswordSchema)` |
-| POST | `/password/change` | `authContextMiddleware()`, `validateBody(changePasswordSchema)` |
+| Method | Path | Middleware | Rate limit |
+|---|---|---|---|
+| POST | `/register` | `validateBody(registerSchema)` | `register` (10/h per IP), `verificationEmailByEmail` (3/h per address) |
+| POST | `/register/verify-email` | `validateBody(verifyEmailSchema)` | `emailVerification` (20/15min per IP); plus `security.verificationCodeLockout` per account |
+| POST | `/register/resend-verification` | `validateBody(resendVerificationSchema)` | `register`, `verificationEmailByEmail` |
+| POST | `/login` | `validateBody(loginSchema)` | `login` (10/15min per IP), `loginByEmail` (5/15min per address) |
+| POST | `/mfa/verify` | `validateBody(verifyMfaChallengeSchema)` | `mfaChallenge` (5/15min per IP); plus `mfa.lockout` per account |
+| POST | `/refresh` | `validateBody(refreshSchema)` — refresh token from the cookie or the body | `refreshToken` (30/min per IP, fail-open) |
+| POST | `/logout` | `validateBody(logoutSchema)` — `refreshToken` in the body is optional; the `refresh_token` cookie is read when it's omitted | — |
+| POST | `/logout/all` | `authContextMiddleware()` | — |
+| POST | `/password/forgot` | `validateBody(forgotPasswordSchema)` | `passwordReset` (3/h per IP), `passwordResetByEmail` (3/h per address) |
+| POST | `/password/reset` | `validateBody(resetPasswordSchema)` | — |
+| POST | `/password/change` | `authContextMiddleware()`, `validateBody(changePasswordSchema)` | — |
 
 ### Magic link — `features.magicLink`
-| Method | Path | Middleware |
-|---|---|---|
-| POST | `/magic-link/request` | `validateBody(requestMagicLinkSchema)` |
-| POST | `/magic-link/verify` | `validateBody(verifyMagicLinkSchema)` |
+| Method | Path | Middleware | Rate limit |
+|---|---|---|---|
+| POST | `/magic-link/request` | `validateBody(requestMagicLinkSchema)` | `magicLink` (3/h per IP), `magicLinkByEmail` (3/h per address) |
+| POST | `/magic-link/verify` | `validateBody(verifyMagicLinkSchema)` | — |
 
 ### Self-service identity ("me")
 | Method | Path | Middleware |
 |---|---|---|
 | GET | `/me` | `authContextMiddleware()` |
 | PATCH | `/me` | `authContextMiddleware()`, `validateBody(updateProfileSchema)` |
-| DELETE | `/me` | `authContextMiddleware()` |
+| DELETE | `/me` | `authContextMiddleware()`, **`requireRecentAuth()`** |
 | GET | `/me/sessions` | `authContextMiddleware()` |
 | DELETE | `/me/sessions/:id` | `authContextMiddleware()` |
 | DELETE | `/me/sessions` | `authContextMiddleware()` |
@@ -84,33 +113,39 @@ at the application root regardless of prefix — see note below).
 | Method | Path | Middleware |
 |---|---|---|
 | GET | `/me/mfa` | `authContextMiddleware()` |
-| POST | `/me/mfa/setup` | `authContextMiddleware()` |
-| POST | `/me/mfa/confirm` | `authContextMiddleware()`, `validateBody(confirmMfaSchema)` |
+| POST | `/me/mfa/setup` | `authContextMiddleware()`, **`requireRecentAuth()`** |
+| POST | `/me/mfa/confirm` | `authContextMiddleware()`, **`requireRecentAuth()`**, `validateBody(confirmMfaSchema)` |
 | DELETE | `/me/mfa` | `authContextMiddleware()`, `validateBody(disableMfaSchema)` |
 | POST | `/me/mfa/recovery-codes` | `authContextMiddleware()`, `validateBody(regenerateRecoveryCodesSchema)` |
 
 ### WebAuthn / passkeys — `features.webauthn`
-| Method | Path | Middleware |
-|---|---|---|
-| POST | `/webauthn/registration/options` | `authContextMiddleware()`, `validateBody(registrationOptionsSchema)` |
-| POST | `/webauthn/registration/verify` | `authContextMiddleware()`, `validateBody(verifyRegistrationSchema)` |
-| POST | `/webauthn/authentication/options` | `validateBody(authenticationOptionsSchema)` |
-| POST | `/webauthn/authentication/verify` | `validateBody(verifyAuthenticationSchema)` |
-| POST | `/webauthn/mfa/options` | `validateBody(mfaWebauthnOptionsSchema)` |
-| POST | `/webauthn/mfa/verify` | `validateBody(verifyMfaWebauthnSchema)` |
+| Method | Path | Middleware | Rate limit |
+|---|---|---|---|
+| POST | `/webauthn/registration/options` | `authContextMiddleware()`, **`requireRecentAuth()`**, `validateBody(registrationOptionsSchema)` | — |
+| POST | `/webauthn/registration/verify` | `authContextMiddleware()`, **`requireRecentAuth()`**, `validateBody(verifyRegistrationSchema)` | — |
+| GET | `/me/passkeys` | `authContextMiddleware()` | — |
+| DELETE | `/me/passkeys/:credentialId` | `authContextMiddleware()`, **`requireRecentAuth()`** | — |
+| POST | `/webauthn/authentication/options` | `validateBody(authenticationOptionsSchema)` | `webauthnAuthentication` (60/5min per IP) |
+| POST | `/webauthn/authentication/verify` | `validateBody(verifyAuthenticationSchema)` | `webauthnAuthentication` |
+| POST | `/webauthn/mfa/options` | `validateBody(mfaWebauthnOptionsSchema)` | — |
+| POST | `/webauthn/mfa/verify` | `validateBody(verifyMfaWebauthnSchema)` | `mfaChallenge`; plus `mfa.lockout` per account |
+
+Routes marked **`requireRecentAuth()`** answer 401 `REAUTHENTICATION_REQUIRED` unless the user
+actually logged in within `session.recentAuthMaxAgeSeconds` (default 15 minutes) — a refreshed
+token keeps its original login time. See [Middleware](middleware.md#requirerecentauthopts).
 
 ### OAuth2 authorization server — `features.oauth2`
-| Method | Path | Middleware |
-|---|---|---|
-| GET | `/oauth2/authorize` | `validateQuery(authorizeQuerySchema)`, `authContextMiddleware({ optional: true })` |
-| POST | `/oauth2/authorize/confirm` | `authContextMiddleware()`, `validateBody(confirmAuthorizeSchema)` |
-| POST | `/oauth2/authorize/deny` | `authContextMiddleware()`, `validateBody(denyAuthorizeSchema)` |
-| POST | `/oauth2/token` | `validateBody(tokenSchema)` |
-| POST | `/oauth2/token/revoke` | `validateBody(revokeTokenSchema)` |
-| POST | `/oauth2/token/introspect` | `authContextMiddleware()`, `validateBody(introspectTokenSchema)` |
-| GET | `/oauth2/consent` | `authContextMiddleware()` |
-| GET | `/oauth2/consent/sessions` | `authContextMiddleware()` |
-| DELETE | `/oauth2/consent/sessions/:clientId` | `authContextMiddleware()` |
+| Method | Path | Middleware | Rate limit |
+|---|---|---|---|
+| GET | `/oauth2/authorize` | `validateQuery(authorizeQuerySchema)`, `authContextMiddleware({ optional: true })` | — |
+| POST | `/oauth2/authorize/confirm` | `authContextMiddleware()`, `validateBody(confirmAuthorizeSchema)` — `{ consent_challenge }` | — |
+| POST | `/oauth2/authorize/deny` | `authContextMiddleware()`, `validateBody(denyAuthorizeSchema)` — `{ consent_challenge }` | — |
+| POST | `/oauth2/token` | `validateBody(tokenSchema)` — client auth by HTTP Basic or body | `oauth2Token` (120/min per IP) |
+| POST | `/oauth2/token/revoke` | `validateBody(revokeTokenSchema)` — authenticates the calling **client** | `oauth2Token` |
+| POST | `/oauth2/token/introspect` | `validateBody(introspectTokenSchema)` — authenticates the calling **confidential client** (no user token) | `oauth2Token` |
+| GET | `/oauth2/consent` | `authContextMiddleware()`, `validateQuery(consentQuerySchema)` | — |
+| GET | `/oauth2/consent/sessions` | `authContextMiddleware()` | — |
+| DELETE | `/oauth2/consent/sessions/:clientId` | `authContextMiddleware()` | — |
 
 ### OAuth2 client management — only with `opts.clientManagement`
 Every route runs behind `clientManagement.middleware` first.
@@ -134,16 +169,19 @@ Every route runs behind `clientManagement.middleware` first.
 ### OIDC — `features.oidc`
 | Method | Path | Middleware |
 |---|---|---|
-| GET | `/userinfo` | `authContextMiddleware()` |
+| GET | `/userinfo` | `authContextMiddleware({ accept: ['oauth2-user'] })` — the one route that takes a token issued to an OAuth2 client |
 | GET | `/oidc/end-session` | `authContextMiddleware({ optional: true })` |
 | GET | `/.well-known/openid-configuration` | — |
 
 ### SSO — `features.sso`
-| Method | Path | Middleware |
-|---|---|---|
-| GET | `/sso/:provider` | `validateQuery(ssoInitiateQuerySchema)` |
-| GET | `/sso/:provider/callback` | — |
-| POST | `/sso/:provider/callback` | `express.urlencoded({ extended: false })` (Apple's `form_post` callback) |
+| Method | Path | Middleware | Rate limit |
+|---|---|---|---|
+| GET | `/sso/:provider` | `validateQuery(ssoInitiateQuerySchema)` | `ssoInitiate` (30/5min per IP) |
+| GET | `/sso/:provider/callback` | — | — |
+| POST | `/sso/:provider/callback` | `express.urlencoded({ extended: false })` (Apple's `form_post` callback) | — |
+
+The SSO routes need `cookie-parser` mounted before the router: `GET /sso/:provider` sets a
+per-attempt binding cookie that the callback requires.
 
 ### JWKS — always mounted
 | Method | Path | Middleware |
@@ -152,10 +190,10 @@ Every route runs behind `clientManagement.middleware` first.
 | GET | `/keys/:kid` | — |
 
 ### Service mesh — `features.serviceMesh`
-| Method | Path | Middleware |
-|---|---|---|
-| POST | `/internal/service-keys` | `s2sBootstrapMiddleware` |
-| GET | `/.well-known/services-jwks.json` | — |
+| Method | Path | Middleware | Rate limit |
+|---|---|---|---|
+| POST | `/internal/service-keys` | `s2sBootstrapMiddleware` | `serviceKeyRegistration` (20/15min per IP) |
+| GET | `/.well-known/services-jwks.json` | — | — |
 
 > **Note on `.well-known` paths**: `buildRouter()` mounts `/.well-known/jwks.json`,
 > `/.well-known/openid-configuration`, and `/.well-known/services-jwks.json` **relative to
@@ -177,11 +215,31 @@ Source modules: `password-auth/schemas.js`, `mfa/schemas.js`, `oauth2/schemas.js
 `sso/schemas.js`, `magic-link/schemas.js`, `webauthn/schemas.js`. Import as:
 
 ```js
-import { schemas } from '@okeav/idp-core';
+import { schemas, validateBody, registerHandler } from '@okeav/idp-core';
 app.post('/custom-register-path', validateBody(schemas.registerSchema), registerHandler);
 ```
 
+Rules worth knowing (most body schemas are `.strict()` — unknown keys are a 400
+`VALIDATION_ERROR`):
+
+| Schema | Notes |
+|---|---|
+| `registerSchema`, `resetPasswordSchema`, `changePasswordSchema` | New passwords: 8–128 characters **and at most 72 bytes of UTF-8** (bcrypt's limit — longer is refused, not truncated), with upper- and lowercase, a number and a special character. `registerSchema.metadata` is accepted but persisted only with `registration.acceptMetadata: true`. |
+| `loginSchema` | `password` is 1–1024 characters, no policy (legacy passwords must still log in). |
+| `refreshSchema`, `logoutSchema` | `{ refreshToken? }` — a string of at most 512 characters; the body may be omitted. |
+| `updateProfileSchema` | `avatarUrl` must be `https`; `locale` a BCP 47 tag; `zoneinfo` an IANA zone name. |
+| `disableMfaSchema`, `regenerateRecoveryCodesSchema` | `{ password?, code }` — `password` is required by the handler only when the account has one; `code` is a current TOTP code. |
+| `verifyMfaChallengeSchema` | `code` up to 32 characters, so a recovery code (`XXXXXX-XXXXXX`) fits. |
+| `authorizeQuerySchema` | `nonce` (≤ 512 chars) and PKCE: `code_challenge` must be a 43-character base64url S256 value and requires `code_challenge_method=S256` (`plain` is refused). Not `.strict()`. |
+| `confirmAuthorizeSchema`, `denyAuthorizeSchema` | Only `{ consent_challenge }` — the value `/oauth2/authorize` returned. Client, scopes, redirect URI, state, nonce and PKCE come from the stored request, never this body. |
+| `tokenSchema` | `client_id`/`client_secret` optional (they may come as HTTP Basic instead); `code_verifier` 43–128 unreserved characters; `.passthrough()`. |
+| `revokeTokenSchema`, `introspectTokenSchema` | `{ token, token_type_hint?, client_id?, client_secret? }`. |
+| `consentQuerySchema` | `{ client_id }` — a string (`?client_id[$ne]=` is refused). |
+| `registerOAuthClientSchema`, `updateOAuthClientSchema` | `redirectUris`/`postLogoutRedirectUris` must be `https`, `http` to a loopback host, or a reverse-DNS private-use scheme, with no fragment or credentials. |
+| `authenticationOptionsSchema` | `{ email? }` — ignored unless `webauthn.allowCredentialsByEmail: true`. |
+| `ssoInitiateQuerySchema` | `redirect_uri` (must also be on `sso.allowedRedirectOrigins`, checked by the handler); `.passthrough()` — extra params reach `resolveAuthContext` as `extra`, limited to 10 short strings, and are attacker-controllable. |
+
 ## Related
 
-- [Middleware](middleware.md) — `validateBody`/`validateQuery`/`authContextMiddleware` semantics.
+- [Middleware](middleware.md) — `validateBody`/`validateQuery`/`authContextMiddleware`/`requireRecentAuth`/`idpErrorHandler` semantics.
 - Every other API reference file documents the handler behavior behind these routes.

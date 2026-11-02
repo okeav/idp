@@ -28,7 +28,7 @@ A complete, runnable identity server in one file. Based on the package's own
 // server.js
 import crypto from 'crypto';
 import express from 'express';
-import { initIdentityProvider, buildRouter, cookieParser } from '@okeav/idp-core';
+import { initIdentityProvider, buildRouter, cookieParser, idpErrorHandler } from '@okeav/idp-core';
 
 // A real deployment generates this once and stores it durably (env var / secrets
 // manager) — regenerating it on every boot invalidates all existing sessions.
@@ -46,9 +46,11 @@ await initIdentityProvider({
   signingKeys: { keys: { 'quickstart-key-1': { privateKey, publicKey, status: 'ACTIVE' } } },
 
   security: {
-    // Generate real random secrets for anything beyond your own laptop.
-    emailHashPepper: 'dev-only-pepper-do-not-use-in-prod',
-    tokenHashSecret: 'dev-only-token-secret-do-not-use-in-prod',
+    // Random strings of at least 32 characters — startup refuses shorter ones.
+    // These placeholders are public: generate real secrets (`openssl rand -base64 48`)
+    // for anything beyond your own laptop.
+    emailHashPepper: process.env.IDP_EMAIL_HASH_PEPPER || 'quickstart-dev-only-pepper-do-not-use-in-prod',
+    tokenHashSecret: process.env.IDP_TOKEN_HASH_SECRET || 'quickstart-dev-only-token-secret-do-not-use-in-prod',
   },
 
   // Encrypts TOTP secrets at rest. Must stay the same across restarts, or enrolled
@@ -56,28 +58,30 @@ await initIdentityProvider({
   mfa: { encryptionKey: process.env.IDP_MFA_ENCRYPTION_KEY },
 
   hooks: {
-    // No real mailer wired up — print what would have been sent.
+    // No real mailer wired up — print what would have been sent. (This hook isn't
+    // awaited by /register, so a slow mailer can't reveal which addresses exist.)
     onVerificationEmailRequested: ({ email, verificationCode }) => {
       console.log(`[dev email] Verify ${email} — code: ${verificationCode}`);
     },
     onAuditLog: (event) => console.log(`[audit] ${event.action}`, event),
-    // Called on every login (password/MFA/SSO/magic-link/WebAuthn) to build
-    // the access token's opaque `claims` — a real app resolves role/permissions
-    // from its own data model here.
+    // Called on every login (password/MFA/SSO/magic-link/WebAuthn) and every
+    // /refresh to build the access token's opaque `claims` — a real app resolves
+    // role/permissions from its own data model here.
     resolveAuthContext: async () => ({ claims: { role: 'member' } }),
   },
 });
 
 const app = express();
-app.use(cookieParser());
+// Behind a load balancer / reverse proxy? Set the hop count (or the proxies' subnet) so
+// per-IP rate limits see real client IPs — never `true`:
+// app.set('trust proxy', 1);
+app.use(cookieParser());   // before the router: cookie sessions and the SSO binding cookie need it
 app.use(express.json());
 app.use('/auth', buildRouter());
 
-// Every error this package throws is an IdpError — map it to your API's
-// response shape in exactly one place. See errors.md.
-app.use((err, req, res, next) => {
-  res.status(err.httpStatus || 500).json({ error: err.code || 'INTERNAL_ERROR', message: err.message });
-});
+// Answers IdpErrors with { error, message } and everything else with a bare 500 —
+// never an internal message, stack trace or database detail. Mount it after the router.
+app.use(idpErrorHandler({ logger: console }));
 
 app.listen(3000, () => console.log('Listening on http://localhost:3000'));
 ```
@@ -106,7 +110,17 @@ curl -X POST http://localhost:3000/auth/login \
 
 - The signing key is regenerated every restart here — pin one via a persisted PEM for anything
   beyond a demo (see [Tokens & Signing](../api/tokens-rs256.md)).
-- `emailHashPepper`/`tokenHashSecret` are placeholders — generate real random secrets.
+- `emailHashPepper`/`tokenHashSecret` fall back to public placeholders — set real random secrets
+  (at least 32 characters; `emailHashPepper` can never be rotated, since it keys the email lookup
+  index). The package's own `examples/express-quickstart/` refuses to start with
+  `NODE_ENV=production` while any dev fallback is in use; do the same.
+- Adding social login? Once any `oauthProviders` entry is configured, `initIdentityProvider()`
+  also requires `sso.allowedRedirectOrigins` and an absolute `sso.baseCallbackUrl` (see
+  [Google SSO](sso-google-login.md)).
+- Browser frontend on another origin using cookie sessions? List it in `cookies.trustedOrigins`,
+  or its state-changing requests get 403 `CSRF_ORIGIN_REJECTED` (see
+  [Bootstrap & Config](../api/bootstrap-config.md#csrf-cookiestrustedorigins)). A browser-only app
+  should also set `cookies.refreshTokenInBody: false`.
 - `buildRouter()` with no options leaves OAuth2 client administration (`/oauth2/clients*`)
   unmounted — pass `clientManagement: { middleware: [yourAdminAuth] }` if you need it (see
   [Router & Schemas](../api/router-and-schemas.md)).
@@ -116,6 +130,8 @@ curl -X POST http://localhost:3000/auth/login \
 - The `memory` cache/rate-limit adapters are single-instance only — switch to Redis before running
   more than one process (see [Redis Cache Adapter](redis-cache-adapter.md)).
 - No HTTPS or CORS configured — that's Express's and your app's job, same as any Express server.
+  Behind a proxy, set `trust proxy` to the hop count or subnet (never `true`) so per-IP rate
+  limits see real client IPs.
 - **If you're testing a browser (cookie-based) login flow against this locally**, set
   `NODE_ENV=development` (or pass `cookies: { secure: false }` explicitly) — `cookies.secure`
   defaults to `NODE_ENV !== 'development'`, and a real browser silently refuses to store or send a

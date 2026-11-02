@@ -20,22 +20,31 @@ configured. See [Outbound Webhooks](../api/webhooks.md) for the full delivery/re
 ## Configure the endpoint
 
 ```js
-const WEBHOOK_SECRET = 'a-long-random-shared-secret';
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET; // random, at least 16 characters (checked at startup)
 
 await initIdentityProvider({
   // ...
   webhooks: {
-    endpoints: [{ url: 'http://localhost:3000/webhooks/receiver', secret: WEBHOOK_SECRET }],
-    maxAttempts: 5,       // default
+    endpoints: [{
+      // https in production; plain http is accepted only for localhost / 127.0.0.1 / [::1]
+      url: 'http://localhost:3000/webhooks/receiver',
+      secret: WEBHOOK_SECRET,
+      // events: ['LOGIN', 'PASSWORD_CHANGED'], // optional: only these events
+      // includeCredentials: true,              // only on the endpoint that sends your emails
+    }],
+    maxAttempts: 5,        // default
     retryBaseDelayMs: 500, // default — doubles each retry
     timeoutMs: 5000,       // default
+    maxInFlight: 100,      // default — beyond this, new events are dropped with a warning
   },
 });
 ```
 
 Every `onAuditLog` event (e.g. `LOGIN`, `REGISTERED`, `PASSWORD_CHANGED`) and every named
 notification hook (`onMagicLinkRequested`, etc.) now **also** gets POSTed here, in addition to
-whatever your in-process `hooks` callbacks already do.
+whatever your in-process `hooks` callbacks already do — unless `events` narrows it. Credential
+fields (`resetToken`, `magicLinkToken`, `verificationToken`, `verificationCode`) are stripped from
+the payload unless the endpoint sets `includeCredentials: true`.
 
 ## Receive and verify
 
@@ -48,6 +57,10 @@ import { verifyWebhookSignature } from '@okeav/idp-core';
 
 const app = express();
 
+// Stand-in for a real store (Redis SET NX with a TTL, a unique DB index, ...).
+const seen = new Set();
+const alreadyProcessed = (id) => (seen.has(id) ? true : (seen.add(id), false));
+
 app.post(
   '/webhooks/receiver',
   express.raw({ type: 'application/json' }), // req.body is a Buffer here, NOT parsed JSON
@@ -55,13 +68,15 @@ app.post(
     const rawBody = req.body.toString('utf8');
     const signatureHeader = req.header('X-Idp-Signature'); // "t=<unix seconds>,v1=<hex hmac>"
 
+    // During a secret rotation, pass both: [WEBHOOK_SECRET, PREVIOUS_WEBHOOK_SECRET]
     const valid = verifyWebhookSignature(WEBHOOK_SECRET, rawBody, signatureHeader);
     if (!valid) {
       return res.status(400).json({ error: 'invalid signature' });
     }
 
-    const { event, payload, timestamp } = JSON.parse(rawBody);
-    console.log(`[webhook] ${event} at ${timestamp}`, payload);
+    const { id, event, payload, timestamp } = JSON.parse(rawBody);
+    if (alreadyProcessed(id)) return res.status(200).json({ received: true }); // a retry or a replay
+    console.log(`[webhook] ${event} (${id}) at ${timestamp}`, payload);
     // event is req.header('X-Idp-Event') too — same value, in the header for
     // routing without parsing the body if you want that.
 
@@ -72,17 +87,25 @@ app.post(
 
 ## Notes
 
-- **Idempotency**: `X-Idp-Delivery` is a UUID shared across all retry attempts for one logical
-  delivery — dedupe on it if your handler isn't naturally idempotent.
+- **Idempotency**: the body's `id` is a UUID shared across all retry attempts for one logical
+  delivery (the same value is also sent as the `X-Idp-Delivery` header). Dedupe on the body's `id`:
+  it is covered by the signature, the header isn't. Keep seen ids at least as long as your
+  `toleranceSeconds`, since a valid delivery can be replayed within that window.
 - **Replay protection**: `verifyWebhookSignature` rejects deliveries older than
   `opts.toleranceSeconds` (default 300s) even with a valid signature — pass a custom tolerance if
   your infrastructure has unusually high latency:
   ```js
   verifyWebhookSignature(secret, rawBody, signatureHeader, { toleranceSeconds: 600 });
   ```
+- **Secret rotation**: pass an array of secrets — any one matching suffices — while the IdP's
+  endpoint config moves from the old secret to the new one:
+  ```js
+  verifyWebhookSignature([process.env.WEBHOOK_SECRET, process.env.WEBHOOK_SECRET_PREVIOUS], rawBody, signatureHeader);
+  ```
 - **Never blocks the auth request**: a slow or erroring webhook endpoint never fails or delays the
   login/register/etc. call that triggered it — deliveries are fire-and-forget with exponential
-  backoff, logged and dropped after `maxAttempts`.
+  backoff, logged and dropped after `maxAttempts`. A 3xx response counts as a failure: redirects
+  are not followed.
 - **Mount order matters**: if your app also uses `express.json()` globally, mount the webhook
   route (with its own `express.raw()`) **before** the global JSON parser, or scope the raw parser
   to just this path as shown above — a body already consumed by `express.json()` won't be

@@ -3,13 +3,14 @@ title: "Cache Interface"
 package: "@okeav/idp-core"
 category: "api-reference"
 tags: ["cache", "redis", "storage-adapter"]
-description: "The CacheAdapter contract, built-in memory/Redis adapters, and the fail-closed revocation-check invariant."
+description: "The CacheAdapter contract (including the atomic take()), built-in memory/Redis adapters, and the fail-closed revocation-check invariant."
 ---
 
 # Cache Interface
 
 The cache layer backs revocation checks (logout, refresh rotation), SSO CSRF-state, WebAuthn
-challenges, and OIDC discovery caching. It's pluggable behind a small four-method interface.
+challenges, OAuth2 consent challenges, and OIDC discovery caching. It's pluggable behind a small
+five-method interface.
 
 ## `CacheAdapter` contract
 
@@ -19,8 +20,15 @@ interface CacheAdapter {
   set(key: string, value: unknown, ttlSeconds?: number): Promise<void>;
   del(key: string): Promise<void>;
   expire(key: string, ttlSeconds: number): Promise<void>;
+  take(key: string): Promise<unknown | null>; // ATOMIC get-and-delete
 }
 ```
+
+`take(key)` (new in 0.4.0) must be **atomic**: of two concurrent callers for the same key, exactly
+one gets the value and the other gets `null`. It's what makes every single-use value single-use —
+SSO state, WebAuthn challenges, OAuth2 consent challenges — so a `get` followed by a `del` (which
+two concurrent requests can both win) is not an acceptable implementation. **Upgrading a custom
+adapter:** add `take()`.
 
 `BaseCacheAdapter` (exported from `src/cache/cache-adapter.js`, not on the public package surface)
 exists purely for documentation/`instanceof` purposes — adapters don't need to extend it, only to
@@ -37,15 +45,25 @@ before storing it in state — every key your own code or this package's interna
 {
   adapter?: 'memory' | 'redis'; // default 'memory'
   keyPrefix?: string;           // default 'idp:'
-  redis?: { host: string; port: number; password?: string; db?: number; keepAliveMs?: number };
+  redis?: {
+    host: string; port: number;
+    username?: string;          // Redis 6 ACL user
+    password?: string;
+    db?: number;                // default 0
+    tls?: boolean | object;     // true, or ioredis TLS options — use it for managed Redis / anything off the local network
+    keepAliveMs?: number;       // default 10_000
+  };
 }
 ```
+
+`adapter: 'redis'` without `redis.host` fails at startup (`Cache adapter "redis" needs
+config.cache.redis.host`).
 
 ## `MemoryCacheAdapter`
 
 ```ts
 class MemoryCacheAdapter implements CacheAdapter {
-  constructor(opts?: { sweepIntervalMs?: number }); // default 60_000
+  constructor(opts?: { sweepIntervalMs?: number; maxEntries?: number }); // defaults 60_000, 100_000
   close(): void; // stops the background sweep timer
 }
 ```
@@ -58,11 +76,16 @@ for anything horizontally scaled**, because two invariants silently break:
    apply on the instance that handled the revoking request — a different instance still accepts
    the "revoked" token. (With it on — the default — the session row in storage decides, so this
    one doesn't apply.)
-2. SSO CSRF-state and WebAuthn challenges aren't shared, so a callback/verify landing on a
-   different instance than the one that issued the challenge spuriously fails.
+2. SSO CSRF-state, WebAuthn challenges and OAuth2 consent challenges aren't shared, so a
+   callback/verify/confirm landing on a different instance than the one that issued the challenge
+   spuriously fails.
 
 Backed by a `Map`, swept every `sweepIntervalMs` to evict expired entries proactively (in addition
-to the lazy expiry check on `get`).
+to the lazy expiry check on `get`). It holds at most `maxEntries` (default 100,000), so a flood of
+requests can't grow it without bound: when full, a `set` first sweeps expired entries, then evicts
+the oldest. (With `session.verifyOnEachRequest` on, an evicted revocation marker costs only the
+fast path — the session store still decides.) `initIdentityProvider()` builds it with the defaults.
+`take()` is a get-and-delete with no `await` in between, so it's atomic on the single JS thread.
 
 ## `RedisCacheAdapter` / `createRedisCacheAdapter(opts)`
 
@@ -72,7 +95,8 @@ class RedisCacheAdapter implements CacheAdapter {
   get client(): IORedisClient; // exposed so the rate limiter can share this connection
 }
 function createRedisCacheAdapter(opts: {
-  host: string; port: number; password?: string; db?: number; keepAliveMs?: number;
+  host: string; port: number; username?: string; password?: string; db?: number;
+  tls?: boolean | object; keepAliveMs?: number;
 }): Promise<RedisCacheAdapter>
 ```
 
@@ -80,10 +104,12 @@ Recommended for production/multi-instance deployments. `ioredis` is a **peer dep
 dynamically `import()`-ed only when this adapter is actually instantiated, so consumers on the
 memory default never need to install it. `createRedisCacheAdapter` connects with
 `lazyConnect: true`, `maxRetriesPerRequest: 3`, and a `retryStrategy` capped at 5s between
-attempts, then awaits `.connect()` before returning.
+attempts, then awaits `.connect()` before returning. `tls: true` connects over TLS with default
+options; pass an object for ioredis TLS options.
 
 Values are JSON-serialized on `set` (raw strings are stored as-is) and JSON-parsed on `get`
-(falling back to the raw string if parsing fails).
+(falling back to the raw string if parsing fails). `take()` runs `GET` + `DEL` in one
+`MULTI`/`EXEC` transaction — atomic, and works on every Redis version (`GETDEL` needs 6.2).
 
 ## Fail-closed revocation checks
 
@@ -100,21 +126,22 @@ internal `isRevoked(cache, key)` helper:
   *unknown* → throws `IdpError({ code: 'CACHE_UNAVAILABLE', httpStatus: 503 })` rather than
   treating the failure as "not revoked." The caller must reject the token.
 
-Compare [rate limiting](rate-limiter-interface.md), which fails closed only on credential-check
-keys and open elsewhere.
+Compare [rate limiting](rate-limiter-interface.md), which fails closed on every limit except token
+refresh.
 
 ## Writing a custom adapter
 
-Any object satisfying the four-method `CacheAdapter` shape can be passed where the built-in
-adapters are used — there's no dedicated `config.cache.factory` extension point (unlike storage);
-instead, construct your adapter and either use it directly via the exported classes as a
-reference, or fork `createCacheAdapter`'s selection logic in your own bootstrap if you need a
-third backend. See [Redis Cache Adapter example](../examples/redis-cache-adapter.md) for a
+Any object satisfying the five-method `CacheAdapter` shape (with an atomic `take()`) can be passed
+where the built-in adapters are used — there's no dedicated `config.cache.factory` extension point
+(unlike storage); instead, construct your adapter and either use it directly via the exported
+classes as a reference, or fork `createCacheAdapter`'s selection logic in your own bootstrap if you
+need a third backend. See [Redis Cache Adapter example](../examples/redis-cache-adapter.md) for a
 working `config.cache.adapter = 'redis'` setup.
 
 ## Related
 
 - [Rate Limiter Interface](rate-limiter-interface.md) — shares the Redis connection when both
-  adapters are set to `'redis'` with no separate `rateLimiting.redis` block.
+  adapters are set to `'redis'` with no separate `rateLimiting.redis.host`.
 - [Middleware](middleware.md) — `authContextMiddleware`'s revocation check.
-- [WebAuthn](webauthn.md) — challenge storage uses the cache with `config.ttls.webauthnChallenge`.
+- [WebAuthn](webauthn.md) — challenge storage uses the cache with `config.ttls.webauthnChallenge`,
+  redeemed with `take()`.

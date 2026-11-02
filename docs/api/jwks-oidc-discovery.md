@@ -13,6 +13,9 @@ Publishes this IDP's **own user-token signing keys** (access/ID/OAuth2 tokens �
 distinct from the [service-mesh JWKS](service-mesh.md) (`/.well-known/services-jwks.json`), which
 publishes a separate set of per-service S2S keys.
 
+These are the only responses from `buildRouter()` that may be cached: everything else is sent with
+`Cache-Control: no-store`.
+
 ## `jwksHandler` — `GET /.well-known/jwks.json`
 
 ```ts
@@ -21,7 +24,9 @@ const jwksHandler: RequestHandler
 
 Returns an RFC 7517 JWK Set built from every `ACTIVE`/`ROTATING` key in
 `config.signingKeys.keys` (via `getVerifiableKeys` — see [Bootstrap & Config](bootstrap-config.md)
-for key status semantics). `RETIRED` and `REVOKED` keys are **not** published here.
+for key status semantics). `RETIRED` and `REVOKED` keys are **not** published here. Sent with
+`Cache-Control: public, max-age=300`, so a rotation propagates to relying parties within five
+minutes.
 
 ```json
 { "keys": [{ "kty": "RSA", "n": "...", "e": "...", "use": "sig", "alg": "RS256", "kid": "..." }] }
@@ -36,12 +41,17 @@ const authPublicKeyHandler: RequestHandler
 Returns the raw base64 PEM for a single key by `kid` — for internal resource servers that want the
 PEM directly instead of parsing a JWK. Unlike the JWKS endpoint, this **also serves `RETIRED`**
 keys (still needed to verify not-yet-expired tokens signed before rotation), but not `REVOKED`.
+Sent with `Cache-Control: public, max-age=300`.
 
 ```json
 { "publicKey": "<base64 PEM>" }
 ```
 
 Errors: `UNKNOWN_KID` (404, no such key); `KEY_NOT_ALLOWED` (403, key status is `REVOKED`).
+
+> Verifying a token yourself with these keys checks the signature only. To tell a first-party
+> token from one issued to an OAuth2 client, check `client_id`/`aud` the way
+> [`verifyAccessToken`](tokens-rs256.md#access-token-kinds) does.
 
 ## `openidConfigurationHandler` — `GET /.well-known/openid-configuration`
 
@@ -63,29 +73,37 @@ Returns the OIDC discovery document, all endpoints derived from `config.issuer`.
   "revocation_endpoint": "https://idp.example.com/oauth2/token/revoke",
   "introspection_endpoint": "https://idp.example.com/oauth2/token/introspect",
   "response_types_supported": ["code"],
-  "grant_types_supported": ["authorization_code", "refresh_token"],
+  "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
   "subject_types_supported": ["public"],
   "id_token_signing_alg_values_supported": ["RS256"],
-  "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+  "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
+  "revocation_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
+  "introspection_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
   "scopes_supported": ["openid", "email", "profile"],
-  "claims_supported": ["sub", "iss", "aud", "exp", "iat", "jti", "nonce", "email", "email_verified", "name", "given_name", "family_name", "picture", "locale", "zoneinfo", "updated_at"],
-  "code_challenge_methods_supported": ["S256", "plain"],
+  "claims_supported": ["sub", "iss", "aud", "azp", "exp", "iat", "jti", "nonce", "auth_time", "email", "email_verified", "name", "given_name", "family_name", "picture", "locale", "zoneinfo", "updated_at"],
+  "code_challenge_methods_supported": ["S256"],
+  "authorization_response_iss_parameter_supported": true,
   "request_parameter_supported": false,
   "claims_parameter_supported": false
 }
 ```
 
-> **Two discrepancies worth knowing about, not bugs to work around, just what the document
-> currently says vs. does:**
-> - `grant_types_supported` lists only `authorization_code` and `refresh_token` — it does **not**
->   list `client_credentials`, even though [`/oauth2/token`](oauth2-authorization-server.md)
->   accepts that grant. Likely intentional (client_credentials has no interactive/discovery
->   relevance for a browser-facing OIDC client), but a machine client relying strictly on this
->   document to enumerate supported grants would miss it.
-> - `token_endpoint_auth_methods_supported` advertises `client_secret_basic` (HTTP Basic auth
->   header), but the token endpoint's `authenticateClient` only reads `client_id`/`client_secret`
->   from the **request body** — there is no `Authorization: Basic` header parsing in the shipped
->   controller. Send credentials in the body regardless of what this field advertises.
+Notes on what the document advertises:
+
+- **Client authentication.** `client_secret_basic` (HTTP Basic, RFC 6749 §2.3.1 — form-encoded
+  id and secret) and `client_secret_post` (body) are both implemented; a request may use only one.
+  `none` is for public clients (PKCE). Introspection requires a confidential client. See
+  [OAuth2 Authorization Server](oauth2-authorization-server.md).
+- **PKCE.** Only `S256` — `plain` is refused, and a `code_challenge` must come with
+  `code_challenge_method=S256`.
+- **`authorization_response_iss_parameter_supported`.** Authorization responses carry an `iss`
+  parameter (RFC 9207); clients should check it equals `issuer`.
+- **Claims** in an ID token follow the granted scopes (`email` → `email`, `email_verified`;
+  `profile` → `name`, `given_name`, `family_name`, `picture`, `locale`, `zoneinfo`); `azp` and
+  `auth_time` are always present (`auth_time` when the login time is known). See
+  [OIDC](oidc.md).
+- **`openid`** is listed in `scopes_supported`, but a client still gets it only if its own
+  `allowedScopes` includes it.
 
 ## Related
 

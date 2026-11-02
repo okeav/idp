@@ -24,8 +24,13 @@ storage — see [Repository Adapters](repository-adapters.md)).
 
 **Body**: `{ email: string }` (trimmed, lowercased, valid-email, max 255 chars).
 
-**Rate limited**: `magic-link:ip:<req.ip>` against `config.rateLimiting.magicLink` (default 3/hour),
-fail-closed — a rate-limiter backend error → 503 `RATE_LIMITER_UNAVAILABLE`.
+**Rate limited**, both fail-closed (a rate-limiter backend error → 503 `RATE_LIMITER_UNAVAILABLE`):
+- per IP — `magic-link:ip:<ip>` against `config.rateLimiting.magicLink` (default 3/hour);
+- per address — `magic-link:email:<keyed hash of the email>` against
+  `config.rateLimiting.magicLinkByEmail` (default 3/hour), so a distributed sender can't flood one
+  inbox. The key holds the email's keyed hash, never the plain address.
+
+Over either limit → 429 `RATE_LIMIT_EXCEEDED`. IPv6 clients are keyed by their /64.
 
 **Always responds** `{ status: 'ok' }` (enumeration-safe) regardless of whether the email belongs
 to an existing account, a newly-created one, or neither.
@@ -46,11 +51,19 @@ Behavior by email state:
 
 **Token**: 32 raw bytes (`generateOpaqueToken(32)` → 64 hex chars), hashed at rest with HMAC-SHA256
 (`config.security.tokenHashSecret`) under `verificationTokenRepository` type `'magic_link'`.
+**Only the newest link works**: issuing one first deletes the account's earlier magic-link tokens
+(`deleteAllForUser('magic_link', userId)`).
 
 **Hooks fired**: `auditLog('MAGIC_LINK_REQUESTED', { userId, email, isNewUser })`, then
 `onMagicLinkRequested({ email, magicLinkToken: <raw token>, firstName?, lastName?, isNewUser })` —
 the hook is where you embed the raw token into an emailed link (this package never sends email
-itself).
+itself). Both are **started but not awaited**: waiting for an email to be sent would make the
+response measurably slower for a real account than for an unknown address. Errors are logged, not
+returned. In a serverless runtime, make the hook hand off quickly (enqueue rather than send inline).
+
+With [webhooks](webhooks.md) configured, `magicLinkToken` is **stripped** from the
+`onMagicLinkRequested` delivery unless the endpoint sets `includeCredentials: true` — set that
+only on the endpoint that sends your emails.
 
 ## `verifyMagicLinkHandler`
 
@@ -61,13 +74,29 @@ deleted/marked-used on read) and issues a full session through the **exact same
 `resolveAuthContext` → `issueSession` path every other login method uses** — magic-link login is
 not a shortcut around claims resolution.
 
-- If the token belongs to a `PENDING_VERIFICATION` user (the signup-via-magic-link case), promotes
-  it to `ACTIVE` (also resetting `failedLoginAttempts`/`lockUntil`) and treats this as `isNewUser:
-  true` for `resolveAuthContext`'s `ctx`.
+- If the token belongs to a `PENDING_VERIFICATION` user (the signup-via-magic-link case, or an
+  account registered with a password but never verified), promotes it to `ACTIVE` (also resetting
+  `failedLoginAttempts`/`lockUntil`) and treats this as `isNewUser: true` for
+  `resolveAuthContext`'s `ctx`. **Any password and MFA state set before the address was proven are
+  discarded** (`passwordHash: null`, `mfaEnabled: false`, secrets and recovery codes cleared), and
+  outstanding email-verification codes are deleted: clicking the link proves ownership of the
+  inbox, not of a password anyone could have pre-registered against the victim's address. The
+  owner can set a password through password reset.
 - Otherwise runs `assertUsableStatus(user)` — a `LOCKED`/`SUSPENDED`/etc. account rejects here even
   though the request step let the link be issued (see above).
 
-**Success (200)**:
+**MFA.** A magic link is one factor (the inbox). If the account has MFA enabled, no session is
+issued and no cookies are set; the response is the same MFA challenge password login returns:
+
+```json
+{ "mfaRequired": true, "mfaChallengeToken": "...", "expiresIn": 300 }
+```
+
+Complete it at `POST /mfa/verify` (TOTP or recovery code) or `POST /webauthn/mfa/verify`
+(passkey) — see [MFA](mfa.md). `expiresIn` is `config.ttls.mfaChallenge` in seconds. Audit event:
+`MAGIC_LINK_MFA_REQUIRED` (`{ userId }`).
+
+**Success (200)** (no MFA):
 ```json
 {
   "accessToken": "...", "accessTokenExpiresAt": "...",
@@ -76,7 +105,8 @@ not a shortcut around claims resolution.
 }
 ```
 Also sets the `access_token`/`refresh_token` cookies (same `cookieOptions()` as every other login
-method — see [Password & Email Auth](password-email-auth.md)).
+method — see [Password & Email Auth](password-email-auth.md)). `refreshToken` is left out of the
+body under `cookies.refreshTokenInBody: false`.
 
 **Errors**:
 - `INVALID_OR_EXPIRED_TOKEN` (400) — token not found, already used, or expired.
@@ -97,5 +127,7 @@ method — see [Password & Email Auth](password-email-auth.md)).
 
 - [Password & Email Auth](password-email-auth.md) — the shared `issueSession`/cookie mechanics.
 - [Repository Adapters](repository-adapters.md) — `VerificationTokenRepository`.
+- [MFA](mfa.md) — completing the `mfaRequired` challenge.
+- [Webhooks](webhooks.md) — credential stripping and `includeCredentials`.
 - [Rate Limiter Interface](rate-limiter-interface.md)
 - [Magic Link with Express example](../examples/magic-link-with-express.md)

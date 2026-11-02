@@ -3,34 +3,63 @@ title: "Error Handling"
 package: "@okeav/idp-core"
 category: "api-reference"
 tags: ["errors", "error-handling"]
-description: "The IdpError type, isIdpError(), and the full ERROR_CODES catalogue with HTTP statuses."
+description: "The IdpError type, isIdpError(), idpErrorHandler(), and the full ERROR_CODES catalogue with HTTP statuses."
 ---
 
 # Error Handling
 
-Every error this package throws is an `IdpError`. The package never shapes an HTTP response body
-itself — write one Express error-handling middleware that maps `err.httpStatus`/`err.code` to your
-API's response envelope.
+Every error this package's handlers throw on purpose is an `IdpError`, passed to `next(err)`. The
+package never shapes an HTTP response body itself — mount one Express error-handling middleware
+after the router. The exported `idpErrorHandler()` is safe to expose to the internet:
 
 ```js
-app.use((err, req, res, next) => {
-  res.status(err.httpStatus || 500).json({ error: err.code || 'INTERNAL_ERROR', message: err.message });
-});
+import { buildRouter, idpErrorHandler } from '@okeav/idp-core';
+
+app.use('/auth', buildRouter());
+app.use(idpErrorHandler({ logger })); // after the router; logger is optional
 ```
+
+**Don't echo `err.message` for every error.** Errors that aren't `IdpError`s (a database driver
+error, a body-parser error, a bug) carry internal detail — collection and index names, values, the
+raw request body — and an `IdpError` of 500+ may wrap one in `cause`. The hand-written handler this
+page showed before 0.4.0 did exactly that. If you write your own handler for a different envelope,
+keep the rule: show `message` only for an `IdpError` with `httpStatus < 500` (`err.expose === true`),
+and answer everything else with a generic 500.
+
+## `idpErrorHandler(opts?)`
+
+```ts
+function idpErrorHandler(opts?: { logger?: Logger }): ErrorRequestHandler
+```
+
+| Error | Response |
+|---|---|
+| `IdpError` with `httpStatus < 500` | `httpStatus`, `{ error: code, message }` |
+| Body-parser "too large" (`type: 'entity.too.large'`, or status 413) | 413 `{ error: 'PAYLOAD_TOO_LARGE', message: 'Request body is too large' }` |
+| Body-parser malformed body (`type: 'entity.parse.failed'`) | 400 `{ error: 'INVALID_REQUEST', message: 'Malformed request body' }` |
+| `IdpError` with `httpStatus >= 500` | `httpStatus`, `{ error: code }` — no message; logged with `logger.error` |
+| Anything else | 500 `{ error: 'INTERNAL_ERROR' }` — no message, stack or driver detail; logged with `logger.error` |
+
+If the response headers were already sent, it just ends the response.
 
 ## `IdpError`
 
 ```ts
 class IdpError extends Error {
   code: string;
-  httpStatus: number; // default 500
+  httpStatus: number;  // default 500
+  status: number;      // mirrors httpStatus
+  statusCode: number;  // mirrors httpStatus
+  expose: boolean;     // httpStatus < 500 — the message is written for clients
   cause?: unknown;
   constructor(opts: { code: string; httpStatus?: number; message?: string; cause?: unknown });
 }
 ```
 
-`name` is always `'IdpError'`. `code` defaults to `'INTERNAL_ERROR'` if omitted. `cause` is set
-only when provided (e.g. wrapping a Mongo or `jsonwebtoken` error) — useful for logging, not
+`name` is always `'IdpError'`. `code` defaults to `'INTERNAL_ERROR'` if omitted. `status` /
+`statusCode` mirror `httpStatus` so Express's default error handler (and other frameworks'
+conventions) answer with the right status instead of turning every 401/429 into a 500. `cause` is
+set only when provided (e.g. wrapping a Mongo or `jsonwebtoken` error) — useful for logging, never
 meant to be exposed to API clients.
 
 ## `isIdpError(err)`
@@ -50,94 +79,121 @@ validation list.
 
 | Code | Typical `httpStatus` | Category |
 |---|---|---|
-| `INTERNAL_ERROR` | 500 | Generic |
-| `INVALID_REQUEST` | 400 | Generic |
+| `INTERNAL_ERROR` | 500 | Generic — also what `idpErrorHandler()` answers for any non-`IdpError` |
+| `INVALID_REQUEST` | 400 | Generic — also a malformed body under `idpErrorHandler()` |
 | `MISSING_REQUIRED_FIELDS` | 400 | Generic |
 | `VALIDATION_ERROR` | 400 | Generic — thrown by `validateBody`/`validateQuery` on zod parse failure |
-| `SERVICE_UNAVAILABLE` | 503 | Generic |
+| `SERVICE_UNAVAILABLE` | 503 | Generic — the remote services-JWKS lookup behind `verifyServiceTokenRemote` can't reach the IdP and has no keys from an earlier fetch |
 | `NOT_FOUND` | 404 | Generic |
 | `RATE_LIMIT_EXCEEDED` | 429 | Generic — thrown by `enforceRateLimit` |
-| `RATE_LIMITER_UNAVAILABLE` | 503 | Generic — rate-limiter backend errored on a fail-closed key (login, MFA verify, password-reset request, magic-link request); see [Rate Limiter Interface](rate-limiter-interface.md) |
+| `RATE_LIMITER_UNAVAILABLE` | 503 | Generic — rate-limiter backend errored (or `MemoryRateLimiter` is full) on a fail-closed key — every limit except token refresh; see [Rate Limiter Interface](rate-limiter-interface.md) |
 | `FEATURE_DISABLED` | 404 | Generic — `setupMfaHandler`/`confirmMfaHandler` with `config.mfa.enabled: false` |
+| `CSRF_ORIGIN_REJECTED` | 403 | Generic — a state-changing request authenticated by a **cookie** (the session cookie, or the refresh cookie at `/refresh`/`/logout`) came from an `Origin` that is neither the issuer's nor in `cookies.trustedOrigins`; see [Middleware](middleware.md) |
+| `PAYLOAD_TOO_LARGE` | 413 | Generic — only produced by `idpErrorHandler()`, for an oversized body |
 | `AUTH_REQUIRED` | 401 | AuthN — `authContextMiddleware`, no token presented and not `optional` |
-| `UNAUTHENTICATED` | 401 | AuthN — handler-level check when `req.auth` is missing |
-| `FORBIDDEN` | 403 | AuthN |
-| `INVALID_TOKEN` | 401 | AuthN — malformed/unverifiable token |
+| `UNAUTHENTICATED` | 401 | AuthN — handler-level check when `req.auth` is missing; also a wrong or non-covering bootstrap secret at `POST /internal/service-keys` |
+| `FORBIDDEN` | 403 | AuthN — `requireServiceCallerMiddleware` (caller not allowed, or a shared-secret caller without `serviceMesh.allowLegacySecretCallers`), or a service name outside `serviceMesh.allowedServiceNames` |
+| `INVALID_TOKEN` | 401 | AuthN — malformed/unverifiable token, not an access token, or the wrong token kind/audience for the route (e.g. a token issued to a third-party OAuth2 client, presented at a first-party route) |
 | `TOKEN_EXPIRED` | 401 | AuthN |
-| `TOKEN_REVOKED` | 401 | AuthN — presented token's `jti` found in the revocation cache, or (with `session.verifyOnEachRequest`) its session row is missing, revoked, expired, or another user's |
+| `TOKEN_REVOKED` | 401 | AuthN — presented token's `jti` found in the revocation cache, or (with `session.verifyOnEachRequest`) its session row is missing, revoked, expired, or another user's; also a refresh that raced "log out everywhere" |
+| `REAUTHENTICATION_REQUIRED` | 401 | AuthN — `requireRecentAuth()`: the user's last real login is older than `session.recentAuthMaxAgeSeconds` (default 15 min), or unknown. Send the user through a login and retry |
 | `CACHE_UNAVAILABLE` | 503 | AuthN — cache adapter errored during a revocation check with `session.verifyOnEachRequest: false` (fail-closed). With it on, a cache error is logged and the session store decides |
 | `SESSION_STORE_UNAVAILABLE` | 503 | AuthN — `sessionRepository.findByJti` errored during the per-request session check (fail-closed); see [Middleware](middleware.md) |
-| `INVALID_CREDENTIALS` | 401 | Credentials |
+| `INVALID_CREDENTIALS` | 401 | Credentials — also every password, right or wrong, on a locked or deleted account |
 | `EMAIL_AND_PASSWORD_REQUIRED` | 400 | Credentials |
 | `EMAIL_REQUIRED` | 400 | Credentials |
-| `USER_NOT_FOUND` | 404 | Credentials |
-| `USER_ALREADY_EXISTS` | 409 | Credentials — **defined but never actually thrown**; `registerHandler` is enumeration-safe (see below) and returns `201 { status: 'ok' }` for an already-registered email instead of a distinguishable error |
+| `USER_NOT_FOUND` | 404 | Credentials — authenticated routes whose user row has gone; never on the unauthenticated email endpoints |
+| `USER_ALREADY_EXISTS` | 409 | Credentials — **defined but never thrown**; `registerHandler` is enumeration-safe (see below) |
 | `USER_NOT_ACTIVE` | 403 | Credentials |
-| `ACCOUNT_LOCKED` | 423 | Credentials — too many failed logins |
+| `ACCOUNT_LOCKED` | 423 | Credentials — a magic-link or passkey login to an account locked by failed password attempts. Password login on a locked account answers `INVALID_CREDENTIALS` instead, so the lock can't tell right passwords from wrong ones |
 | `ACCOUNT_SUSPENDED` | 403 | Credentials — status `SUSPENDED`/`DISABLED` |
 | `PENDING_VERIFICATION` | 403 | Credentials — status `PENDING_VERIFICATION`/`INVITED` |
 | `CANNOT_DELETE_USER` | 400 | Credentials |
-| `EMAIL_ALREADY_VERIFIED` | 400 | Credentials |
-| `INVALID_OR_EXPIRED_TOKEN` | 400 | Credentials — opaque token (reset/verify/magic-link) not found/expired |
+| `EMAIL_ALREADY_VERIFIED` | 400 | Credentials — **no longer thrown** (0.4.0): resend-verification answers `{ status: 'ok' }` for every address |
+| `INVALID_OR_EXPIRED_TOKEN` | 400 | Credentials — opaque token/code (reset/verify/magic-link) not found or expired; also verify-email for an unknown or already-verified address |
+| `VERIFICATION_LOCKED` | 429 | Credentials — per-account email-verification lockout (`security.verificationCodeLockout`, default 5 wrong codes per hour); every outstanding code is deleted, so the user requests a new one |
 | `CURRENT_PASSWORD_INCORRECT` | 400 | Credentials |
 | `REFRESH_TOKEN_REQUIRED` | 400 | Session |
-| `INVALID_REFRESH_TOKEN` | 401 | Session |
+| `INVALID_REFRESH_TOKEN` | 401 | Session — unknown, revoked or rotated token, an OAuth2 refresh token presented at `/refresh`, or a session family past `session.absoluteLifetimeSeconds` |
 | `REFRESH_TOKEN_NOT_FOUND` | 404 | Session |
 | `MFA_ALREADY_ENABLED` | 400 | MFA |
 | `MFA_NOT_ENABLED` | 400 | MFA |
 | `MFA_SETUP_REQUIRED` | 400 | MFA |
-| `INVALID_MFA_CODE` | 400 | MFA |
-| `INVALID_MFA_CHALLENGE_TOKEN` | 401 | MFA |
-| `MFA_LOCKED` | 429 | MFA — per-account second-factor lockout; returned for every attempt while locked, right code or not (see [MFA](mfa.md#per-account-lockout)) |
+| `INVALID_MFA_CODE` | 400 | MFA — wrong or already-used TOTP code or recovery code |
+| `INVALID_MFA_CHALLENGE_TOKEN` | 401 | MFA — invalid, expired or already-used challenge token, or one issued before the account's last password change |
+| `MFA_LOCKED` | 429 | MFA — per-account second-factor lockout; returned for the attempt that exhausts the budget and every attempt while locked, right code or not (see [MFA](mfa.md#per-account-lockout)) |
 | `MFA_ENCRYPTION_NOT_CONFIGURED` | 500 | MFA — an encrypted secret was found, or one must be written, with no `mfa.encryptionKey`/`secretCipher` |
 | `MFA_SECRET_NOT_ENCRYPTED` | 500 | MFA — a plain-text secret was found with `mfa.requireEncrypted: true`; run `migrateMfaSecrets()` |
 | `MFA_SECRET_UNREADABLE` | 500 | MFA — stored secret failed to decrypt (tampered, wrong key, unknown key id); fails closed, no tokens issued |
 | `UNKNOWN_KID` | 404 | OAuth2/OIDC/JWKS |
 | `KEY_NOT_ALLOWED` | 403 | OAuth2/OIDC/JWKS |
 | `INVALID_REDIRECT_URI` | 400 | OAuth2/OIDC/JWKS |
-| `SSO_PROVIDER_ERROR` | varies | SSO — **listed here but never actually constructed.** Real provider-communication failures (code exchange, profile fetch) throw a plain `Error`, not an `IdpError` with this code — see the provider-communication-failures callout in [SSO / Social Login](sso-social-login.md). `isIdpError(err)` is `false` for these, so a default error-handling middleware collapses them to a generic `INTERNAL_ERROR`/500, not `SSO_PROVIDER_ERROR`. Don't branch on this code. |
-| `INVALID_SSO_PROVIDER` | 400 | SSO |
-| `SSO_PROVIDER_NOT_CONFIGURED` | 400/500 | SSO |
-| `INVALID_SSO_STATE` | 400 | SSO — CSRF-state mismatch or replay |
+| `INVALID_CLIENT` | 401 | OAuth2 — client authentication failed at `/oauth2/token`, `/token/revoke` or `/token/introspect`. Unknown, inactive and wrong-secret clients all get the same answer |
+| `INVALID_GRANT` | 400 | OAuth2 — bad, expired or reused authorization code or refresh token, `redirect_uri` mismatch, PKCE failure, inactive user, or a family past its lifetime |
+| `INVALID_SCOPE` | 400 | OAuth2 — requested scope outside the client's `allowedScopes` |
+| `UNAUTHORIZED_CLIENT` | 400 | OAuth2 — grant type not allowed for the client |
+| `UNSUPPORTED_GRANT_TYPE` | 400 | OAuth2 |
+| `INVALID_CONSENT_CHALLENGE` | 400 | OAuth2 — `/oauth2/authorize/confirm` or `/deny` with an unknown, expired, already-used or another user's `consent_challenge` |
+| `SSO_PROVIDER_ERROR` | 400 | SSO — currently only an Apple `id_token` that wasn't issued for this login (nonce, `iss`, `aud`, `exp`). Other provider-communication failures (code exchange, profile fetch, timeouts) throw a plain `Error`, which `idpErrorHandler()` answers 500 `INTERNAL_ERROR` — see [SSO / Social Login](sso-social-login.md). An `error` returned by the provider itself isn't an exception: the browser is redirected back with `error=provider_error` |
+| `INVALID_SSO_PROVIDER` | 400 | SSO — unknown or unconfigured provider |
+| `SSO_PROVIDER_NOT_CONFIGURED` | 400/500 | SSO — **defined but never thrown** (the unconfigured case throws `INVALID_SSO_PROVIDER`) |
+| `INVALID_SSO_STATE` | 400 | SSO — state missing, expired or already used, or the per-attempt binding cookie is missing or doesn't match |
 | `OAUTH_CLIENT_EXISTS` | 409 | OAuth clients |
-| `OAUTH_CLIENT_NOT_FOUND` | 404 | OAuth clients |
-| `SERVICE_TOKEN_INVALID` | 401 | Service mesh |
-| `SERVICE_AUTH_FAILED` | 401 | Service mesh |
-| `SERVICE_NOT_CONFIGURED` | 500 | Service mesh |
+| `OAUTH_CLIENT_NOT_FOUND` | 404 / 400 | OAuth clients — 404 on the client-administration routes; 400 at `/oauth2/authorize`, `/oauth2/consent` and end-session for an unknown or inactive client |
+| `SERVICE_TOKEN_INVALID` | 401 | Service mesh — includes tokens without `exp`, living over 5 minutes, or with `iat` in the future |
+| `SERVICE_AUTH_FAILED` | 401 | Service mesh — `serviceContextMiddleware` found no valid token or shared secret |
+| `SERVICE_NOT_CONFIGURED` | 500 | Service mesh — `ownServiceName` / `expectedAud` missing, or no `sharedSecret` while a secret-accepting `tokenMode` needs one |
+| `SERVICE_NAME_TAKEN` | 409 | Service mesh — the shared `bootstrapSecret` tried to register a name that already has a key; rotating a key needs that service's own `bootstrapSecrets` entry |
 | `WEBAUTHN_NOT_CONFIGURED` | 500 | WebAuthn — `config.webauthn` incomplete at first use |
 | `WEBAUTHN_CHALLENGE_EXPIRED` | 400 | WebAuthn |
 | `WEBAUTHN_VERIFICATION_FAILED` | 400/401 | WebAuthn |
-| `CREDENTIAL_NOT_FOUND` | 400 | WebAuthn |
-| `MONGO_TRANSACTIONS_UNSUPPORTED` | 500 | Startup only — thrown by `initIdentityProvider()`, not a request-time error (see [Bootstrap & Config](bootstrap-config.md)) |
+| `CREDENTIAL_NOT_FOUND` | 400 / 404 | WebAuthn — 400 during a ceremony; 404 from `DELETE /me/passkeys/:credentialId` for a passkey the caller doesn't own |
+| `MONGO_TRANSACTIONS_UNSUPPORTED` | 500 | Startup only — thrown by `initIdentityProvider()`, not a request-time error, and not in `ERROR_CODES` (see [Bootstrap & Config](bootstrap-config.md)) |
 
-`EMAIL_AND_PASSWORD_REQUIRED`, `EMAIL_REQUIRED`, `CANNOT_DELETE_USER`, and
-`SSO_PROVIDER_NOT_CONFIGURED` (the unconfigured-provider case in practice throws
-`INVALID_SSO_PROVIDER` — see [SSO / Social Login](sso-social-login.md)) are likewise defined in the
-catalogue but not currently constructed anywhere in the codebase, along with the generic
-`SERVICE_UNAVAILABLE`/`NOT_FOUND`. If you're building an exhaustive client-side switch over every
-code in this table, these branches are currently dead — this is what "non-exhaustive-enforced"
-above means in practice: the catalogue is a superset of what's actually thrown today.
+`EMAIL_AND_PASSWORD_REQUIRED`, `EMAIL_REQUIRED`, `CANNOT_DELETE_USER`, `USER_ALREADY_EXISTS`,
+`EMAIL_ALREADY_VERIFIED`, `SSO_PROVIDER_NOT_CONFIGURED` and the generic `NOT_FOUND` are defined in
+the catalogue but not currently constructed anywhere in the codebase. If you're building an
+exhaustive client-side switch over every code in this table, these branches are currently dead —
+this is what "non-exhaustive-enforced" above means in practice: the catalogue is a superset of
+what's actually thrown today.
 
-`USER_NOT_ACTIVE` is `403` everywhere except the OAuth2 token endpoint's `authorization_code` and
-`refresh_token` grants ([OAuth2 Authorization Server](oauth2-authorization-server.md)), where it's
-`400` — consistent with that endpoint's convention of `400` for all `invalid_grant`-style
-failures, not an inconsistency to work around.
+The OAuth2 token endpoint uses the RFC 6749 codes (`INVALID_CLIENT`, `INVALID_GRANT`,
+`INVALID_SCOPE`, `UNAUTHORIZED_CLIENT`, `UNSUPPORTED_GRANT_TYPE`): a user who is no longer active is
+`INVALID_GRANT` (400) there, not `USER_NOT_ACTIVE`. See
+[OAuth2 Authorization Server](oauth2-authorization-server.md).
+
+Startup and configuration failures (missing or short secrets, bad signing keys, bad rate-limit
+rules, a missing SSO allowlist, ...) are plain `Error`s thrown from `initIdentityProvider()`, not
+`IdpError`s — see [Bootstrap & Config](bootstrap-config.md#initidentityproviderconfig).
 
 ## Enumeration-safety pattern
 
-Several handlers deliberately return `{ status: 'ok' }`/`201` for both real and non-existent
-accounts to avoid leaking which emails are registered — this is normal, not a bug, if you see a
-200/201 response where you expected a 404/409. Affected endpoints: `registerHandler` (an
-already-registered email still gets `201 { status: 'ok' }`, burning the same wall-clock time as a
-real registration — this is also why `USER_ALREADY_EXISTS` above is never actually thrown),
-`resendVerificationEmailHandler`, `forgotPasswordHandler`, `requestMagicLinkHandler` (when
-`allowSignupViaMagicLink: false` and the email is unknown), and
-`generateAuthenticationOptionsHandler` (WebAuthn — issues a real, if uncompletable, challenge for
-an unknown email rather than a distinguishable error).
+Several handlers deliberately answer the same way for real and non-existent accounts to avoid
+leaking which emails are registered — this is normal, not a bug, if you see a 200/201 (or a
+generic 400) where you expected a 404/409:
+
+- `registerHandler` — an already-registered email still gets `201 { status: 'ok' }` (this is also
+  why `USER_ALREADY_EXISTS` is never thrown).
+- `verifyEmailHandler` — an unknown or already-verified address gets the same 400
+  `INVALID_OR_EXPIRED_TOKEN` as a wrong code (so a second click on a used link is now a 400, not
+  `ok`).
+- `resendVerificationEmailHandler` — always `{ status: 'ok' }`.
+- `forgotPasswordHandler` — always `{ status: 'ok' }`.
+- `requestMagicLinkHandler` — `{ status: 'ok' }` for an unknown email when
+  `allowSignupViaMagicLink: false`, and for a deleted account.
+- `generateAuthenticationOptionsHandler` (WebAuthn) — ignores `email` unless
+  `webauthn.allowCredentialsByEmail: true`, and then answers an unknown address with a stable decoy
+  credential id rather than a distinguishable error.
+- `loginHandler` — a locked account answers `INVALID_CREDENTIALS` for every password.
+
+On register, resend-verification, forgot-password and magic-link request, the email hooks (and
+their audit events) are started but not awaited, so response time doesn't reveal whether an email
+was sent either.
 
 ## Related
 
 - [Bootstrap & Config](bootstrap-config.md)
-- [Rate Limiter Interface](rate-limiter-interface.md) — a backend error fails closed (`RATE_LIMITER_UNAVAILABLE`) on credential-check keys, open elsewhere.
+- [Middleware](middleware.md) — `requireRecentAuth()`, the CSRF origin check.
+- [Rate Limiter Interface](rate-limiter-interface.md) — a backend error fails closed (`RATE_LIMITER_UNAVAILABLE`) on every limit except token refresh.
 - [Cache Interface](cache-interface.md) — `CACHE_UNAVAILABLE` fails closed for revocation checks.
 - [MFA](mfa.md) — `MFA_LOCKED` and the `MFA_SECRET_*` codes.

@@ -8,14 +8,30 @@ description: "The canonical pattern for attaching app-specific fields to a user 
 
 # Storing App-Specific User Data (Roles, Capabilities, Profile Fields)
 
-`@okeav/idp-core`'s `User` record is deliberately fixed — email, failed-login counters, linked
-external providers, and the handful of other fields every identity flow needs. It has **no
-generic `profile`/`metadata` bag** for your application's own fields (a `role`, an RBAC
-`capabilities` array, a display name, anything domain-specific). That's not an oversight — this
-package stays an identity layer, not an accounts/profile store, so it never needs an opinion on
-your data model. See [Bootstrap & Config](../api/bootstrap-config.md#claims-are-opaque): "claims
-are opaque," and the package "ships no scope-matching or permission-checking logic" — the same
-principle extends to the account record itself.
+`@okeav/idp-core`'s `User` record is deliberately small — email, status, failed-login counters,
+linked external providers, and the handful of other fields every identity flow needs. Two parts of
+it are open-ended, but neither is the right home for authorization data:
+
+- **`profile`** — `firstName`, `lastName`, `displayName`, `avatarUrl`, `locale`, `zoneinfo`. A
+  fixed set of OIDC-style fields, editable by the user through `PATCH /me` (and released in ID
+  tokens under the `profile` scope). Nothing else can be added there through the API.
+- **`metadata`** — a free-form object (`Record<string, unknown>`, default `{}`), passed to
+  `resolveAuthContext` as part of `user`. idp-core never reads or interprets it. `PATCH /me`
+  can't write it and `GET /me` doesn't return it; your own server code can set it with
+  `storage.userRepository.updateById(user.id, { metadata })` (replacing the whole object).
+  `POST /register` **ignores** a `metadata` field in the request body unless you set
+  `registration.acceptMetadata: true` — whatever arrives there was written by whoever registered,
+  so if you enable it, treat every value as untrusted user input (and note that re-registering a
+  still-unverified address keeps the first registration's `metadata`). Before 0.4.0 it was stored
+  unconditionally, so any app keeping a role or tenant in it granted that to whoever registered.
+
+So for your application's own fields (a `role`, an RBAC `capabilities` array, anything
+domain-specific), the recommendation stays a store you own. That's not an oversight — this package
+stays an identity layer, not an accounts/profile store, so it never needs an opinion on your data
+model. See [Bootstrap & Config](../api/bootstrap-config.md#claims-are-opaque): "claims are opaque,"
+and the package "ships no scope-matching or permission-checking logic" — the same principle extends
+to the account record itself. `metadata` is fine for small, non-authoritative values you set
+server-side (an external CRM id, a signup source); keep anything that grants access out of it.
 
 ## The pattern: a consumer-owned collection, joined by `user.id`
 
@@ -48,7 +64,9 @@ await initIdentityProvider({
 
   hooks: {
     // Called on every login that mints a session (password, MFA-verify, SSO, magic-link,
-    // WebAuthn) — see the Event hooks table in Bootstrap & Config for the full list.
+    // WebAuthn) and — by default since 0.4.0 (session.reresolveClaimsOnRefresh) — on every
+    // POST /refresh too (ctx.method === 'refresh'), so a capability change takes effect at the
+    // next access-token rotation. Keep it fast. See the Event hooks table in Bootstrap & Config.
     resolveAuthContext: async (user, ctx) => {
       let account = await Account.findOne({ userId: user.id });
 
@@ -77,7 +95,8 @@ an empty-permissions token silently.
 
 ## Why not just add the field to idp-core's own user document?
 
-You can — [Extending a Mongo Repository](custom-mongo-repository-adapter.md) documents decorating
+You can — either in `metadata` (written server-side, never from the registration body — see
+above), or as a field of your own: [Extending a Mongo Repository](custom-mongo-repository-adapter.md) documents decorating
 the built-in `userRepository` to write directly to idp-core's own Mongoose model when you
 genuinely need the field to live on that document (e.g. it must be visible in an admin tool built
 directly against idp-core's schema). For everything else, a separate collection is the better

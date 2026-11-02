@@ -34,18 +34,22 @@ function initIdentityProvider(config: IdpConfig): Promise<{
 
 The full return value is the exact same object stored in the module-level singleton — every field
 above is present, not just the four most commonly used ones (`config`/`logger`/`storage`/`cache`).
+(The published type declares only those four.)
 
-Wires, in order: config defaults (`withDefaults`) → logger → MFA secret cipher + config
-validation (before anything connects, so a missing key fails the boot) → webhook dispatcher →
-hooks (wrapped so notification hooks also fire webhook deliveries) → cache adapter → rate limiter
-(sharing the cache adapter's Redis connection when applicable) → signing-key registry →
-storage (Mongo by default, or `config.storage.factory` if provided).
+Wires, in order: config defaults (`withDefaults`) → validation of `security` and every
+`rateLimiting` rule → logger → MFA secret cipher + config validation, lockout settings, SSO
+settings, `hookTimeoutMs`, `oauth2.requirePkce`, `session.*` numbers (all before anything connects,
+so bad config fails the boot) → webhook dispatcher (validates every endpoint) → hooks (wrapped so
+notification hooks also fire webhook deliveries) → cache adapter → rate limiter (sharing the cache
+adapter's Redis connection when applicable) → signing-key registry (every key validated) → storage
+(Mongo by default, or `config.storage.factory` if provided).
 
-Two storage capabilities are optional, and an adapter missing either still boots with a
+Some storage capabilities are optional, and an adapter missing them still boots with a
 `logger.warn` at startup: no `attemptCounterRepository` → the per-account MFA lockout counts
-in-process only (not shared across instances); no `sessionRepository.findByJti` while
-`session.verifyOnEachRequest` is on → falls back to the per-process revocation cache. See
-[Repository Adapters](repository-adapters.md).
+in-process only (not shared across instances); no `userRepository.claimTotpStep` /
+`consumeRecoveryCode` → TOTP replay and recovery-code reuse are checked with a non-atomic
+read-then-write; no `sessionRepository.findByJti` while `session.verifyOnEachRequest` is on → falls
+back to the per-process revocation cache. See [Repository Adapters](repository-adapters.md).
 
 Returns a read-only-ish view of the wired state for consumers who want direct access (e.g. to
 close the Mongo connection in tests). You don't need to hold onto or pass around this return
@@ -59,13 +63,32 @@ errors):
 | `config.issuer` missing | `config.issuer is required` |
 | Neither `config.mongo` nor `config.storage.factory` provided | `config.mongo (uri or connection) is required unless config.storage.factory is provided` |
 | `config.signingKeys.keys` empty | `config.signingKeys.keys is required (at least one ACTIVE signing key)` |
-| `config.security.emailHashPepper` missing | `config.security.emailHashPepper is required` |
-| `config.security.tokenHashSecret` missing | `config.security.tokenHashSecret is required` |
+| `config.security.emailHashPepper` / `tokenHashSecret` missing | `config.security.<name> is required` |
+| `emailHashPepper` / `tokenHashSecret` shorter than 32 characters | `config.security.<name> must be a random string of at least 32 characters` |
+| `security.bcryptRounds` not an integer from 10 to 15 (from 4 with `security.allowWeakBcryptRounds: true`, for tests) | `config.security.bcryptRounds must be an integer from 10 to 15 (got ...)` |
+| `security.maxFailedLoginAttempts` not a positive integer | `config.security.maxFailedLoginAttempts must be a positive integer (got ...)` |
+| `security.accountLockDurationMs` not an integer ≥ 1000 | `config.security.accountLockDurationMs must be an integer of at least 1000 (got ...)` |
+| A `rateLimiting.<rule>` whose `max` or `windowSeconds` isn't a positive integer | `config.rateLimiting.<rule> needs positive integer max and windowSeconds (got ...)` |
 | `mfa.enabled` (default `true`) with neither `mfa.encryptionKey` nor `mfa.secretCipher`, and no `mfa.allowPlaintext` | `MFA secrets must be encrypted at rest: set config.mfa.encryptionKey ...` |
 | `mfa.requireEncrypted` with neither `encryptionKey` nor `secretCipher` | `config.mfa.requireEncrypted is set but no config.mfa.encryptionKey or config.mfa.secretCipher is configured` |
-| An `encryptionKey`/`previousEncryptionKeys` entry that doesn't decode to 32 bytes | `MFA encryption key must decode to exactly 32 bytes (got N) ...` |
+| An `encryptionKey`/`previousEncryptionKeys` entry that isn't exactly the base64 of 32 bytes | `MFA encryption key must decode to exactly 32 bytes (got N) ...` / `MFA encryption key is not valid base64 ...` |
 | `mfa.secretCipher` without `encrypt`/`decrypt` functions | `config.mfa.secretCipher must implement encrypt(plaintext, { context }) and decrypt(ciphertext, { context })` |
-| A `mfa.lockout.*` value that isn't a positive integer | `config.mfa.lockout.<name> must be a positive integer (got ...)` |
+| A `mfa.lockout.*` or `security.verificationCodeLockout.*` value that isn't a positive integer | `config.<path>.<name> must be a positive integer (got ...)` |
+| Any `oauthProviders.*` entry with a `clientId`, and `sso.allowedRedirectOrigins` missing/empty | `config.sso.allowedRedirectOrigins is required when SSO providers are configured (...)` |
+| An `sso.allowedRedirectOrigins` entry that isn't a bare origin (`scheme://host[:port]`, no path) | `config.sso.allowedRedirectOrigins: "..." is not an origin ...` |
+| SSO providers configured and `sso.baseCallbackUrl` not an absolute `http(s)` URL | `config.sso.baseCallbackUrl must be an absolute URL when SSO providers are configured` |
+| `hookTimeoutMs` not a positive integer | `config.hookTimeoutMs must be a positive integer (got ...)` |
+| `oauth2.requirePkce` not `'all'` or `'public'` | `config.oauth2.requirePkce must be 'all' or 'public'` |
+| `session.recentAuthMaxAgeSeconds` / `absoluteLifetimeSeconds` not an integer ≥ 1, or `refreshReuseGraceSeconds` not an integer ≥ 0 | `config.session.<name> must be an integer >= N (got ...)` |
+| A webhook endpoint whose `url` isn't valid, isn't `https` (`http` is allowed only for localhost), whose `secret` is under 16 characters, or whose `events` isn't an array of strings | `config.webhooks.endpoints[i].<field> ...` |
+| `cache.adapter: 'redis'` without `cache.redis.host` | `Cache adapter "redis" needs config.cache.redis.host` |
+| `rateLimiting.adapter: 'redis'` with neither `rateLimiting.redis.host` nor a Redis cache to share | `Rate limiter adapter "redis" needs config.rateLimiting.redis.host, or config.cache.adapter "redis" to share its connection ...` |
+| A signing key with an unknown `status`, an unparseable PEM, a non-RSA key, under 2048 bits, or a `privateKey` that doesn't match its `publicKey` | `config.signingKeys.keys["<kid>"] ...` |
+| No `ACTIVE`/`ROTATING` key has a `privateKey` | `config.signingKeys: at least one ACTIVE (or ROTATING) key needs a privateKey to sign with` |
+
+**Upgrading from 0.3.x:** check your secrets (≥ 32 characters), `bcryptRounds` and signing keys
+(RSA ≥ 2048 bits, private key matching the public key) meet these before deploying, and set
+`sso.allowedRedirectOrigins` + `sso.baseCallbackUrl` if any SSO provider is configured.
 
 **Throws** `IdpError({ code: 'MONGO_TRANSACTIONS_UNSUPPORTED', httpStatus: 500 })` if the target
 MongoDB deployment doesn't support transactions (see [Repository Adapters](repository-adapters.md)
@@ -85,28 +108,80 @@ Optional convenience that builds an `IdpConfig` from `process.env` variables mat
 any way you like (Infisical, AWS Secrets Manager, hardcoded for tests, etc.) instead if you
 prefer.
 
-Notable env-var behavior:
-- `IDP_SIGNING_KEY_CURRENT_KID`/`_PRIVATE_B64`/`_PUBLIC_B64` build one `ACTIVE` signing key;
-  `IDP_SIGNING_KEY_PREVIOUS_*` (optional) builds a second `ROTATING` key for graceful rotation.
-- `IDP_SSO_*_CLIENT_ID` gates whether each `oauthProviders.*` entry is populated at all — omit a
-  provider's client ID and that provider is left `undefined`, not defaulted.
-- `IDP_WEBAUTHN_RP_ID` gates whether `webauthn` config is populated — omit it and `webauthn: {}`.
-- `IDP_WEBHOOK_URL` supports a single endpoint only; configure `config.webhooks.endpoints`
-  directly in code for multiple.
-- `IDP_MFA_ENCRYPTION_KEY` → `mfa.encryptionKey`; `IDP_MFA_PREVIOUS_ENCRYPTION_KEYS` is
-  comma-separated → `mfa.previousEncryptionKeys`. `IDP_MFA_ENABLED` (default `true`),
-  `IDP_MFA_REQUIRE_ENCRYPTED` and `IDP_MFA_ALLOW_PLAINTEXT` (both default `false`) map to the
-  `mfa` flags of the same name; `mfa.lockout` is code-only.
-- `IDP_SESSION_VERIFY_ON_EACH_REQUEST` (default `true`) → `session.verifyOnEachRequest`.
-- Per-rule rate-limit thresholds (`login`, `passwordReset`, etc.) are **not** env-configurable —
-  only `IDP_RATE_LIMIT_ENABLED`/`IDP_RATE_LIMIT_ADAPTER`. Override the per-rule `{max,
-  windowSeconds}` pairs in code.
+**Parsing is strict (since 0.4.0).** An unset or blank variable means "use the default"; anything
+else must be recognisable or `configFromEnv()` throws:
+
+- Booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`, in any case. Anything else throws
+  (`IDP_COOKIE_SECURE must be true/false (or 1/0, yes/no, on/off) — got "..."`). Before 0.4.0 only
+  the exact string `"true"` was true, so `IDP_COOKIE_SECURE=1` silently meant insecure cookies.
+- Integers must be whole numbers at or above a minimum, or it throws
+  (`IDP_MAX_FAILED_LOGIN_ATTEMPTS must be an integer >= 1 — got "..."`).
+- Lists are comma-separated; blanks are dropped.
+
+| Variable | Maps to | Default / notes |
+|---|---|---|
+| `IDP_ISSUER` | `issuer` | |
+| `IDP_MONGO_URI` | `mongo.uri` | |
+| `IDP_CACHE_ADAPTER` | `cache.adapter` | `memory` |
+| `IDP_CACHE_KEY_PREFIX` | `cache.keyPrefix` | `idp:` |
+| `IDP_REDIS_HOST` | `cache.redis.host` | |
+| `IDP_REDIS_PORT` | `cache.redis.port` | `6379` (integer ≥ 1) |
+| `IDP_REDIS_USERNAME` | `cache.redis.username` | Redis 6 ACL user |
+| `IDP_REDIS_PASSWORD` | `cache.redis.password` | |
+| `IDP_REDIS_TLS` | `cache.redis.tls` | `false` (boolean) |
+| `IDP_SIGNING_KEY_CURRENT_KID`, `_PRIVATE_B64`, `_PUBLIC_B64` | one `ACTIVE` signing key | |
+| `IDP_SIGNING_KEY_PREVIOUS_KID`, `_PRIVATE_B64`, `_PUBLIC_B64` | a second, `ROTATING` key | optional |
+| `IDP_COOKIE_SECURE` | `cookies.secure` | `NODE_ENV !== 'development'` |
+| `IDP_COOKIE_SAME_SITE` | `cookies.sameSite` | `lax` |
+| `IDP_COOKIE_DOMAIN` | `cookies.domain` | |
+| `IDP_COOKIE_TRUSTED_ORIGINS` | `cookies.trustedOrigins` | list; empty |
+| `IDP_COOKIE_REFRESH_TOKEN_IN_BODY` | `cookies.refreshTokenInBody` | `true` |
+| `IDP_EMAIL_HASH_PEPPER` | `security.emailHashPepper` | required, ≥ 32 characters |
+| `IDP_TOKEN_HASH_SECRET` | `security.tokenHashSecret` | required, ≥ 32 characters |
+| `IDP_MAX_FAILED_LOGIN_ATTEMPTS` | `security.maxFailedLoginAttempts` | `5` (integer ≥ 1) |
+| `IDP_ACCOUNT_LOCK_DURATION_MS` | `security.accountLockDurationMs` | `1800000` (integer ≥ 1000) |
+| `IDP_BCRYPT_ROUNDS` | `security.bcryptRounds` | `12` (integer ≥ 10; ≤ 15 is enforced at startup) |
+| `IDP_MFA_ISSUER_LABEL` | `mfa.issuerLabel` | `App` |
+| `IDP_MFA_RECOVERY_CODE_COUNT` | `mfa.recoveryCodeCount` | `10` (integer ≥ 1) |
+| `IDP_MFA_ENABLED` | `mfa.enabled` | `true` |
+| `IDP_MFA_ENCRYPTION_KEY` | `mfa.encryptionKey` | |
+| `IDP_MFA_PREVIOUS_ENCRYPTION_KEYS` | `mfa.previousEncryptionKeys` | list |
+| `IDP_MFA_REQUIRE_ENCRYPTED` | `mfa.requireEncrypted` | `false` |
+| `IDP_MFA_ALLOW_PLAINTEXT` | `mfa.allowPlaintext` | `false` |
+| `IDP_SESSION_VERIFY_ON_EACH_REQUEST` | `session.verifyOnEachRequest` | `true` |
+| `IDP_SSO_GOOGLE_CLIENT_ID`, `_CLIENT_SECRET` | `oauthProviders.google` | provider left `undefined` without a client id |
+| `IDP_SSO_MICROSOFT_CLIENT_ID`, `_CLIENT_SECRET`, `_TENANT` | `oauthProviders.microsoft` | tenant `common` |
+| `IDP_SSO_MICROSOFT_TRUST_EMAIL` | `oauthProviders.microsoft.trustEmail` | `false` |
+| `IDP_SSO_GITHUB_CLIENT_ID`, `_CLIENT_SECRET` | `oauthProviders.github` | |
+| `IDP_SSO_APPLE_CLIENT_ID`, `_TEAM_ID`, `_KEY_ID`, `_PRIVATE_KEY_B64` | `oauthProviders.apple` | |
+| `IDP_SSO_LINKEDIN_CLIENT_ID`, `_CLIENT_SECRET` | `oauthProviders.linkedin` | |
+| `IDP_SSO_BASE_CALLBACK_URL` | `sso.baseCallbackUrl` | required once a provider is configured |
+| `IDP_SSO_ALLOWED_REDIRECT_ORIGINS` | `sso.allowedRedirectOrigins` | list; required once a provider is configured |
+| `IDP_S2S_BOOTSTRAP_SECRETS` | `serviceMesh.bootstrapSecrets` | `name=secret,name=secret`; a pair without `=` throws |
+| `IDP_S2S_BOOTSTRAP_SECRET` | `serviceMesh.bootstrapSecret` | legacy shared secret |
+| `IDP_S2S_TOKEN_MODE` | `serviceMesh.tokenMode` | `token` |
+| `IDP_S2S_OWN_SERVICE_NAME` | `serviceMesh.ownServiceName` | |
+| `IDP_RATE_LIMIT_ENABLED` | `rateLimiting.enabled` | `true` |
+| `IDP_RATE_LIMIT_ADAPTER` | `rateLimiting.adapter` | `memory` |
+| `IDP_MAGIC_LINK_ALLOW_SIGNUP` | `magicLink.allowSignupViaMagicLink` | `true` |
+| `IDP_WEBAUTHN_RP_ID`, `_RP_NAME`, `_ORIGIN` | `webauthn` | populated only when `IDP_WEBAUTHN_RP_ID` is set (`rpName` default `App`); a single origin |
+| `IDP_WEBHOOK_URL`, `IDP_WEBHOOK_SECRET` | `webhooks.endpoints[0]` | one endpoint only |
+
+Everything else is code-only: `session.reresolveClaimsOnRefresh`/`recentAuthMaxAgeSeconds`/
+`absoluteLifetimeSeconds`/`refreshReuseGraceSeconds`, `registration.acceptMetadata`,
+`oauth2.requirePkce`, `sso.providerTimeoutMs`, `serviceMesh.allowedServiceNames`/`sharedSecret`/
+`allowLegacySecretCallers`, `webauthn.allowCredentialsByEmail`, `mfa.lockout`,
+`security.verificationCodeLockout`, `hookTimeoutMs`, `ttls`, the webhook endpoint's `events` /
+`includeCredentials`, and the per-rule rate-limit thresholds (override `{ max, windowSeconds }` in
+code). Because the env-built webhook endpoint has no `includeCredentials`, credential fields are
+stripped from its deliveries — configure `config.webhooks.endpoints` in code if that endpoint sends
+your emails.
 
 ## `IdpConfig` shape
 
 ```ts
 interface IdpConfig {
-  issuer: string; // required — this IDP's URL, used as the JWT `iss` claim
+  issuer: string; // required — this IDP's URL, used as the JWT `iss` claim (and its origin is always a trusted CSRF origin)
 
   // Required unless storage.factory is provided.
   mongo?: ({ uri: string } | { connection: unknown }) & { skipTransactionCheck?: boolean };
@@ -122,37 +197,52 @@ interface IdpConfig {
   cache?: {
     adapter?: 'memory' | 'redis';       // default 'memory'
     keyPrefix?: string;                  // default 'idp:'
-    redis?: { host: string; port: number; password?: string; db?: number; keepAliveMs?: number };
+    redis?: {
+      host: string; port: number; username?: string; password?: string; db?: number;
+      tls?: boolean | Record<string, unknown>; // true, or ioredis TLS options — use it off the local network
+      keepAliveMs?: number;              // default 10_000
+    };
   };
 
-  signingKeys: { keys: Record<string, SigningKeyEntry> }; // required — at least one ACTIVE/ROTATING key
+  signingKeys: { keys: Record<string, SigningKeyEntry> }; // required — see SigningKeyEntry below
 
   cookies?: {
     secure?: boolean;    // default: NODE_ENV !== 'development'
     sameSite?: 'lax' | 'strict' | 'none'; // default 'lax'
     domain?: string;
+    trustedOrigins?: string[];   // default [] — your frontends' origins (see "CSRF" below)
+    refreshTokenInBody?: boolean; // default true — false keeps the refresh token in its httpOnly cookie only
+  };
+
+  registration?: {
+    acceptMetadata?: boolean; // default false — persist the user-supplied `metadata` from POST /register
   };
 
   session?: {
-    reresolveClaimsOnRefresh?: boolean; // default false — see password-email-auth.md's Refresh section
+    reresolveClaimsOnRefresh?: boolean; // default true (since 0.4.0) — see "Claims are opaque" below
     verifyOnEachRequest?: boolean;      // default true — see middleware.md
+    recentAuthMaxAgeSeconds?: number;   // default 900 — how recent a login requireRecentAuth() demands
+    absoluteLifetimeSeconds?: number;   // default 7_776_000 (90 days) — a login's refresh-token family ends then, however actively refreshed
+    refreshReuseGraceSeconds?: number;  // default 10 — a rotated refresh token replayed within this is only refused; later, it revokes its whole family
   };
 
   ttls?: Partial<{ /* see table below — all in seconds */ }>;
 
   security: {
-    emailHashPepper: string;   // required — HMAC key for the email blind index, non-rotating
-    tokenHashSecret: string;   // required — HMAC key for hashing opaque tokens at rest
+    emailHashPepper: string;   // required, ≥ 32 chars — HMAC key for the email blind index, never rotate
+    tokenHashSecret: string;   // required, ≥ 32 chars — HMAC key for hashing opaque tokens at rest
     maxFailedLoginAttempts?: number;  // default 5
     accountLockDurationMs?: number;   // default 1_800_000 (30 min)
-    bcryptRounds?: number;            // default 12
+    bcryptRounds?: number;            // default 12; integer 10–15
+    allowWeakBcryptRounds?: boolean;  // tests only — allows bcryptRounds down to 4
+    verificationCodeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number }; // defaults 5, 3600, 900
   };
 
   mfa?: {
     issuerLabel?: string;           // default 'App'
     recoveryCodeCount?: number;     // default 10
     enabled?: boolean;              // default true — requires encryptionKey or secretCipher at startup
-    encryptionKey?: string | { id: string; key: string }; // 32 bytes, base64
+    encryptionKey?: string | { id: string; key: string }; // exactly the base64 of 32 bytes
     previousEncryptionKeys?: Array<string | { id: string; key: string }>; // default [] — decrypt only
     secretCipher?: SecretCipher;    // custom (e.g. KMS) — takes precedence over encryptionKey
     requireEncrypted?: boolean;     // default false — refuse plain-text secrets left from <=0.2.x
@@ -160,28 +250,61 @@ interface IdpConfig {
     lockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number }; // defaults 5, 900, 900
   };
   magicLink?: { allowSignupViaMagicLink?: boolean };                // default true
-  webauthn?: { rpID?: string; rpName?: string; origin?: string | string[] }; // no defaults — opt-in
-  oauthProviders?: { google?, github?, microsoft?, apple?, linkedin? };     // see SSO doc
-  sso?: { baseCallbackUrl?: string; allowedRedirectOrigins?: string[] };
-  serviceMesh?: { bootstrapSecret?: string; tokenMode?: 'token' | 'secret' | 'both'; ownServiceName?: string; sharedSecret?: string }; // tokenMode default 'both'
+  webauthn?: {                                                      // no defaults — opt-in
+    rpID?: string; rpName?: string; origin?: string | string[];
+    allowCredentialsByEmail?: boolean; // default false — passkey-login options ignore `email`
+  };
+  oauthProviders?: {                                                // see SSO doc
+    google?: { clientId: string; clientSecret: string };
+    github?: { clientId: string; clientSecret: string };
+    microsoft?: { clientId: string; clientSecret: string; tenant?: string /* default 'common' */; trustEmail?: boolean /* default false */ };
+    apple?: { clientId: string; teamId: string; keyId: string; privateKeyPem: string };
+    linkedin?: { clientId: string; clientSecret: string };
+  };
+  oauth2?: {
+    requirePkce?: 'all' | 'public';  // default 'all' — PKCE (S256) for every client; 'public' exempts confidential clients
+  };
+  sso?: {                            // required once any oauthProviders entry has a clientId
+    baseCallbackUrl?: string;        // absolute — providers redirect to <base>/sso/<provider>/callback
+    allowedRedirectOrigins?: string[]; // exact origins; https, or http only for localhost
+    providerTimeoutMs?: number;      // default 10_000 — each provider call
+  };
+  serviceMesh?: {
+    bootstrapSecrets?: Record<string, string>; // preferred — one registration secret per service name
+    bootstrapSecret?: string;        // legacy shared secret — can only register a name with no key yet
+    allowedServiceNames?: string[];  // restricts which names may register at all
+    tokenMode?: 'token' | 'secret' | 'both'; // default 'token'
+    ownServiceName?: string;
+    sharedSecret?: string;
+    allowLegacySecretCallers?: boolean; // default false — let requireServiceCallerMiddleware accept shared-secret callers
+  };
 
   rateLimiting?: {
     enabled?: boolean;              // default true
     adapter?: 'memory' | 'redis';   // default 'memory'
     keyPrefix?: string;             // default 'ratelimit:'
-    redis?: { host; port; password?; db? };
-    login?: RateLimitRule; loginByEmail?: RateLimitRule; passwordReset?: RateLimitRule;
-    mfaChallenge?: RateLimitRule; refreshToken?: RateLimitRule; magicLink?: RateLimitRule;
+    redis?: { host: string; port: number; username?: string; password?: string; db?: number; tls?: boolean | Record<string, unknown> };
+    // Each a RateLimitRule { max?, windowSeconds? } merged over its default — see rate-limiter-interface.md
+    login?; loginByEmail?; passwordReset?; passwordResetByEmail?; mfaChallenge?; refreshToken?;
+    magicLink?; magicLinkByEmail?; register?; emailVerification?; verificationEmailByEmail?;
+    webauthnAuthentication?; oauth2Token?; ssoInitiate?; serviceKeyRegistration?;
   };
 
   webhooks?: {
-    endpoints?: Array<{ url: string; secret: string }>; // default [] (disabled)
+    endpoints?: Array<{
+      url: string;                  // https (http only for localhost)
+      secret: string;               // ≥ 16 characters
+      events?: string[];            // only these events; default all
+      includeCredentials?: boolean; // default false — reset/magic-link tokens and verification codes are stripped
+    }>;                              // default [] (disabled)
     maxAttempts?: number;      // default 5
     retryBaseDelayMs?: number; // default 500 (doubles each attempt)
     timeoutMs?: number;        // default 5000
+    maxInFlight?: number;      // default 100 — beyond this, events are dropped with a warning
   };
 
   hooks?: AuthHooks;
+  hookTimeoutMs?: number; // default 10_000 — how long a hook is awaited before the request carries on
   logger?: Logger; // default: console-backed logger with { info, warn, error, debug }(obj, msg)
 }
 ```
@@ -200,6 +323,39 @@ cookie-based (browser) login flow locally. Only relevant if you're relying on th
 [Register, Login, Refresh, Logout](../examples/register-login-refresh-logout.md)) never touches
 cookies and is unaffected.
 
+### CSRF: `cookies.trustedOrigins`
+
+A state-changing request (anything but `GET`/`HEAD`/`OPTIONS`) whose credential is a **cookie** —
+the `access_token` session cookie, or the `refresh_token` cookie at `/refresh` and `/logout` — must
+come from a trusted origin, or it's refused with 403 `CSRF_ORIGIN_REJECTED`. `Sec-Fetch-Site:
+same-origin` passes; otherwise the `Origin` header must be the issuer's origin or one of
+`cookies.trustedOrigins`. A request with neither header (a non-browser client) passes, and
+`Authorization: Bearer` requests are never affected. If your frontend lives on another origin than
+the IdP (e.g. `https://app.example.com` against `https://auth.example.com`) and uses cookie
+sessions, list it:
+
+```js
+cookies: { trustedOrigins: ['https://app.example.com'] } // IDP_COOKIE_TRUSTED_ORIGINS
+```
+
+For browser-only apps, also consider `cookies.refreshTokenInBody: false`: the refresh token is then
+never in a JSON response, only in its httpOnly cookie, out of reach of page script.
+
+### Client IPs and `trust proxy`
+
+Every per-IP rate limit keys on `req.ip` (IPv6 clients by their /64, IPv4-mapped addresses as IPv4 —
+see [Rate Limiter Interface](rate-limiter-interface.md#keys)). `req.ip` is only as trustworthy as
+Express's `trust proxy` setting. Behind a load balancer or reverse proxy, set it to the number of
+proxy hops or the proxies' subnet:
+
+```js
+app.set('trust proxy', 1);              // one proxy hop (e.g. a single load balancer)
+// app.set('trust proxy', '10.0.0.0/8'); // or the proxies' subnet
+```
+
+**Never `true`**: that trusts whatever `X-Forwarded-For` the client sends, so anyone can pick a
+fresh IP per request and walk past every per-IP limit. Without a proxy, leave it unset.
+
 ### MFA secret encryption (`config.mfa`)
 
 Since 0.3.0 TOTP secrets are encrypted at rest, and because `mfa.enabled` defaults to `true`,
@@ -209,10 +365,11 @@ Since 0.3.0 TOTP secrets are encrypted at rest, and because `mfa.enabled` defaul
 openssl rand -base64 32   # → IDP_MFA_ENCRYPTION_KEY / config.mfa.encryptionKey
 ```
 
-If the deployment doesn't use TOTP at all, set `mfa.enabled: false` instead (no key needed;
-`setupMfaHandler`/`confirmMfaHandler` then respond 404 `FEATURE_DISABLED`). `mfa.allowPlaintext:
-true` boots without a key for local development only, with a loud warning. Format, rotation, and
-migrating secrets written by 0.2.x: [MFA](mfa.md#secret-encryption-at-rest).
+The key must be exactly the base64 of 32 bytes — trailing garbage is refused (it used to be
+ignored). If the deployment doesn't use TOTP at all, set `mfa.enabled: false` instead (no key
+needed; `setupMfaHandler`/`confirmMfaHandler` then respond 404 `FEATURE_DISABLED`).
+`mfa.allowPlaintext: true` boots without a key for local development only, with a loud warning.
+Format, rotation, and migrating secrets written by 0.2.x: [MFA](mfa.md#secret-encryption-at-rest).
 
 ### `SigningKeyEntry`
 
@@ -223,6 +380,10 @@ interface SigningKeyEntry {
   status: 'ACTIVE' | 'ROTATING' | 'RETIRED' | 'REVOKED';
 }
 ```
+
+Every key is checked at startup: it must be an RSA key (tokens are RS256) of at least 2048 bits,
+both PEMs must parse, a `privateKey` must actually belong to its `publicKey`, and `status` must be
+one of the four values. At least one `ACTIVE` or `ROTATING` key must have a `privateKey`.
 
 Exactly one key should normally be `ACTIVE`; `getActiveSigningKey()` (used internally for every
 token issuance) prefers `ACTIVE` and falls back to `ROTATING` if none is `ACTIVE`. Both `ACTIVE`
@@ -242,7 +403,7 @@ is used for *new* signing/JWKS publication. See [Tokens & Signing (RS256)](token
 |---|---|
 | `accessToken` | 3600 (1h) |
 | `idToken` | 3600 (1h) |
-| `refreshToken` | 2,592,000 (30d) |
+| `refreshToken` | 2,592,000 (30d) — each token; capped by the family's `session.absoluteLifetimeSeconds` |
 | `internalToken` | 30 |
 | `authCode` | 600 (10m) |
 | `revocationCache` | 3600 (1h) |
@@ -263,12 +424,18 @@ untouched as `req.auth.claims` after `authContextMiddleware`. This package never
 shape and ships no scope-matching or permission-checking logic. For login flows that mint a
 session on your behalf (password login, MFA-verify, SSO callback, magic-link verify, WebAuthn
 login), configure `hooks.resolveAuthContext(user, ctx)` to build that `claims` object — called
-synchronously right before token issuance, defaults to `() => ({})`.
+right before token issuance, defaults to `() => ({})`.
 
-The `User` record handed to `resolveAuthContext` has no generic field for your own app data
-(a `role`, an RBAC `capabilities` array, ...) — see
-[Storing App-Specific User Data](../examples/consumer-managed-app-data.md) for the intended
-pattern: a consumer-owned collection joined by `user.id`, looked up inside this hook.
+Since 0.4.0 `POST /refresh` calls it again on every refresh (`session.reresolveClaimsOnRefresh`,
+default `true`, with `ctx.method: 'refresh'`), so a demotion or suspension in your app takes effect
+at the next access-token rotation. Keep the hook fast. Set it `false` to carry the login-time
+`claims` forward verbatim for the whole session family (up to `session.absoluteLifetimeSeconds`).
+
+The `User` record handed to `resolveAuthContext` does carry a generic `metadata` object, but no
+route lets a user edit it, and `POST /register` writes it only with `registration.acceptMetadata:
+true` — in which case it's attacker-controlled and must never hold a role or tenant. For your own
+app data (a `role`, an RBAC `capabilities` array, ...) see
+[Storing App-Specific User Data](../examples/consumer-managed-app-data.md).
 
 ## What this package deliberately does not do
 
@@ -281,35 +448,45 @@ pattern: a consumer-owned collection joined by `user.id`, looked up inside this 
 ## Event hooks (`config.hooks`)
 
 All hooks are optional and default to no-ops. Every hook in the table below **except
-`resolveAuthContext`** is awaited-but-never-thrown: a hook that throws is logged (`logger.warn`)
-and swallowed, never breaking the request it's attached to (`safeInvokeHook` in
-`src/hooks/index.js`).
+`resolveAuthContext`** is invoked through a safety net (`safeInvokeHook` in `src/hooks/index.js`):
+a hook that throws is logged (`logger.warn`) and swallowed, never breaking the request it's
+attached to, and a hook is awaited for at most `hookTimeoutMs` (default 10 s) — after that the
+request carries on and the hook keeps running in the background, so a hung mail API can't stall a
+login.
+
+On the endpoints that must not reveal whether an account exists — register, resend verification,
+forgot password, magic-link request — the email hooks (`onVerificationEmailRequested`,
+`onPasswordResetRequested`, `onMagicLinkRequested`) and their audit events are **started but not
+awaited**, since waiting for an email to be sent made those responses measurably slower for real
+accounts. Their first synchronous step still runs before the response. In serverless runtimes, make
+those hooks hand off quickly (enqueue rather than send inline).
 
 **`resolveAuthContext` is the one exception — it is not wrapped in that safety net.** It's called
-directly (`await hooks.resolveAuthContext(user, ctx)`, no try/catch) from every login path that
-mints a session. A throwing/rejecting `resolveAuthContext` propagates and turns that login/SSO/
-magic-link/WebAuthn request into an error response instead of being swallowed. It also isn't in
-`defaultHooks()` at all — omitting it entirely is equivalent to it resolving `{}` (no claims), not
-to a registered no-op.
+directly (`await hooks.resolveAuthContext(user, ctx)`, no try/catch, no timeout) from every login
+path that mints a session, and from `/refresh` while `reresolveClaimsOnRefresh` is on. A
+throwing/rejecting `resolveAuthContext` propagates and turns that request into an error response
+instead of being swallowed. It also isn't in `defaultHooks()` at all — omitting it entirely is
+equivalent to it resolving `{}` (no claims), not to a registered no-op.
 
 | Hook | Fires on | Payload |
 |---|---|---|
-| `onAuditLog(event)` | Every audit-worthy action | `{ action, ...eventFields, timestamp }` — `action` values include `REGISTERED`, `LOGIN`, `LOGOUT`, `LOGOUT_ALL`, `EMAIL_VERIFIED`, `VERIFICATION_TOKEN_REGENERATED`, `PASSWORD_RESET`, `PASSWORD_CHANGED`, `ACCOUNT_LOCKED`, `PROFILE_UPDATED`, `ACCOUNT_DELETED`, `SESSION_REVOKED`, `SESSIONS_REVOKED_ALL`, `TOKEN_REFRESHED`, `MAGIC_LINK_REQUESTED`, `MAGIC_LINK_LOGIN`, `WEBAUTHN_CREDENTIAL_REGISTERED`, `WEBAUTHN_LOGIN`, `MFA_VERIFIED`, `MFA_LOCKED` (see [MFA](mfa.md#per-account-lockout)), plus OAuth2/OIDC/SSO/MFA-setup actions |
-| `onVerificationEmailRequested` | Registration and resend-verification | `{ email, firstName?, lastName?, verificationToken, verificationCode }` |
-| `onPasswordResetRequested` | Forgot-password | `{ email, resetToken, firstName?, lastName? }` |
+| `onAuditLog(event)` | Every audit-worthy action | `{ action, ...eventFields, timestamp }` — `action` values include `REGISTERED`, `REGISTRATION_RESTARTED`, `EMAIL_VERIFIED`, `EMAIL_VERIFICATION_LOCKED`, `VERIFICATION_TOKEN_REGENERATED`, `LOGIN`, `LOGOUT`, `LOGOUT_ALL`, `TOKEN_REFRESHED`, `REFRESH_TOKEN_REUSE_DETECTED`, `PASSWORD_RESET`, `PASSWORD_CHANGED`, `ACCOUNT_LOCKED`, `PROFILE_UPDATED`, `ACCOUNT_DELETED`, `SESSION_REVOKED`, `SESSIONS_REVOKED_ALL`, `MAGIC_LINK_REQUESTED`, `MAGIC_LINK_LOGIN`, `MAGIC_LINK_MFA_REQUIRED`, `WEBAUTHN_CREDENTIAL_REGISTERED`, `WEBAUTHN_CREDENTIAL_DELETED`, `WEBAUTHN_LOGIN`, `MFA_SETUP_INITIATED`, `MFA_ENABLED`, `MFA_DISABLED`, `MFA_RECOVERY_CODES_REGENERATED`, `MFA_VERIFIED`, `MFA_LOCKED` (see [MFA](mfa.md#per-account-lockout)), `SSO_INITIATED`, `SSO_LOGIN`, `SSO_REGISTERED`, `SSO_PROVIDER_LINKED`, `SSO_PENDING_ACCOUNT_CLAIMED`, `SSO_MFA_REQUIRED`, `OAUTH2_AUTHORIZE`, `OAUTH2_CONSENT_GRANTED`, `OAUTH2_CONSENT_DENIED`, `OAUTH2_TOKEN_ISSUED`, `OAUTH2_TOKEN_REVOKED`, `OAUTH2_CODE_REUSE_DETECTED`, `CONSENT_REVOKED`, `END_SESSION`, the `OAUTH_CLIENT_*` admin actions, and `SERVICE_KEY_REGISTERED`/`SERVICE_KEY_REGISTRATION_REFUSED`/`SERVICE_KEY_REVOKED` |
+| `onVerificationEmailRequested` | Registration (including re-registering a still-pending address) and resend-verification — not awaited | `{ email, firstName?, lastName?, verificationToken, verificationCode }` |
+| `onPasswordResetRequested` | Forgot-password — not awaited | `{ email, resetToken, firstName?, lastName? }` |
 | `onPasswordChanged` | Password change/reset completed | `{ userId, email, firstName, lastName, locale, when, deviceInfo, ipAddress }` |
 | `onSuspiciousActivityDetected` | Account locked after too many failed logins | `{ userId, email, firstName, lastName, locale, when, failedAttempts, unlocksAt }` |
 | `onNewDeviceLogin` | Login from a browser/OS combination not seen before for this user | `{ userId, email, firstName, lastName, locale, when, deviceInfo, ipAddress }` |
-| `onMagicLinkRequested` | Magic-link login requested | `{ email, magicLinkToken, firstName?, lastName?, isNewUser }` |
-| `resolveAuthContext(user, ctx)` | Password login, MFA-verify, SSO callback, magic-link verify, WebAuthn login | Returns `{ claims }`; `ctx = { isNewUser, isNewLink?, method?, provider?, extra? }` |
+| `onMagicLinkRequested` | Magic-link login requested — not awaited | `{ email, magicLinkToken, firstName?, lastName?, isNewUser }` |
+| `resolveAuthContext(user, ctx)` | Password login, MFA-verify, SSO callback, magic-link verify, WebAuthn login, and `/refresh` (while `reresolveClaimsOnRefresh`) | Returns `{ claims }`; `ctx = { isNewUser, isNewLink?, method?, provider?, extra? }`. `method` is `password`, `mfa`, `magic_link`, `webauthn`, `webauthn-mfa` or `refresh`; SSO passes `provider` instead. SSO's `extra` holds up to 10 short string query params from the initiating request — attacker-controllable, never trust them |
 
 This package never talks to a message bus, SMTP server, or push provider directly — wire your own
 inside these hooks. See [Outbound Webhooks](webhooks.md) for the additive HTTP-delivery mechanism
-built on top of these same hooks.
+built on top of these same hooks (credential fields are stripped from deliveries unless the
+endpoint sets `includeCredentials`).
 
 ## Related
 
-- [Errors](errors.md) — every thrown error is an `IdpError`.
+- [Errors](errors.md) — every request-time error is an `IdpError`; mount `idpErrorHandler()`.
 - [Tokens & Signing (RS256)](tokens-rs256.md)
 - [Repository Adapters](repository-adapters.md) — the `storage.factory` extension point.
 - [Cache Interface](cache-interface.md), [Rate Limiter Interface](rate-limiter-interface.md)
