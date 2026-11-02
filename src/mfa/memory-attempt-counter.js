@@ -11,6 +11,7 @@ export class MemoryAttemptCounterRepository {
     constructor({ now = () => Date.now() } = {}) {
         this._now = now;
         this._store = new Map(); // key -> { count, windowExpiresAt, lockedUntil }
+        this._writes = 0;
     }
 
     async get(key) {
@@ -30,6 +31,8 @@ export class MemoryAttemptCounterRepository {
             : { ...prev, count: prev.count + 1 };
         if (entry.count >= max && entry.lockedUntil === null) entry.lockedUntil = now + lockSeconds * 1000;
         this._store.set(key, entry);
+        // Keys can be chosen by callers (e.g. an address): drop expired entries now and then, so the map doesn't grow without bound.
+        if ((this._writes += 1) % 1000 === 0) await this.pruneExpired();
         return toResult(entry);
     }
 

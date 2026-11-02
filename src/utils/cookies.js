@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import { IdpError } from '../errors/idp-error.js';
 import { hashOpaqueToken, opaqueTokenHashes, HASH_PURPOSES } from '../signing/token.service.js';
 
@@ -104,12 +103,6 @@ function allCookieValues(req, name) {
     return values;
 }
 
-const bytesEqual = (a, b) => {
-    const x = Buffer.from(a);
-    const y = Buffer.from(b);
-    return x.length === y.length && crypto.timingSafeEqual(x, y);
-};
-
 /**
  * The refresh token from its cookie: the one value whose keyed hash its binding cookie holds. Values
  * without a matching binding (planted — the binding is host-only) are ignored, so a planted cookie
@@ -119,13 +112,17 @@ const bytesEqual = (a, b) => {
  */
 export function readRefreshCookie(state, req) {
     const names = refreshCookieNames(state);
-    const tokens = [...new Set(allCookieValues(req, names.token))];
-    const bindings = allCookieValues(req, names.binding);
-    if (tokens.length === 0 || bindings.length === 0) return undefined;
-    const bound = tokens.filter((token) => {
-        const expected = opaqueTokenHashes(state, token, HASH_PURPOSES.REFRESH_COOKIE_BINDING);
-        return bindings.some((binding) => expected.some((h) => bytesEqual(h, binding)));
-    });
+    const bindings = new Set(allCookieValues(req, names.binding));
+    // A browser holds one host-only binding; several can only be forged (or, with cookies.domain, planted).
+    if (bindings.size === 0 || (bindings.size > MAX_BINDINGS(state))) return undefined;
+    const tokens = [...new Set(allCookieValues(req, names.token))].slice(0, MAX_REFRESH_VALUES);
+    // One keyed hash per token and key, looked up in the set (linear; both values come from the client,
+    // so a constant-time comparison protects nothing here).
+    const bound = tokens.filter((token) => opaqueTokenHashes(state, token, HASH_PURPOSES.REFRESH_COOKIE_BINDING).some((h) => bindings.has(h)));
     if (bound.length > 1) throw COOKIE_CONFLICT();
     return bound[0];
 }
+
+/** How many refresh-cookie values are considered at all (a real browser sends one or two). */
+const MAX_REFRESH_VALUES = 8;
+const MAX_BINDINGS = (state) => (state.config.cookies?.domain ? MAX_REFRESH_VALUES : 1);

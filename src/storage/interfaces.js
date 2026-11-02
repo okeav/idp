@@ -110,8 +110,8 @@
  * @property {(kind: string, code: string, userId: string) => Promise<object|null>} consumeByCode
  * @property {(kind: string, by: {tokenHash?: string, verificationCode?: string}, userId: string) => Promise<object|null>} findActive -
  *   a live (unused, unexpired) token WITHOUT consuming it
- * @property {(kind: string, userId: string) => Promise<void>} clearCodes - null the `verificationCode` of every row
- *   (kills guessable codes, keeps unguessable links)
+ * @property {(kind: string, userId: string) => Promise<void>} [clearCodes] - null the `verificationCode` of every row
+ *   (kills guessable codes, keeps unguessable links). No longer called by idp-core; optional.
  * @property {(kind: string, userId: string, input: object) => Promise<void>} replaceForUser - ATOMIC: the one live
  *   token of `kind` for the user (password_reset, magic_link), even under concurrent requests
  * @property {(kind: string, userId: string) => Promise<void>} deleteAllForUser
@@ -181,5 +181,8 @@ export function assertStorageContract(storage) {
         for (const m of methods) if (typeof storage?.[repo]?.[m] !== 'function') missing.push(`${repo}.${m}`);
     }
     if (typeof storage?.close !== 'function') missing.push('close');
+    if (storage?.attemptCounterRepository) {
+        for (const m of ['get', 'recordFailure', 'reset']) if (typeof storage.attemptCounterRepository[m] !== 'function') missing.push(`attemptCounterRepository.${m}`);
+    }
     if (missing.length) throw new Error(`Storage adapter is missing required methods: ${missing.join(', ')} — see src/storage/interfaces.js`);
 }

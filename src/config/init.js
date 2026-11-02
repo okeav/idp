@@ -46,6 +46,8 @@ export async function initIdentityProvider(config) {
     assertMfaSecretConfig(resolved.mfa, mfaCipher, logger);
     assertLockoutConfig('mfa.lockout', resolved.mfa.lockout);
     assertLockoutConfig('security.verificationCodeLockout', resolved.security.verificationCodeLockout);
+    const totalCap = resolved.security.verificationCodeLockout.maxTotalFailedAttempts;
+    if (!Number.isInteger(totalCap) || totalCap < 1) throw new Error(`config.security.verificationCodeLockout.maxTotalFailedAttempts must be a positive integer (got ${totalCap})`);
     assertLockoutConfig('security.passwordChangeLockout', resolved.security.passwordChangeLockout);
     assertSsoConfig(resolved);
     if (!Number.isInteger(resolved.hookTimeoutMs) || resolved.hookTimeoutMs < 1) throw new Error(`config.hookTimeoutMs must be a positive integer (got ${resolved.hookTimeoutMs})`);

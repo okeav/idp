@@ -132,18 +132,15 @@ export const DEFAULT_RATE_LIMITS = Object.freeze({
     serviceKeyRegistrationPerIp: { max: 20, windowSeconds: 15 * 60 },
 });
 
-// Per-ACCOUNT limit on wrong email-verification codes/tokens. When it is used
-// up, every outstanding verification code for the account is deleted, so a
-// 6-digit code can be guessed at most `maxFailedAttempts` times before the
-// owner has to request a new one (which goes to their inbox, not the attacker's).
 /**
  * Wrong 6-digit email-verification codes: `maxFailedAttempts` per verification ticket, and as many
- * again for attempts without one (per address). Window and lock are never shorter than the code's
- * lifetime (ttls.emailVerification — enforced where they are used), so a code gets a fixed number of
- * guesses for as long as it lives.
+ * again for attempts without one (per address), each for at least the code's lifetime; and at most
+ * `maxTotalFailedAttempts` per address in all (a year-long cap), after which only the link works.
  */
 export const DEFAULT_VERIFICATION_CODE_LOCKOUT = Object.freeze({
     maxFailedAttempts: 5,
+    // Wrong codes ever accepted for checking per address, all budgets together — then link only.
+    maxTotalFailedAttempts: 20,
     windowSeconds: 24 * 60 * 60,
     lockSeconds: 24 * 60 * 60,
 });

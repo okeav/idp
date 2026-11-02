@@ -183,11 +183,12 @@ export interface IdpConfig {
         /** Tests only: allow bcryptRounds down to 4. */
         allowWeakBcryptRounds?: boolean;
         /**
-         * Per-address limit on wrong 6-digit email-verification codes (the link token has no budget). When
-         * used up, the outstanding codes are cleared; the emailed links keep working. Defaults: 5 in 3600s,
-         * locked 900s.
+         * Wrong 6-digit email-verification codes (the link has no budget): `maxFailedAttempts` per
+         * verification ticket and per address without one, each over at least the code's lifetime (window
+         * and lock are raised to `ttls.emailVerification`), and `maxTotalFailedAttempts` per address in all
+         * (a year-long cap) — then only the link works. Defaults: 5, 24h, 24h, 20.
          */
-        verificationCodeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number };
+        verificationCodeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number; maxTotalFailedAttempts?: number };
         /** Per-account limit on wrong current passwords at /password/change. Defaults: 5 in 3600s, locked 3600s. */
         passwordChangeLockout?: { maxFailedAttempts?: number; windowSeconds?: number; lockSeconds?: number };
     };
@@ -368,7 +369,7 @@ export interface AuditLogEvent {
 
 export interface AuthHooks {
     onAuditLog?(event: AuditLogEvent): void | Promise<void>;
-    onVerificationEmailRequested?(payload: { email: string; firstName?: string; lastName?: string; verificationToken: string; verificationCode: string }): void | Promise<void>;
+    onVerificationEmailRequested?(payload: { email: string; firstName?: string; lastName?: string; verificationToken: string; verificationCode: string | null }): void | Promise<void>;
     onPasswordResetRequested?(payload: { email: string; resetToken: string; firstName?: string; lastName?: string }): void | Promise<void>;
     onPasswordChanged?(payload: { userId: string; email: string; firstName: string; lastName: string; locale: string; when: string; deviceInfo: string; ipAddress: string }): void | Promise<void>;
     onSuspiciousActivityDetected?(payload: { userId: string; email: string; firstName: string; lastName: string; locale: string; when: string; failedAttempts: number; unlocksAt: string }): void | Promise<void>;

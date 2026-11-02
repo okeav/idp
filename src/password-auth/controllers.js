@@ -181,7 +181,7 @@ export async function registerHandler(req, res, next) {
             // password on a live account.
             const contested = await state.storage.userRepository.updateByIdIfStatus(existing.id, IDENTITY_STATUS.PENDING_VERIFICATION, { passwordHash, registrationContested: true });
             if (!contested) return answer();
-            const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, existing.id, passwordHash);
+            const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, existing.id, passwordHash, email);
             auditLogDetached(state.logger, state.hooks, 'REGISTRATION_REPEATED', { userId: String(existing.id) });
             invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
             return answer();
@@ -200,7 +200,7 @@ export async function registerHandler(req, res, next) {
             metadata: state.config.registration.acceptMetadata === true ? (metadata || {}) : {},
         });
 
-        const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, user.id, passwordHash);
+        const { token: verificationToken, verificationCode } = await createEmailVerificationToken(state, user.id, passwordHash, email);
 
         auditLogDetached(state.logger, state.hooks, 'REGISTERED', { userId: String(user.id), email });
         invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', { email, firstName, lastName, verificationToken, verificationCode });
@@ -212,7 +212,9 @@ export async function registerHandler(req, res, next) {
 }
 
 const INVALID_VERIFICATION = () => new IdpError({ code: 'INVALID_OR_EXPIRED_TOKEN', httpStatus: 400, message: 'Invalid or expired verification token' });
-const VERIFICATION_LOCKED = () => new IdpError({ code: 'VERIFICATION_LOCKED', httpStatus: 429, message: 'Too many failed verification attempts — request a new code.' });
+const VERIFICATION_LOCKED = () => new IdpError({ code: 'VERIFICATION_LOCKED', httpStatus: 429, message: 'Too many failed verification attempts — use the link in the verification email.' });
+/** The lifetime cap's window: long enough to outlive any pending registration's codes. */
+const CODE_LIFETIME_CAP_SECONDS = 365 * 24 * 60 * 60;
 const REGISTRATION_PASSWORD_REQUIRED = () => new IdpError({
     code: 'REGISTRATION_PASSWORD_REQUIRED',
     httpStatus: 400,
@@ -276,18 +278,27 @@ async function issueVerificationTicket(state, req, res, email) {
 /** The password a verification activates: the one bound to its code (rows from before 0.4.0: the account's). */
 const boundPasswordHash = (row, user) => row.passwordHash ?? user.passwordHash ?? null;
 
+/**
+ * At most this many 6-digit codes are issued per address per code lifetime; later verification emails
+ * carry only the link (`verificationCode: null`). Every live code is a target for each guess (a
+ * contested registration keeps several live), so this bounds how many a guess is tried against.
+ */
+const MAX_CODES_PER_ADDRESS = 3;
+
 /** `passwordHash`: the password of the registration this code verifies — the one it activates. */
-async function createEmailVerificationToken(state, userId, passwordHash) {
+async function createEmailVerificationToken(state, userId, passwordHash, email) {
+    const ttl = state.config.ttls.emailVerification;
     const token = generateOpaqueToken(32);
     const tokenHash = hashOpaqueToken(state, token, HASH_PURPOSES.EMAIL_VERIFICATION_LINK);
-    const verificationCode = crypto.randomInt(100000, 1000000).toString();
+    const quota = await state.attemptCounters.recordFailure(`verification-codes:${emailKey(state, email)}`, { max: MAX_CODES_PER_ADDRESS, windowSeconds: ttl, lockSeconds: ttl });
+    const verificationCode = quota.count <= MAX_CODES_PER_ADDRESS ? crypto.randomInt(100000, 1000000).toString() : null;
     await state.storage.verificationTokenRepository.create('email_verification', {
         user: userId,
         tokenHash,
         // Stored as an HMAC like every other token — a database read must not yield a usable code.
-        verificationCode: hashOpaqueToken(state, verificationCode, HASH_PURPOSES.EMAIL_VERIFICATION_CODE),
+        verificationCode: verificationCode ? hashOpaqueToken(state, verificationCode, HASH_PURPOSES.EMAIL_VERIFICATION_CODE) : null,
         passwordHash: passwordHash ?? null,
-        expiresAt: new Date(Date.now() + state.config.ttls.emailVerification * 1000),
+        expiresAt: new Date(Date.now() + ttl * 1000),
     });
     return { token, verificationCode };
 }
@@ -315,8 +326,10 @@ export async function verifyEmailHandler(req, res, next) {
                     // is now the code's HMAC and would otherwise be accepted as-is.
                     ?? (LEGACY_CODE.test(code) ? await tokens.findActive('email_verification', { verificationCode: code }, user.id) : null);
             if (!row) throw INVALID_VERIFICATION();
-            if (user.registrationContested && !(await verifyPassword(password ?? '', boundPasswordHash(row, user)))) {
-                throw REGISTRATION_PASSWORD_REQUIRED();
+            if (user.registrationContested) {
+                // No password: say what's missing. A wrong one: the same answer as a wrong code.
+                if (!password) throw REGISTRATION_PASSWORD_REQUIRED();
+                if (!(await verifyPassword(password, boundPasswordHash(row, user)))) throw INVALID_VERIFICATION();
             }
             const consumed = token
                 ? await tokens.consumeByHash('email_verification', row.tokenHash, user.id)
@@ -333,13 +346,19 @@ export async function verifyEmailHandler(req, res, next) {
         const pendingUser = user?.status === IDENTITY_STATUS.PENDING_VERIFICATION ? user : null;
         const ticket = token ? null : await presentedTicket(state, email, typeof req.body.ticket === 'string' ? req.body.ticket : readCookie(req, ticketCookie(state)));
         const budgetKey = ticket ? `email-verification:ticket:${ticket.hash}` : `email-verification:${emailKey(state, email)}`;
+        // Inside that budget, every guess also counts toward the address's LIFETIME cap
+        // (`maxTotalFailedAttempts`, ticket or not): however long someone keeps registering and guessing,
+        // a code for this address is guessed at most that many times — then only the link works.
+        const capped = () => withAttemptBudget(state, `email-verification-total:${emailKey(state, email)}`, {
+            maxFailedAttempts: state.config.security.verificationCodeLockout.maxTotalFailedAttempts, windowSeconds: CODE_LIFETIME_CAP_SECONDS, lockSeconds: CODE_LIFETIME_CAP_SECONDS,
+        }, { lockedError: VERIFICATION_LOCKED }, verify);
         const found = token ? await verify() : await withAttemptBudget(state, budgetKey, codeBudgetLimits(state), {
             lockedError: VERIFICATION_LOCKED,
             onLocked: async () => {
                 if (!pendingUser) return;
                 await auditLog(state.logger, state.hooks, 'EMAIL_VERIFICATION_LOCKED', { userId: String(pendingUser.id), withTicket: Boolean(ticket) });
             },
-        }, verify);
+        }, capped);
 
         const activated = await state.storage.userRepository.updateByIdIfStatus(user.id, IDENTITY_STATUS.PENDING_VERIFICATION, {
             status: IDENTITY_STATUS.ACTIVE, failedLoginAttempts: 0, lockUntil: null,
@@ -367,8 +386,8 @@ export async function resendVerificationEmailHandler(req, res, next) {
         await enforceRateLimit(state, `verification-email:${emailKey(state, email)}`, state.config.rateLimiting.verificationEmailByEmail, { failMode: 'closed' });
 
         // Same answer — and the same timing — for unknown, already-verified and pending addresses: the
-        // lookup and the writes run after the response (see runAfterResponse). The ticket too: it only
-        // becomes a real one, afterwards, if a code is sent.
+        // lookup and the writes run after the response (see runAfterResponse). The ticket is issued the
+        // same way for every address (see issueVerificationTicket).
         const ticket = await issueVerificationTicket(state, req, res, email);
         res.json({ status: 'ok', verificationTicket: ticket });
         runAfterResponse(state, 'Resend of the verification email', async () => {
@@ -378,7 +397,7 @@ export async function resendVerificationEmailHandler(req, res, next) {
             // Normally only the newest code works. While registrations compete for the address, each
             // one's code stays valid (the new one is bound to the most recent registration's password).
             if (!user.registrationContested) await state.storage.verificationTokenRepository.deleteAllForUser('email_verification', user.id);
-            const { token, verificationCode } = await createEmailVerificationToken(state, user.id, user.passwordHash);
+            const { token, verificationCode } = await createEmailVerificationToken(state, user.id, user.passwordHash, email);
 
             auditLogDetached(state.logger, state.hooks, 'VERIFICATION_TOKEN_REGENERATED', { userId: String(user.id) });
             invokeHookDetached(state.logger, state.hooks, 'onVerificationEmailRequested', {
@@ -640,7 +659,13 @@ export async function logoutHandler(req, res, next) {
         // Every browser request, body token or not: logout clears the session cookies, so a cross-site
         // form posting any token would otherwise sign the victim out (logout CSRF).
         assertTrustedOrigin(state, req);
-        const refreshTokenValue = req.body?.refreshToken || readRefreshCookie(state, req);
+        let refreshTokenValue;
+        try {
+            refreshTokenValue = req.body?.refreshToken || readRefreshCookie(state, req);
+        } catch (err) {
+            clearSessionCookies(req, res, state); // conflicting cookies (cookies.domain): still sign the browser out
+            throw err;
+        }
         if (!refreshTokenValue) {
             // Nothing usable to revoke (no cookie, or only one planted without its binding): the browser's
             // cookies are cleared all the same.

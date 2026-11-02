@@ -145,8 +145,8 @@ test('the registering browser verifies with its ticket cookie after a stranger u
         const res = await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode }, { Cookie: cookie });
         assert.equal(res.status, 200);
         assert.ok(res.headers.getSetCookie().some((c) => c.startsWith('__Host-verification_ticket=;')), 'ticket cleared');
-        const user = await temp.state.storage.userRepository.findByEmail(email);
-        assert.equal(await temp.state.storage.verificationTokenRepository.findActive('verification_ticket', { tokenHash: hashOpaqueToken(temp.state, cookie.split('=')[1], HASH_PURPOSES.EMAIL_VERIFICATION_TICKET) }, user.id), null, 'tickets deleted');
+        // The ticket is retired: presenting it again finds no ticket budget (the address budget is locked).
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: '000000' }, { Cookie: cookie })).status, 429);
     });
 });
 
@@ -180,9 +180,9 @@ test('at most 5 real tickets per account and code lifetime — more requests get
             tickets.push((await (await post(temp.baseUrl, '/register/resend-verification', { email })).json()).verificationTicket);
             await waitForHookCall(temp, 'onVerificationEmailRequested', (c) => c.email === email, { count: i + 1 });
         }
-        const { verificationCode } = lastCode(temp, email);
-        await strangerLocks(temp, email, verificationCode);
-        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, ticket: tickets[5] })).status, 429, 'the 6th ticket is a dummy');
-        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, ticket: tickets[4] })).status, 200, 'the 5th is real');
+        // Later emails carry only the link (at most 3 codes per address): probe the budgets with wrong codes.
+        await strangerLocks(temp, email, '000000');
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: '000000', ticket: tickets[5] })).status, 429, 'the 6th ticket is a dummy: the locked address budget');
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: '000000', ticket: tickets[4] })).status, 400, 'the 5th is real: its own budget');
     });
 });

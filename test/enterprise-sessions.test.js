@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { generate as generateTotp } from 'otplib';
 import { pkcePair } from './helpers/oauth.js';
+import { stubStorage } from './helpers/stub-storage.js';
+import { MemoryAttemptCounterRepository } from '../src/mfa/memory-attempt-counter.js';
 import express from 'express';
 import cookieParserLib from 'cookie-parser';
 import { buildRouter } from '../src/routes/build-router.js';
@@ -280,9 +282,9 @@ test('a caller holding a live ticket keeps it on resend (a used-up quota can\'t 
         const mine = await post(temp.baseUrl, '/register/resend-verification', { email }, { Cookie: cookie });
         assert.equal((await mine.json()).verificationTicket, cookie.split('=')[1]);
         await waitForHookCall(temp, 'onVerificationEmailRequested', (c) => c.email === email, { count: 7 });
-        const { verificationCode } = lastCode(temp, email);
-        await strangerLocks(temp, email, verificationCode);
-        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode }, { Cookie: cookie })).status, 200);
+        // The address budget is locked; the kept ticket still has its own (a wrong code is just wrong).
+        await strangerLocks(temp, email, '000000');
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: '000000' }, { Cookie: cookie })).status, 400);
     });
 });
 
@@ -317,4 +319,93 @@ test('cookies.sessionPath pins the refresh cookie path; it must be an absolute p
         assert.match(res.headers.getSetCookie().find((c) => c.startsWith('__Secure-refresh_token=')), /;\s*Path=\/auth\/session(;|$)/i);
     });
     await assert.rejects(buildTestApp({ config: { cookies: { sessionPath: 'session' } } }), /cookies.sessionPath must be an absolute path/);
+});
+
+// ── review findings (round 5) ────────────────────────────────────────────────
+
+test('at most 3 codes per address per code lifetime: later verification emails carry only the link', async () => {
+    await withTemporaryApp({}, async (temp) => {
+        const email = uniqueEmail('code-cap');
+        await post(temp.baseUrl, '/register', { email, password });
+        for (let i = 2; i <= 4; i += 1) {
+            await post(temp.baseUrl, '/register/resend-verification', { email });
+            await waitForHookCall(temp, 'onVerificationEmailRequested', (c) => c.email === email, { count: i });
+        }
+        const sent = temp.hookCalls.onVerificationEmailRequested.filter((c) => c.email === email);
+        assert.deepEqual(sent.map((c) => c.verificationCode === null), [false, false, false, true]);
+        assert.ok(sent[3].verificationToken, 'the link is always there');
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, token: sent[3].verificationToken })).status, 200);
+    });
+});
+
+test('a lifetime cap on wrong codes per address holds across tickets — then only the link works', async () => {
+    await withTemporaryApp({ config: { security: { ...TEST_SECURITY, verificationCodeLockout: { maxFailedAttempts: 3, windowSeconds: 3600, lockSeconds: 3600, maxTotalFailedAttempts: 4 } } } }, async (temp) => {
+        const email = uniqueEmail('lifetime-cap');
+        const { verificationTicket: t1 } = await (await post(temp.baseUrl, '/register', { email, password })).json();
+        const { verificationTicket: t2 } = await (await post(temp.baseUrl, '/register', { email, password: 'An0ther!Passw0rd' })).json(); // contested: both codes live
+        const { verificationCode, verificationToken } = lastCode(temp, email);
+        const statuses = [];
+        for (const ticket of [t1, t1, t2, t2]) statuses.push((await post(temp.baseUrl, '/register/verify-email', { email, code: '000000', ticket })).status);
+        assert.deepEqual(statuses, [400, 400, 400, 429], 'each ticket is within its own budget; the 4th wrong code uses up the address cap');
+        const res = await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, password: 'An0ther!Passw0rd', ticket: t2 });
+        assert.equal(res.status, 429, 'the cap is spent, whatever ticket');
+        assert.match((await res.json()).message, /use the link/);
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, token: verificationToken, password: 'An0ther!Passw0rd' })).status, 200);
+    });
+});
+
+test('contested registration: a right code with a wrong password answers like a wrong code', async () => {
+    await withTemporaryApp({}, async (temp) => {
+        const email = uniqueEmail('contested-oracle');
+        const { verificationTicket } = await (await post(temp.baseUrl, '/register', { email, password })).json();
+        const { verificationCode } = lastCode(temp, email);
+        await post(temp.baseUrl, '/register', { email, password: 'Att4cker!Passw0rd' });
+        const wrongPassword = await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, password: 'Att4cker!Passw0rd', ticket: verificationTicket });
+        const wrongCode = await post(temp.baseUrl, '/register/verify-email', { email, code: '000000', password: 'Att4cker!Passw0rd', ticket: verificationTicket });
+        assert.equal(wrongPassword.status, 400);
+        assert.deepEqual(await wrongPassword.json(), await wrongCode.json());
+        const noPassword = await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, ticket: verificationTicket });
+        assert.equal((await noPassword.json()).error, 'REGISTRATION_PASSWORD_REQUIRED');
+        assert.equal((await post(temp.baseUrl, '/register/verify-email', { email, code: verificationCode, password, ticket: verificationTicket })).status, 200);
+    });
+});
+
+test('refresh-cookie matching stays cheap and ignores forged extra bindings', async () => {
+    const victim = await browserLogin();
+    const tokens = Array.from({ length: 100 }, (_, i) => `__Secure-refresh_token=t${i}`).join('; ');
+    const bindings = Array.from({ length: 100 }, (_, i) => `__Host-refresh_binding=b${i}`).join('; ');
+    const started = process.hrtime.bigint();
+    const flood = await post(app.baseUrl, '/session/refresh', {}, { Cookie: `${tokens}; ${bindings}`, Origin: ISSUER_ORIGIN });
+    assert.equal(flood.status, 400);
+    assert.ok(Number(process.hrtime.bigint() - started) / 1e6 < 1000);
+    // Two host-only bindings can't come from a browser: nothing is used.
+    const twoBindings = await post(app.baseUrl, '/session/refresh', {}, { Cookie: `${asCookie(victim)}; __Host-refresh_binding=forged`, Origin: ISSUER_ORIGIN });
+    assert.equal((await twoBindings.json()).error, 'REFRESH_TOKEN_REQUIRED');
+});
+
+test('with cookies.domain, logout clears the cookies even when two bound refresh cookies conflict', async () => {
+    await withTemporaryApp({ config: { cookies: { domain: 'idp.test.local', secure: true } } }, async (temp) => {
+        const pairOf = async () => {
+            const email = await registered(temp);
+            const res = await post(temp.baseUrl, '/login', { email, password });
+            return res.headers.getSetCookie().filter((c) => /^__Secure-refresh_(token|binding)=/.test(c)).map((c) => c.split(';')[0]).join('; ');
+        };
+        const res = await post(temp.baseUrl, '/session/logout', {}, { Cookie: `${await pairOf()}; ${await pairOf()}` });
+        assert.equal(res.status, 400);
+        assert.ok(res.headers.getSetCookie().some((c) => c.startsWith('__Secure-refresh_token=;')));
+    });
+});
+
+test('an attempt-counter repository missing a method is refused at startup', async () => {
+    const storage = stubStorage({ attemptCounterRepository: { recordFailure: async () => ({}), reset: async () => {} } });
+    await assert.rejects(buildTestApp({ config: { storage: { factory: async () => storage } } }), /attemptCounterRepository\.get/);
+});
+
+test('the in-process attempt counter prunes expired entries as it goes', async () => {
+    let now = 0;
+    const counters = new MemoryAttemptCounterRepository({ now: () => now });
+    for (let i = 0; i < 999; i += 1) await counters.recordFailure(`k${i}`, { max: 5, windowSeconds: 1, lockSeconds: 1 });
+    now = 5000;
+    await counters.recordFailure('last', { max: 5, windowSeconds: 1, lockSeconds: 1 });
+    assert.equal(counters._store.size, 1);
 });
