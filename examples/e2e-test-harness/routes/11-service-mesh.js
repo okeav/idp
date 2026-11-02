@@ -3,6 +3,7 @@ import { initServiceIdentity, mintServiceToken, verifyServiceTokenRemote } from 
 import { layout } from '../lib/layout.js';
 
 function generateKeypair() {
+    // RSA, >= 2048 bits — idp-core refuses anything weaker (and any private key PEM).
     const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
         modulusLength: 2048,
         publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -11,17 +12,19 @@ function generateKeypair() {
     return { privateKey, publicKey };
 }
 
-export function mountServiceMeshFlow(app, { IDP_BASE_URL, BOOTSTRAP_SECRET }) {
+export function mountServiceMeshFlow(app, { BASE_URL, IDP_BASE_URL, SERVICE_BOOTSTRAP_SECRETS, SHARED_BOOTSTRAP_SECRET }) {
     app.get('/flows/service-mesh', (req, res) => {
         res.send(layout({
             title: '11. Service mesh (S2S JWKS trust)',
             body: `
       <div class="flag">
         <code>initServiceIdentity()</code>'s "which service am I" identity is a client-side singleton (one active identity per process — realistic, since a real backend service really does have exactly one identity). So this page registers Service A, then Service B (which becomes the "current" identity), then mints a token AS B targeting A — all through the real, unmodified public API, done sequentially rather than concurrently.
+        <br><br>
+        Each service registers with <strong>its own</strong> bootstrap secret (<code>serviceMesh.bootstrapSecrets</code> in <code>server.js</code>), which covers only that service's name — so clicking a Register button again simply <em>rotates</em> that service's key (the previous one goes <code>ROTATING</code>, then <code>RETIRED</code>). Names must match <code>^[a-z0-9][a-z0-9-]{0,62}$</code> and are limited to the two below by <code>serviceMesh.allowedServiceNames</code>.
       </div>
 
       <div class="card">
-        <p class="step">Step 1 — register "harness-service-a" (generates a fresh RSA keypair server-side, publishes the public key via <code>/internal/service-keys</code>).</p>
+        <p class="step">Step 1 — register "harness-service-a" (generates a fresh RSA-2048 keypair server-side, publishes the public key via <code>/internal/service-keys</code>).</p>
         <button onclick="register('harness-service-a')">Register Service A</button>
         <pre id="register-a-result" class="result"></pre>
       </div>
@@ -33,21 +36,34 @@ export function mountServiceMeshFlow(app, { IDP_BASE_URL, BOOTSTRAP_SECRET }) {
       </div>
 
       <div class="card">
-        <p class="step">Step 3 — mint an S2S token as B, audience = A.</p>
+        <p class="step">Step 3 — mint an S2S token as B, audience = A (60-second lifetime; tokens without <code>exp</code> or living over 5 minutes are refused).</p>
         <button onclick="mint()">Mint token (B → A)</button>
         <pre id="mint-result" class="result"></pre>
       </div>
 
       <div class="card">
-        <p class="step">Step 4 — verify it against the remote services-JWKS endpoint (this doesn't depend on which identity is "active" — it looks the key up by <code>kid</code>).</p>
+        <p class="step">Step 4 — verify it against the remote services-JWKS endpoint (this doesn't depend on which identity is "active" — it looks the key up by <code>kid</code>). The remote lookup caches the JWKS and force-refreshes on an unknown <code>kid</code> at most every 30 s — so if you re-register (rotate) B and verify within 30 s of the last fetch, wait a moment and retry.</p>
         <button onclick="verify()">Verify token</button>
         <pre id="verify-result" class="result"></pre>
       </div>
 
       <div class="card">
-        <p class="step">Step 5 — fetch the raw JWKS — confirm both services' keys are present.</p>
+        <p class="step">Step 5 — fetch the raw JWKS — confirm both services' keys are present (with their <code>status</code>).</p>
         <button onclick="fetchJwks()">GET /.well-known/services-jwks.json</button>
         <pre id="jwks-result" class="result"></pre>
+      </div>
+
+      <div class="card">
+        <p class="step">Step 6 — call an internal endpoint owned by Service A (<code>GET /internal-demo/service-a/whoami</code>), protected in-process by <code>serviceContextMiddleware()</code> (expects <code>aud</code> = <code>serviceMesh.ownServiceName</code>, here <code>harness-service-a</code>) and <code>requireServiceCallerMiddleware('harness-service-b')</code>. With B's token → 200 and <code>caller.name: harness-service-b</code>; with no token → 401.</p>
+        <button onclick="callA(true)">Call as B (with token)</button>
+        <button class="secondary" onclick="callA(false)">Call without a token</button>
+        <pre id="call-result" class="result"></pre>
+      </div>
+
+      <div class="card">
+        <p class="step">Step 7 — impersonation check: try to register a <em>new</em> key under "harness-service-a" using only the <strong>shared</strong> <code>serviceMesh.bootstrapSecret</code>. Expected: <code>409 SERVICE_NAME_TAKEN</code> — the shared secret only proves "some participating service", so it can claim a name with no key yet, never replace an existing one.</p>
+        <button class="danger" onclick="hijack()">Replace A's key with the shared secret</button>
+        <pre id="hijack-result" class="result"></pre>
       </div>
 
       <script>
@@ -70,16 +86,45 @@ export function mountServiceMeshFlow(app, { IDP_BASE_URL, BOOTSTRAP_SECRET }) {
           const result = await callApi('${IDP_BASE_URL}/.well-known/services-jwks.json');
           showResult('jwks-result', result);
         }
+        async function callA(withToken) {
+          const result = await callApi('/api/service-mesh/call-a', { method: 'POST', body: { withToken } });
+          showResult('call-result', result);
+        }
+        async function hijack() {
+          const result = await callApi('/api/service-mesh/register-shared', { method: 'POST', body: { name: 'harness-service-a' } });
+          showResult('hijack-result', result);
+        }
       </script>`,
         }));
     });
 
+    // Registers with the service's OWN bootstrap secret (rotation allowed for that name only).
     app.post('/api/service-mesh/register', async (req, res) => {
         try {
             const { name } = req.body;
+            const bootstrapSecret = Object.hasOwn(SERVICE_BOOTSTRAP_SECRETS, name) ? SERVICE_BOOTSTRAP_SECRETS[name] : null;
+            if (!bootstrapSecret) return res.status(400).json({ error: `No bootstrap secret configured for '${name}'` });
             const { privateKey } = generateKeypair();
-            const result = await initServiceIdentity({ serviceName: name, privateKeyPem: privateKey, idpBaseUrl: IDP_BASE_URL, bootstrapSecret: BOOTSTRAP_SECRET });
+            const result = await initServiceIdentity({ serviceName: name, privateKeyPem: privateKey, idpBaseUrl: IDP_BASE_URL, bootstrapSecret });
             res.json({ serviceName: name, kid: result.kid });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    // Talks to /internal/service-keys directly (not through initServiceIdentity,
+    // which would also switch this process's identity) with only the shared
+    // secret and a brand-new key, to show the 409.
+    app.post('/api/service-mesh/register-shared', async (req, res) => {
+        try {
+            const { name } = req.body;
+            const { publicKey } = generateKeypair();
+            const r = await fetch(`${IDP_BASE_URL}/internal/service-keys`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-s2s-bootstrap-secret': SHARED_BOOTSTRAP_SECRET },
+                body: JSON.stringify({ name, publicKey: Buffer.from(publicKey, 'utf8').toString('base64') }),
+            });
+            res.status(r.status).json(await r.json().catch(() => null));
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -102,6 +147,19 @@ export function mountServiceMeshFlow(app, { IDP_BASE_URL, BOOTSTRAP_SECRET }) {
             res.json({ verified: true, payload });
         } catch (err) {
             res.status(400).json({ verified: false, error: err.message });
+        }
+    });
+
+    // Plays "service B calling service A": mints a fresh token as the current
+    // identity (B, after step 2) with aud = A, and calls A's protected route.
+    app.post('/api/service-mesh/call-a', async (req, res) => {
+        try {
+            const headers = {};
+            if (req.body?.withToken) headers.Authorization = `Bearer ${mintServiceToken('harness-service-a', { scopes: ['test:read'] })}`;
+            const r = await fetch(`${BASE_URL}/internal-demo/service-a/whoami`, { headers });
+            res.status(r.status).json(await r.json().catch(() => null));
+        } catch (err) {
+            res.status(500).json({ error: err.message });
         }
     });
 }

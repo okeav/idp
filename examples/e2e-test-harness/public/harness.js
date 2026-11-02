@@ -81,3 +81,28 @@ function escapeHtml(s) {
 }
 setInterval(pollActivity, 1500);
 document.addEventListener('DOMContentLoaded', pollActivity);
+
+// ── TOTP convenience (stands in for an authenticator app) ──
+// Flow 6's "Setup MFA" stores the secret here so any page (MFA, magic link,
+// SSO callback, WebAuthn 8c) can compute a current code. Since 0.4.0 each
+// TOTP code is accepted ONCE: after using one (confirm, a login challenge,
+// recovery-code regeneration, disable) wait for the next 30-second step.
+function rememberTotpSecret(secret) {
+  localStorage.setItem('harness.totpSecret', secret);
+}
+async function computeTotpInto(fieldId) {
+  const secret = localStorage.getItem('harness.totpSecret');
+  if (!secret) { alert('Run "Setup MFA" in flow 6 first — the secret is only known after that.'); return; }
+  const res = await fetch('/api/totp/compute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ secret }) });
+  const { code } = await res.json();
+  const field = document.getElementById(fieldId);
+  field.value = code;
+  const secondsLeft = 30 - (Math.floor(Date.now() / 1000) % 30);
+  let note = document.getElementById(fieldId + '-note');
+  if (!note) {
+    note = document.createElement('small');
+    note.id = fieldId + '-note';
+    field.insertAdjacentElement('afterend', note);
+  }
+  note.textContent = ' current step ends in ~' + secondsLeft + 's — a code already used once is refused (INVALID_MFA_CODE): wait for the next step';
+}
